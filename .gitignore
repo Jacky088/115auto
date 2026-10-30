@@ -1,0 +1,8 @@
+.venv/
+data/
+node_modules/
+__pycache__/
+*.pyc
+backend/static/
+web/dist/
+方案.md

@@ -1,0 +1,15 @@
+services:
+  autosave115:
+    build: .
+    # 前端已预构建进 backend/static，构建镜像只需 Python 层（小内存服务器友好）
+    # image: yourname/autosave115:latest   # 推到镜像仓库后可改用镜像名
+    container_name: autosave115
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data          # 数据库 / Cookie / TG session / 日志，备份=复制此目录
+    environment:
+      - TZ=Asia/Shanghai
+      - WEB_USERNAME=admin        # 初始登录用户名（可在网页改密码）
+      - WEB_PASSWORD=admin123     # ⚠️ 部署时务必改成强密码
+    restart: unless-stopped

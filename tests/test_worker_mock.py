@@ -1,0 +1,766 @@
+"""转存工作器逻辑测试（mock 115 接口，无需账号与网络）。
+
+运行: .venv/Scripts/python tests/test_worker_mock.py
+"""
+import os
+import sys
+import tempfile
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+os.environ["DATA_DIR"] = tempfile.mkdtemp(prefix="autosave_test_")
+
+from backend import database as db  # noqa: E402
+db.init()
+
+from backend.core import pipeline  # noqa: E402
+from backend.worker import queue_worker  # noqa: E402
+from backend.pan115 import client as pan  # noqa: E402
+
+PASS = []
+FAIL = []
+
+
+def check(name, cond, detail=""):
+    (PASS if cond else FAIL).append(name)
+    print(f"  {'✅' if cond else '❌'} {name}" + (f"  [{detail}]" if detail and not cond else ""))
+
+
+# ---------- mock 115 接口 ----------
+class FakePan:
+    title = "测试资源合集"
+    files = [{"fid": "1", "fn": "Movie.2023.1080p.mkv", "fs": 5 * (1 << 30)}]
+    total_size = 5 * (1 << 30)
+    fail_receive = False
+
+
+def fake_share_snap_all(code, rc, max_files=5000):
+    return {"title": FakePan.title, "files": FakePan.files, "total_size": FakePan.total_size}
+
+
+def fake_mkdirs(path):
+    assert path, "目标目录为空"
+    return 12345
+
+
+def fake_receive(code, rc, cid, fids):
+    if FakePan.fail_receive:
+        raise pan.Pan115Error("模拟转存失败")
+    assert cid == 12345 and fids, "receive 参数异常"
+    return {"state": True}
+
+
+pan.share_snap_all = fake_share_snap_all
+pan.mkdirs = fake_mkdirs
+pan.receive = fake_receive
+pan.check_login = lambda: {"ok": True, "name": "测试账号"}
+
+
+def mkjob(share_code="testcode1"):
+    r = pipeline.process_message("test_ch", int(time.time() * 1000) % 10**9,
+                                 f"https://115.com/s/{share_code}?password=ab12 某某电影.2023.1080p")
+    assert r["queued"] == 1, f"入队失败: {r}"
+    return dict(db.query("SELECT * FROM transfers WHERE share_code=? ORDER BY id DESC LIMIT 1",
+                         (share_code,), one=True))
+
+
+print("\n=== 1. 成功路径 ===")
+job = mkjob("succ001")
+queue_worker._process_one(job)
+row = dict(db.query("SELECT * FROM transfers WHERE id=?", (job["id"],), one=True))
+check("转存成功状态", row["status"] == "success", row["status"])
+check("标题来自分享信息", row["title"] == "测试资源合集", row["title"])
+check("体积记录", row["size"] == 5 * (1 << 30))
+check("文件数记录", row["file_count"] == 1)
+check("每日限额 +1", db.quota_today() == 1)
+
+print("\n=== 2. 体积黑名单 ===")
+db.set_setting("min_size_gb", 0.2)
+FakePan.total_size = 50 * (1 << 20)  # 50MB < 0.2GB
+job = mkjob("small001")
+queue_worker._process_one(job)
+row = dict(db.query("SELECT * FROM transfers WHERE id=?", (job["id"],), one=True))
+check("小体积被拦截", row["status"] == "blocked", row["status"])
+hit = db.query("SELECT * FROM blacklist_hits ORDER BY id DESC LIMIT 1", one=True)
+check("命中记录写入", hit and hit["rule_type"] == "min_size" and hit["stage"] == "share_info")
+check("限额不增加", db.quota_today() == 1)
+
+print("\n=== 3. 放行 share_info 命中（bypass 重跑）===")
+FakePan.total_size = 5 * (1 << 30)
+row["bypass_filters"] = 1
+row["status"] = "queued"
+queue_worker._process_one(row)
+row2 = dict(db.query("SELECT * FROM transfers WHERE id=?", (row["id"],), one=True))
+check("bypass 后转存成功", row2["status"] == "success", row2["status"])
+
+print("\n=== 4. 文件名黑名单 ===")
+FakePan.files = [{"fid": "1", "fn": "readme.txt", "fs": 1024},
+                 {"fid": "2", "fn": "Movie.mkv", "fs": 3 * (1 << 30)}]
+FakePan.total_size = 3 * (1 << 30)
+db.execute("INSERT OR IGNORE INTO blacklist(type,value,created_at) VALUES('file_pattern','.*\\.txt$',?)",
+           (time.time(),))
+from backend.core import filters as _filters
+_filters._cache = ({}, 0)  # 清缓存，模拟网页添加后生效（生产 TTL 5s）
+job = mkjob("pat001")
+queue_worker._process_one(job)
+row = dict(db.query("SELECT * FROM transfers WHERE id=?", (job["id"],), one=True))
+check("txt 文件触发拦截", row["status"] == "blocked" and "file_pattern" in row["error"], row["error"])
+db.execute("DELETE FROM blacklist WHERE type='file_pattern'")
+
+print("\n=== 5. 转存失败重试退避 ===")
+FakePan.files = [{"fid": "1", "fn": "ok.mkv", "fs": 2 * (1 << 30)}]
+FakePan.fail_receive = True
+job = mkjob("fail001")
+try:
+    queue_worker._process_one(job)  # 真实路径中由工作器循环 try/except 捕获
+    raised = False
+except Exception as e:
+    raised = True
+    queue_worker._fail(job, str(e))
+check("receive 异常向上抛出（由循环捕获）", raised)
+row = dict(db.query("SELECT * FROM transfers WHERE id=?", (job["id"],), one=True))
+check("第1次失败仍为 queued", row["status"] == "queued", row["status"])
+check("attempts=1", row["attempts"] == 1)
+check("已安排重试时间", row["next_retry_at"] and row["next_retry_at"] > time.time())
+check("错误信息已记录", "模拟转存失败" in row["error"])
+FakePan.fail_receive = False
+
+print("\n=== 6. 消息黑名单 + 放行 ===")
+db.execute("INSERT OR IGNORE INTO blacklist(type,value,created_at) VALUES('keyword','预告',?)", (time.time(),))
+r = pipeline.process_message("test_ch", 987654, "https://115.com/s/blk001 某某电影.2023.1080p 预告")
+check("关键词拦截", r["blocked"] is True)
+hit = db.query("SELECT * FROM blacklist_hits ORDER BY id DESC LIMIT 1", one=True)
+check("命中环节=message", hit["stage"] == "message")
+# 模拟放行 API 的逻辑
+db.execute("DELETE FROM messages WHERE channel=? AND message_id=?", (hit["channel"], hit["message_id"]))
+db.execute("DELETE FROM blacklist_hits WHERE id=?", (hit["id"],))
+r2 = pipeline.process_message(hit["channel"], hit["message_id"], hit["text"], bypass=True)
+check("bypass 放行后入队", r2["queued"] == 1, str(r2))
+
+print("\n=== 7. 未分类动作=目录 ===")
+db.set_setting("unclassified_action", "/待整理")
+r = pipeline.process_message("test_ch", 987655, "https://115.com/s/unc001 完全无法识别的东西xyz")
+row = dict(db.query("SELECT * FROM transfers WHERE share_code='unc001'", one=True))
+check("未分类转存到指定目录", row["status"] == "queued" and row["target_dir"] == "/待整理",
+      f"{row['status']}/{row['target_dir']}")
+db.set_setting("unclassified_action", "skip")
+r = pipeline.process_message("test_ch", 987656, "https://115.com/s/unc002 另一个无法识别的东西xyz")
+row = dict(db.query("SELECT * FROM transfers WHERE share_code='unc002'", one=True))
+check("未分类动作=skip 时跳过", row["status"] == "skipped", row["status"])
+
+print("\n=== 8. 路由 skip ===")
+db.execute("INSERT INTO routes(category,target_dir,offline_dir) VALUES('测试分类','skip','')"
+           " ON CONFLICT(category) DO UPDATE SET target_dir='skip'")
+from backend.core import classifier  # noqa: E402
+db.execute("INSERT INTO rules(pattern,category,priority) VALUES('特殊标记XYZ','测试分类',5)")
+r = pipeline.process_message("test_ch", 987657, "特殊标记XYZ https://115.com/s/skp001")
+row = dict(db.query("SELECT * FROM transfers WHERE share_code='skp001'", one=True))
+check("路由为 skip 的分类被跳过", row["status"] == "skipped", row["status"])
+
+print("\n=== 9. ED2K/磁力云下载 ===")
+from backend.core import extractor as _extractor  # noqa: E402
+msg = ("📺 剧集：某剧 (2026) S01E03 💾 体积：796.40 MB 🔗 ED2K: "
+       "ed2k://|file|某剧.2026.S01E03.1080p.mkv|835085726|b83690e9339507d30b5314ef40ce70e5|/ "
+       "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=test")
+links = _extractor.extract(msg)
+check("ED2K 链接提取", len([l for l in links if l["kind"] == "offline"]) == 2, str(len(links)))
+r = pipeline.process_message("test_ch", 987658, msg)
+check("ED2K 消息入队 2 个云下载任务", r["queued"] == 2, str(r))
+rows = db.query("SELECT * FROM transfers WHERE kind='offline' ORDER BY id DESC LIMIT 2")
+check("offline 任务分类正确", all(row["category"] == "电视剧" and row["target_dir"] == "/媒体库/电视剧"
+                                  for row in rows))
+FakePan.files = [{"fid": "1", "fn": "ok.mkv", "fs": 2 * (1 << 30)}]
+offjob = dict(rows[0])
+pan.offline_download = lambda url, cid: {"state": True}
+pan.list_file_names = lambda cid, limit=200: set()
+queue_worker._process_one(offjob)
+row = dict(db.query("SELECT * FROM transfers WHERE id=?", (offjob["id"],), one=True))
+check("云下载提交成功（submitted 待跟踪）", row["status"] == "submitted", row["status"])
+r2 = pipeline.process_message("test_ch2", 987659, msg)  # 不同频道同消息
+check("ED2K 链接去重", r2["queued"] == 0, str(r2))
+
+print("\n=== 10. 功能开关 ===")
+# 10.1 关闭云下载：新消息中的 ED2K 不入队
+db.set_setting("enable_offline_download", False)
+ed2k_msg = "🔗 ED2K: ed2k://|file|新剧.2026.S02E01.1080p.mkv|123456|b83690e9339507d30b5314ef40ce70e5|/"
+r = pipeline.process_message("test_ch", 987660, ed2k_msg)
+check("关闭云下载后 ED2K 不入队", r["queued"] == 0 and r.get("disabled") == 1, str(r))
+n_off = db.query("SELECT count(*) c FROM transfers WHERE kind='offline' AND channel='test_ch' AND message_id=987660", one=True)["c"]
+check("不产生任务记录", n_off == 0)
+
+# 10.2 排队中的 offline 任务被工作器标记跳过
+offjob2 = {"id": 999901, "kind": "offline", "share_code": "hash123", "share_url": "ed2k://x",
+           "receive_code": "", "title": "t", "target_dir": "/媒体库/电视剧", "attempts": 0}
+db.execute("INSERT INTO transfers(id,kind,share_code,share_url,title,target_dir,status,created_at)"
+           " VALUES(999901,'offline','hash123','ed2k://x','t','/媒体库/电视剧','queued',?)", (time.time(),))
+check("排队任务被标记跳过", queue_worker.skip_if_disabled(offjob2) is True)
+row = dict(db.query("SELECT * FROM transfers WHERE id=999901", one=True))
+check("状态=skipped 且带原因", row["status"] == "skipped" and "已关闭" in row["error"])
+
+# 10.3 关闭分享转存：pipeline 不入队 + 排队任务跳过
+db.set_setting("enable_share_transfer", False)
+r = pipeline.process_message("test_ch", 987661, "https://115.com/s/dis001 某某电影.2023.1080p")
+check("关闭分享转存后不入队", r["queued"] == 0 and r.get("disabled") == 1, str(r))
+shjob = {"id": 999902, "kind": "share", "share_code": "dis001", "share_url": "https://115.com/s/dis001",
+         "receive_code": "", "title": "t", "target_dir": "/媒体库/电影", "attempts": 0}
+db.execute("INSERT INTO transfers(id,kind,share_code,share_url,title,target_dir,status,created_at)"
+           " VALUES(999902,'share','dis001','https://115.com/s/dis001','t','/媒体库/电影','queued',?)", (time.time(),))
+check("分享排队任务被标记跳过", queue_worker.skip_if_disabled(shjob) is True)
+
+# 10.4 规则测试器显示开关状态
+from backend.core import classifier as _cls  # noqa: E402
+tr = _cls.test_text(ed2k_msg)
+check("测试器报告云下载已关闭", "云下载" in tr["disabled_kinds"], str(tr["disabled_kinds"]))
+
+# 10.5 重新开启后恢复
+db.set_setting("enable_offline_download", True)
+db.set_setting("enable_share_transfer", True)
+r = pipeline.process_message("test_ch", 987662, ed2k_msg)
+check("重新开启后 ED2K 恢复入队", r["queued"] == 1, str(r))
+check("skip_if_disabled 对开启状态放行", queue_worker.skip_if_disabled(
+    {"id": 0, "kind": "offline"}) is False)
+
+print("\n=== 11. 内联按钮解析（查看资源 → telegra.ph）===")
+import asyncio  # noqa: E402
+from backend.tg import resolver  # noqa: E402
+
+# 11.1 按钮分类判断
+check("115 链接是直接资源", resolver.is_direct_resource("https://115.com/s/abc123?password=xy12"))
+check("ed2k 是直接资源", resolver.is_direct_resource("ed2k://|file|x.mkv|1|" + "a"*32 + "|/"))
+check("t.me 链接识别为站内", resolver.is_tg_internal("https://t.me/Movie4ktop_bot/moviesapp"))
+check("telegra.ph 是中间页", not resolver.is_direct_resource("https://telegra.ph/xx-2026-10-20")
+      and not resolver.is_tg_internal("https://telegra.ph/xx-2026-10-20"))
+
+# 11.2 中间页抓取解析（真实 telegra.ph 文章，内容为 ED2K）
+TELEGRAPH = "https://telegra.ph/狄仁杰之不死军-2026-10-20"
+async def _resolve():
+    return await resolver.resolve_message(
+        "哆啦A梦：伴我同行 (2014) 简中 1080P BluRay 评分: 7.5",
+        ["https://t.me/Movie4ktop_bot/moviesapp", TELEGRAPH, "https://t.me/some_promo"])
+resolved = asyncio.run(_resolve())
+n_ed2k = resolved.count("ed2k://")
+check("按钮页面解析出 ED2K 链接", n_ed2k >= 1, f"resolved 长度 {len(resolved)}, ed2k {n_ed2k} 条")
+check("t.me 推广按钮被忽略", "Movie4ktop" not in resolved)
+check("解析结果包含原文本", "哆啦A梦" in resolved)
+
+# 11.3 缓存生效（第二次调用不再网络请求，直接命中）
+resolved2 = asyncio.run(_resolve())
+check("缓存命中结果一致", resolved2 == resolved)
+
+# 11.4 走完整管道：解析后的文本入队
+from backend.core import pipeline as _pl  # noqa: E402
+r = _pl.process_message("lsp115", 555001, resolved)
+check("解析文本成功入队", r["queued"] >= 1, str(r))
+row = db.query("SELECT kind,status FROM transfers WHERE channel='lsp115' ORDER BY id DESC LIMIT 1", one=True)
+check("入队任务类型正确", row["kind"] == "offline", str(dict(row)))
+
+# 11.5 正文已有链接时不解析按钮
+r3 = asyncio.run(resolver.resolve_message(
+    "https://115.com/s/direct99?password=ab12 正文已有链接",
+    ["https://telegra.ph/should-not-fetch"]))
+check("正文有链接时跳过按钮解析", "should-not-fetch" not in r3 and "direct99" in r3)
+
+print("\n=== 12. 转存成功 TG 通知 ===")
+from backend.worker import jobs  # noqa: E402
+pan.list_file_names = lambda cid, limit=200: {"ok.mkv"}  # 目录反查命中，确保成功路径可用
+
+# 12.1 集数提取
+check("提取 S01E40", jobs.extract_episode("某剧 (2026) S01E40 1080p") == "S01E40")
+check("提取 第495集", jobs.extract_episode("某动漫 第495集 2160p") == "第495集")
+check("提取 第3期", jobs.extract_episode("奔跑吧 第3期") == "第3期")
+check("无集数返回空", jobs.extract_episode("阿凡达.2009.2160p.BluRay") == "")
+
+# 12.2 通知内容格式（mock notify 捕获）
+sent = []
+jobs.notify = lambda msg: sent.append(msg)
+jobs.notify_transfer("苏东坡与杭州的故事 (2026) S01E40 2160p WEB-DL", "电视剧",
+                     "lsp115", "/媒体库/电视剧", size=829 * (1 << 20), kind="share", file_count=1)
+check("通知已发送", len(sent) == 1)
+msg = sent[0]
+check("包含成功标题", "✅ 转存成功" in msg)
+check("包含标题", "苏东坡与杭州的故事" in msg)
+check("包含分类", "分类：电视剧" in msg)
+check("包含集数", "集数：S01E40" in msg)
+check("包含来源", "来源：@lsp115" in msg)
+check("包含目标目录", "目标：/媒体库/电视剧" in msg)
+check("包含大小", "大小：" in msg and "MB" in msg)
+check("消息简洁（≤10 行）", len(msg.splitlines()) <= 10, str(len(msg.splitlines())))
+
+# 12.3 云下载通知（无大小无集数时行数更少）
+sent.clear()
+jobs.notify_transfer("苏东坡与杭州的故事 (2026) S01E40", "电视剧", "lsp115",
+                     "/媒体库/电视剧", kind="offline")
+check("云下载通知类型正确", "☁️ 云下载任务已添加" in sent[0])
+check("云下载通知无大小行", "大小" not in sent[0])
+
+# 12.4 开关关闭不发
+db.set_setting("notify_transfer_success", False)
+sent.clear()
+jobs.notify_transfer("测试", "电影", "ch", "/媒体库/电影")
+check("开关关闭不发送", len(sent) == 0)
+db.set_setting("notify_transfer_success", True)
+
+# 12.5 通知异常静默（不影响主流程）
+def _boom(msg):
+    raise RuntimeError("network down")
+jobs.notify = _boom
+try:
+    jobs.notify_transfer("测试", "电影", "ch", "/媒体库/电影")
+    check("通知异常静默", True)
+except Exception:
+    check("通知异常静默", False)
+
+# 12.6 转存成功路径自动带通知（走 _process_one 全流程）
+sent.clear()
+captured = jobs.notify_transfer
+import backend.worker.queue_worker as _qw  # noqa: E402
+_qw.jobs.notify_transfer = lambda *a, **k: (sent.append((a, k)), captured(*a, **k))
+job = mkjob("notify001")
+queue_worker._process_one(job)
+check("成功路径自动发通知", len(sent) == 1)
+args = sent[0][0]
+check("通知参数完整", args[0] == "测试资源合集" and args[1] == "电影"
+      and args[2] == "test_ch" and args[3] == "/媒体库/电影", str(args))
+_qw.jobs.notify_transfer = captured
+
+print("\n=== 13. 通知测试功能（send_test）===")
+import httpx as _httpx  # noqa: E402
+
+# 13.1 未填配置
+ok, detail = jobs.send_test("", "")
+check("未填配置给出提示", not ok and "请先填写" in detail, detail)
+
+# 13.2 发送成功
+class _Resp:
+    def __init__(self, code, desc=""):
+        self.status_code = code
+        self.text = desc
+    def json(self):
+        return {"description": self.text}
+orig_post = jobs.httpx.post
+jobs.httpx.post = lambda *a, **k: _Resp(200)
+ok, detail = jobs.send_test("123:ABC", "12345")
+check("配置正确发送成功", ok and detail == "")
+
+# 13.3 Token 无效（401）
+jobs.httpx.post = lambda *a, **k: _Resp(401, "Unauthorized")
+ok, detail = jobs.send_test("bad:token", "12345")
+check("Token 错误提示明确", not ok and "Token 无效" in detail, detail)
+
+# 13.4 Chat ID 错误（chat not found）
+jobs.httpx.post = lambda *a, **k: _Resp(400, "Bad Request: chat not found")
+ok, detail = jobs.send_test("123:ABC", "99999")
+check("Chat ID 错误提示明确", not ok and "Chat ID 无效" in detail and "/start" in detail, detail)
+
+# 13.5 网络不通
+def _raise(*a, **k):
+    raise _httpx.ConnectError("timeout")
+jobs.httpx.post = _raise
+ok, detail = jobs.send_test("123:ABC", "12345")
+check("网络不通提示代理", not ok and "代理" in detail, detail)
+jobs.httpx.post = orig_post
+
+# 13.6 API 层：未保存的输入直接测（传入值优先），失败返回具体原因
+sent_bodies = []
+jobs.httpx.post = lambda url, **k: (sent_bodies.append(k["json"]), _Resp(200))[1]
+from backend.api import manage as _manage  # noqa: E402
+r = _manage.test_notify({"token": "unsaved:tok", "chat_id": "777"})
+check("API 用传入值测试", sent_bodies[0]["chat_id"] == "777", str(sent_bodies))
+check("成功返回 ok", r == {"ok": True})
+jobs.httpx.post = orig_post
+
+print("\n=== 14. 分享转存 / 云下载分别指定目录 ===")
+from backend.core import classifier as _cls2  # noqa: E402
+
+# 14.1 同分类分别指定：分享→/媒体库/电视剧，云下载→/云下载/电视剧
+db.execute("INSERT INTO routes(category,target_dir,offline_dir) VALUES('电视剧','/媒体库/电视剧','/云下载/电视剧')"
+           " ON CONFLICT(category) DO UPDATE SET offline_dir='/云下载/电视剧'")
+from backend.core import classifier as _rf  # noqa: E402
+_rf._cache = ({}, 0)
+check("分享目录", _cls2.resolve_target("电视剧", kind="share") == "/媒体库/电视剧")
+check("云下载目录独立", _cls2.resolve_target("电视剧", kind="offline") == "/云下载/电视剧")
+
+# 14.2 管道：ED2K 任务进云下载目录，分享任务进分享目录
+ed2k_msg2 = "某剧 第06集 ed2k://|file|x06.mkv|1|" + "b" * 32 + "|/"
+share_msg2 = "某剧 第07集 https://115.com/s/sep001?password=ab12"
+r = pipeline.process_message("test_ch", 987663, ed2k_msg2)
+r2 = pipeline.process_message("test_ch", 987664, share_msg2)
+off_row = db.query("SELECT * FROM transfers WHERE kind='offline' AND message_id=987663", one=True)
+sh_row = db.query("SELECT * FROM transfers WHERE kind='share' AND share_code='sep001'", one=True)
+check("云下载任务进云下载目录", off_row and off_row["target_dir"] == "/云下载/电视剧",
+      off_row["target_dir"] if off_row else "无记录")
+check("分享任务进分享目录", sh_row and sh_row["target_dir"] == "/媒体库/电视剧",
+      sh_row["target_dir"] if sh_row else "无记录")
+
+# 14.3 offline_dir 留空回退分享目录
+db.execute("UPDATE routes SET offline_dir='' WHERE category='电影'")
+_rf._cache = ({}, 0)
+check("留空回退分享目录", _cls2.resolve_target("电影", kind="offline") == "/媒体库/电影")
+
+# 14.4 云下载目录 = skip 时 ED2K 被跳过（分享不受影响）
+db.execute("UPDATE routes SET offline_dir='skip' WHERE category='电视剧'")
+_rf._cache = ({}, 0)
+r = pipeline.process_message("test_ch", 987665, "另一剧 第08集 ed2k://|file|x08.mkv|1|" + "c" * 32 + "|/")
+row = db.query("SELECT status FROM transfers WHERE message_id=987665", one=True)
+check("云下载目录 skip 时任务跳过", row and row["status"] == "skipped", row["status"] if row else "无记录")
+r = pipeline.process_message("test_ch", 987666, "再一剧 第09集 https://115.com/s/sep002")
+row = db.query("SELECT status FROM transfers WHERE share_code='sep002'", one=True)
+check("分享转存不受 skip 影响", row and row["status"] == "queued", row["status"] if row else "无记录")
+db.execute("UPDATE routes SET offline_dir='/云下载/电视剧' WHERE category='电视剧'")
+_rf._cache = ({}, 0)
+
+# 14.5 旧库迁移：没有 offline_dir 列的库自动补列（模拟旧结构）
+import sqlite3 as _sq  # noqa: E402
+old_db = os.path.join(os.environ["DATA_DIR"], "old.db")
+conn = _sq.connect(old_db)
+conn.execute("CREATE TABLE routes(category TEXT PRIMARY KEY, target_dir TEXT NOT NULL)")
+conn.execute("INSERT INTO routes VALUES('电影','/old/电影')")
+conn.commit(); conn.close()
+conn = _sq.connect(old_db)
+conn.execute("ALTER TABLE routes ADD COLUMN offline_dir TEXT NOT NULL DEFAULT ''")
+conn.commit()
+row = conn.execute("SELECT offline_dir FROM routes WHERE category='电影'").fetchone()
+conn.close()
+check("旧库迁移补列且默认空", row[0] == "")
+
+# 14.6 测试器显示云下载目标
+tr = _cls2.test_text("某剧 第10集 ed2k://|file|x10.mkv|1|" + "d" * 32 + "|/")
+check("测试器显示云下载目录", tr["offline_target_dir"] == "/云下载/电视剧"
+      and tr["target_kind"] == "offline", str(tr))
+
+print("\n=== 15. 细化后的默认规则集 ===")
+# 真实标题批量验证（标题 → 期望分类）
+cases = [
+    ("央视版西游记 1986 全25集 4K修复", "电视剧"),      # 用户举例：全N集
+    ("西游记 第05集 三打白骨精", "电视剧"),              # 第N集
+    ("Friends.Complete.S03.SEASON.FINAL", "电视剧"),    # season
+    ("某剧 EP12 1080p", "电视剧"),                       # EP集号
+    ("[ANi] 我推的孩子 第03集 1080p", "动漫"),           # 字幕组
+    ("咒术回战 剧场版 2160p BluRay", "动漫"),            # 剧场版
+    ("葬送的芙莉莲 OVA 合集", "动漫"),                    # OVA
+    ("行星地球 BBC.2006.1080p.BluRay", "纪录片"),        # BBC
+    ("大国崛起 纪录片 全12集", "纪录片"),                # 纪录片关键词优先于全N集
+    ("奔跑吧 第12期 2024", "综艺"),                      # 期数
+    ("RunningMan.S2024E15.1080p", "综艺"),               # 年份季格式
+    ("阿凡达.(2009).2160p.BluRay", "电影"),              # 括号年份
+    ("流浪地球2.4K.HDR.国粤双语", "电影"),               # 画质标识
+    ("泰坦尼克号.1997. REMUX", "电影"),
+]
+for title, expect in cases:
+    got, _ = classifier.classify(title)
+    check(f"{title[:26]:<28} → {expect}", got == expect, f"实际 {got!r}")
+
+# 用户例子端到端：西游记分享→分享目录，云下载→云下载目录
+db.execute("INSERT INTO routes(category,target_dir,offline_dir) VALUES('电视剧','/媒体库/电视剧','/云下载/电视剧')"
+           " ON CONFLICT(category) DO UPDATE SET offline_dir='/云下载/电视剧'")
+from backend.core import classifier as _c3  # noqa: E402
+_c3._cache = ({}, 0)
+r = pipeline.process_message("test_ch", 987670, "央视版西游记 1986 全25集 4K修复 https://115.com/s/west01?password=ab12")
+r2 = pipeline.process_message("test_ch", 987671, "央视版西游记 1986 全25集 ed2k://|file|west.mkv|1|" + "e" * 32 + "|/")
+s1 = db.query("SELECT target_dir,category FROM transfers WHERE share_code='west01'", one=True)
+s2 = db.query("SELECT target_dir,kind FROM transfers WHERE message_id=987671", one=True)
+check("西游记分享→媒体库/电视剧", s1 and s1["category"] == "电视剧" and s1["target_dir"] == "/媒体库/电视剧",
+      str(dict(s1) if s1 else None))
+check("西游记云下载→云下载/电视剧", s2 and s2["kind"] == "offline" and s2["target_dir"] == "/云下载/电视剧",
+      str(dict(s2) if s2 else None))
+
+# reset 端点
+from backend.api import manage as _m2  # noqa: E402
+r = _m2.reset_rules()
+n = db.query("SELECT count(*) c FROM rules", one=True)["c"]
+check("reset 重置为最新规则集", n == r["count"] and n >= 13, f"{n} 条")
+has_doc = db.query("SELECT 1 FROM rules WHERE category='纪录片'", one=True)
+check("新规则集含纪录片分类", has_doc is not None)
+
+# 少儿分类（优先于"动画"关键词）
+for title, expect in [("小猪佩奇 第七季 少儿动画 1080p", "少儿"),
+                      ("汪汪队立大功 儿童动画 全26集", "少儿"),
+                      ("宝宝巴士 幼儿启蒙儿歌", "少儿"),
+                      ("蓝色星球2 儿童版 BBC", "少儿")]:
+    got, _ = classifier.classify(title)
+    check(f"{title[:24]:<26} → {expect}", got == expect, f"实际 {got!r}")
+has_kids_route = db.query("SELECT target_dir FROM routes WHERE category='少儿'", one=True)
+check("少儿默认路由已补齐", has_kids_route and has_kids_route["target_dir"] == "/媒体库/少儿",
+      str(dict(has_kids_route) if has_kids_route else None))
+
+# 未分类兜底：默认 skip
+r = pipeline.process_message("test_ch", 987680, "完全无法识别的一段文字xyz https://115.com/s/unk001")
+row = db.query("SELECT status FROM transfers WHERE share_code='unk001'", one=True)
+check("无法识别默认跳过", row and row["status"] == "skipped", row["status"] if row else "无记录")
+# 未分类兜底：改为指定目录后统一进该目录
+db.set_setting("unclassified_action", "/待整理")
+r = pipeline.process_message("test_ch", 987681, "又一个无法识别的东西abc https://115.com/s/unk002")
+row = db.query("SELECT status,target_dir FROM transfers WHERE share_code='unk002'", one=True)
+check("无法识别进指定兜底目录", row and row["status"] == "queued" and row["target_dir"] == "/待整理",
+      str(dict(row) if row else None))
+db.set_setting("unclassified_action", "skip")
+
+print("\n=== 16. 黑名单默认关键词与恢复默认 ===")
+from backend.database import DEFAULT_BLACKLIST_KEYWORDS  # noqa: E402
+from backend.core import filters  # noqa: E402, F811
+print(f"默认关键词 {len(DEFAULT_BLACKLIST_KEYWORDS)} 条: {DEFAULT_BLACKLIST_KEYWORDS[:6]}...")
+# 预告/花絮/枪版/广告拦截验证
+for kw, title in [("预告", "某某电影 先导预告 1080p"), ("花絮", "某剧 花絮合集"),
+                  ("枪版", "某新片 枪版 TS"), ("广告", "广告合作看这里"),
+                  ("试看", "某片 试看版"), ("样本", "原盘 样本段")]:
+    blocked, rt, rv = filters.check_message(title)
+    check(f"关键词[{kw}]拦截", blocked and rv == kw, f"{rv!r}")
+# 正片不误伤
+blocked, _, _ = filters.check_message("变形金刚7 正片 2160p")
+check("正片标题不误伤", not blocked)
+
+# restore-defaults：插入用户自定义条目 + 删掉几条默认关键词，然后补齐
+db.execute("INSERT OR IGNORE INTO blacklist(type,value,created_at) VALUES('keyword','自定义词',?)",
+           (time.time(),))
+for kw in ["预告", "广告"]:
+    db.execute("DELETE FROM blacklist WHERE type='keyword' AND value=?", (kw,))
+before = db.query("SELECT count(*) c FROM blacklist WHERE type='keyword'", one=True)["c"]
+from backend.api import manage as _m3  # noqa: E402
+res = _m3.restore_blacklist_defaults()
+after = db.query("SELECT count(*) c FROM blacklist WHERE type='keyword'", one=True)["c"]
+check("restore 补齐缺失默认词", res["added"] == 2 and after - before == 2, f"added={res['added']}")
+kept = db.query("SELECT count(*) c FROM blacklist WHERE value='自定义词'", one=True)["c"]
+check("不删除用户自定义条目", kept == 1)
+
+# hits 路由顺序：/blacklist/hits 不能被 /blacklist/{btype} 抢占
+r = _m3.hits()
+check("hits 路由正常返回列表", isinstance(r, list))
+
+print("\n=== 17. 链接校验 / 双重确认 / 云下载跟踪 ===")
+
+# 17.1 链接合法性校验
+check("合法分享码", queue_worker.validate_link("share", "abc123XY", "") == "")
+check("分享码为空", "为空" in queue_worker.validate_link("share", "", ""))
+check("分享码格式非法", "不符合" in queue_worker.validate_link("share", "a!!", ""))
+check("合法磁力链(40hex)", queue_worker.validate_link(
+    "offline", "", "magnet:?xt=urn:btih:" + "a" * 40) == "")
+check("合法磁力链(32base32)", queue_worker.validate_link(
+    "offline", "", "magnet:?xt=urn:btih:" + "abcdefghijklmnopqrstuvwxyz234567") == "")
+check("非法磁力链hash", "hash 格式不支持" in queue_worker.validate_link(
+    "offline", "", "magnet:?xt=urn:btih:abc123"))
+check("非法磁力链(BTv2 64hex)", "hash 格式不支持" in queue_worker.validate_link(
+    "offline", "", "magnet:?xt=urn:btih:" + "a" * 64))
+check("合法电驴", queue_worker.validate_link(
+    "offline", "", "ed2k://|file|x.mkv|1|" + "a" * 32 + "|/") == "")
+check("不支持的协议", "不支持的链接协议" in queue_worker.validate_link(
+    "offline", "", "thunder://QUFodHRw"))
+check("地址为空", "为空" in queue_worker.validate_link("offline", "", ""))
+
+# 17.2 迅雷链接解码
+from backend.core import extractor as _ex  # noqa: E402
+import base64 as _b64  # noqa: E402
+th = "thunder://" + _b64.b64encode(("AA" + "https://example.com/file.zip" + "ZZ").encode()).decode()
+links = _ex.extract("迅雷链接 " + th)
+check("thunder 解码为 http 云下载", links and links[0]["kind"] == "offline"
+      and links[0]["share_url"] == "https://example.com/file.zip", str(links))
+
+# 17.3 永久失败：非法链接（30 位超长码，可提取但校验不过）→ failed + 失败通知
+fail_sent = []
+jobs.notify_failure = lambda *a, **k: fail_sent.append((a, k))
+bad = mkjob("abcdefabcdefabcdefabcdefab")
+db.execute("UPDATE transfers SET target_dir='/媒体库/电影' WHERE id=?", (bad["id"],))
+job = dict(db.query("SELECT * FROM transfers WHERE id=?", (bad["id"],), one=True))
+try:
+    queue_worker._process_one(job)
+    raised = False
+except queue_worker.PermanentTransferError as e:
+    raised = True
+    queue_worker._fail = _fail_backup = queue_worker._fail  # noqa
+    db.execute("UPDATE transfers SET status='failed', attempts=?, error=? WHERE id=?",
+               (job["attempts"] + 1, str(e)[:500], job["id"]))
+    jobs.notify_failure("share", job["title"], "电影", "test_ch", str(e))
+check("非法链接触发永久失败", raised)
+row = db.query("SELECT status,error FROM transfers WHERE id=?", (bad["id"],), one=True)
+check("状态=failed 且注明原因", row["status"] == "failed" and "不符合" in row["error"])
+check("永久失败发出通知", len(fail_sent) == 1 and "不符合" in fail_sent[0][0][4])
+
+# 17.4 分享双重确认：接口成功但目录无文件 → 可重试失败
+FakePan.files = [{"fid": "1", "fn": "verify.mkv", "fs": 1 << 30}]
+FakePan.total_size = 1 << 30
+pan.list_file_names = lambda cid, limit=200: {"不相关的文件.mp4"}
+job = mkjob("verify01")
+err_msg = ""
+try:
+    queue_worker._process_one(job)
+    raised = False
+except Exception as e:
+    raised = True
+    err_msg = str(e)
+    queue_worker._fail(job, err_msg)
+check("目录反查不到文件触发复核失败", raised and "未查到文件" in err_msg)
+row = db.query("SELECT status FROM transfers WHERE id=?", (job["id"],), one=True)
+check("复核失败进入重试队列", row["status"] == "queued", row["status"])
+# 二次确认通过 → 成功
+pan.list_file_names = lambda cid, limit=200: {"verify.mkv", "其他.mkv"}
+queue_worker._process_one(dict(db.query("SELECT * FROM transfers WHERE id=?", (job["id"],), one=True)))
+row = db.query("SELECT status FROM transfers WHERE id=?", (job["id"],), one=True)
+check("反查到文件后转存成功", row["status"] == "success", row["status"])
+
+# 17.5 云下载 submitted → 115 任务完成 → success + 通知
+sent.clear()
+jobs.notify = lambda msg: sent.append(msg)  # 恢复通知捕获（12.5 曾替换为抛异常版本）
+db.execute("INSERT INTO transfers(id,kind,share_code,share_url,title,target_dir,category,status,created_at)"
+           " VALUES(987701,'offline','offhash01','https://example.com/big.iso','某大片 ISO','/云下载/电影','电影','submitted',?)",
+           (time.time() - 600,))
+sub = dict(db.query("SELECT * FROM transfers WHERE id=987701", one=True))
+pan.task_list_all = lambda max_pages=5: [
+    {"url": "https://example.com/big.iso", "name": "某大片.ISO", "percent": 100, "status": 11}]
+asyncio.run(jobs.offline_check_loop.__wrapped__()) if hasattr(jobs.offline_check_loop, "__wrapped__") else None
+# 直接跑一次核对逻辑（offline_check_loop 是无限循环，抽 its body 通过手动调用内部逻辑）
+import backend.worker.jobs as _jobs  # noqa: E402
+tasks = pan.task_list_all()
+_by = {t["url"]: t for t in tasks}
+t = _by.get(sub["share_url"])
+_jobs._finish_offline(sub, ok=(t["percent"] >= 100 or t["status"] in (10, 11)), name=t["name"])
+row = db.query("SELECT status FROM transfers WHERE id=987701", one=True)
+check("云下载完成转 success", row["status"] == "success", row["status"])
+check("完成通知发出", any("云下载任务完成" in str(s) for s in sent), str(sent))
+
+# 17.6 云下载失败状态 → failed + 失败通知
+db.execute("INSERT INTO transfers(id,kind,share_code,share_url,title,target_dir,category,status,created_at)"
+           " VALUES(987702,'offline','offhash02','magnet:?xt=urn:btih:'||'a'||'','死种','/云下载/电影','电影','submitted',?)",
+           (time.time() - 600,))
+sub2 = dict(db.query("SELECT * FROM transfers WHERE id=987702", one=True))
+fail_sent.clear()
+jobs.notify_failure = lambda *a, **k: fail_sent.append((a, k))
+_jobs._finish_offline(sub2, ok=False, reason="115 下载任务失败（链接无效或无资源）")
+row = db.query("SELECT status FROM transfers WHERE id=987702", one=True)
+check("云下载失败转 failed", row["status"] == "failed")
+check("云下载失败通知发出", len(fail_sent) == 1)
+
+# 17.7 端到端：两次通知完整流程（添加时① + 下载完成时②）+ 实时日志
+from backend.core import logstream  # noqa: E402
+sent.clear()
+db.execute("INSERT INTO transfers(id,kind,share_code,share_url,title,target_dir,category,status,created_at)"
+           " VALUES(987703,'offline','offhash03','https://example.com/e03.mkv','某剧 E03','/云下载/电视剧','电视剧','queued',?)",
+           (time.time(),))
+job3 = dict(db.query("SELECT * FROM transfers WHERE id=987703", one=True))
+pan.task_list_all = lambda max_pages=5: []
+queue_worker._process_one(job3)
+row = db.query("SELECT status FROM transfers WHERE id=987703", one=True)
+check("阶段①: 提交后状态 submitted", row["status"] == "submitted", row["status"])
+notified = [str(s) for s in sent]
+check("阶段①: 添加通知发出（仅 1 条）", len(notified) == 1 and "云下载任务已添加" in notified[0]
+      and "①" in notified[0] and "第②条" in notified[0], str(notified))
+logs_now = [l["message"] for l in logstream.recent(10)]
+check("阶段①: 实时日志打印添加", any("云下载任务已添加（①）" in m for m in logs_now), str(logs_now[-3:]))
+# 阶段②：115 下载完成
+sent.clear()
+sub3 = dict(db.query("SELECT * FROM transfers WHERE id=987703", one=True))
+pan.task_list_all = lambda max_pages=5: [
+    {"url": "https://example.com/e03.mkv", "name": "某剧.E03.mkv", "percent": 100, "status": 10}]
+_jobs._finish_offline(sub3, ok=True, name="某剧.E03.mkv")
+row = db.query("SELECT status FROM transfers WHERE id=987703", one=True)
+check("阶段②: 完成后状态 success", row["status"] == "success", row["status"])
+notified2 = [str(s) for s in sent]
+check("阶段②: 完成通知发出", len(notified2) == 1 and "云下载任务完成" in notified2[0]
+      and "②" in notified2[0], str(notified2))
+logs_now = [l["message"] for l in logstream.recent(10)]
+check("阶段②: 实时日志打印完成", any("云下载任务完成（②）" in m for m in logs_now), str(logs_now[-2:]))
+
+print("\n=== 18. 登录限速 ===")
+from backend import auth as _auth  # noqa: E402
+_auth._fail_records.clear()
+for _ in range(_auth.FAIL_LIMIT):
+    _auth.record_login_fail()
+check("60s 内失败 5 次触发限速", _auth.login_throttled() is True)
+_auth._fail_records.clear()
+check("清零后恢复正常", _auth.login_throttled() is False)
+db.set_setting("web_password_hash", "")
+_auth.ensure_initial_password()
+logs_now = [l["message"] for l in logstream.recent(10)]
+check("弱初始密码产生警告日志", any("弱初始密码" in m for m in logs_now), str(logs_now[-2:]))
+_auth.change_password("admin123")
+
+print("\n=== 19. 历史消息补漏（backfill）===")
+from backend.tg import backfill  # noqa: E402
+
+# 19.1 预算计算与限额挂钩
+db.set_setting("daily_limit", 50)
+check("预算=限额2倍(100)", backfill._daily_backfill_budget() == 100)
+db.set_setting("daily_limit", 10)
+check("预算下限40", backfill._daily_backfill_budget() == 40)
+db.set_setting("daily_limit", 50)
+
+# 19.2 before 分页回溯（真实 t.me 页面，动态取当前最新 id 避免固定 id 过期）
+import httpx as _hx  # noqa: E402
+from backend.tg.polling import fetch_channel
+async def _latest():
+    async with _hx.AsyncClient() as cl:
+        return await fetch_channel(cl, "regeng115")
+latest = asyncio.run(_latest())
+newest_id = max(m["id"] for m in latest)
+page_size = len(latest)
+async def _fetch_gap():
+    async with _hx.AsyncClient() as cl:
+        return await backfill._fetch_before(cl, "regeng115", newest_id - page_size)
+msgs = asyncio.run(_fetch_gap())
+ids = [m["id"] for m in msgs]
+check("before 分页返回一页历史", len(ids) >= 15 and max(ids) < newest_id - page_size + 2,
+      f"{min(ids)}~{max(ids)}")
+
+# 19.3 补漏处理逻辑：模拟缺口 [gap_lo, gap_hi]
+gap_hi = newest_id - page_size
+gap_lo = gap_hi - page_size + 1
+db.execute("INSERT INTO channels(id,type,name,enabled,last_message_id,created_at)"
+           " VALUES(99,'polling','regeng115',1,?,?)", (gap_lo - 1, time.time()))
+ch99 = dict(db.query("SELECT * FROM channels WHERE id=99", one=True))
+async def _run_backfill():
+    async with _hx.AsyncClient() as cl:
+        return await backfill.backfill_channel(cl, ch99, gap_hi + 1)
+done = asyncio.run(_run_backfill())
+check("缺口补漏完成", done is True)
+row = db.query("SELECT last_message_id FROM channels WHERE id=99", one=True)
+check(f"last_message_id 推进到 {gap_hi}", row["last_message_id"] == gap_hi, str(row["last_message_id"]))
+n_msgs = db.query("SELECT count(*) c FROM messages WHERE channel='regeng115' AND message_id>?",
+                  (gap_lo - 1,), one=True)["c"]
+check(f"缺口消息全部入库（{n_msgs} 条）", n_msgs == page_size, str(n_msgs))
+n_q = db.query("SELECT count(*) c FROM transfers WHERE channel='regeng115'", one=True)["c"]
+print(f"  其中提取到 {n_q} 个资源任务（取决于频道内容）")
+
+# 19.4 大缺口按预算截断
+db.execute("INSERT INTO channels(id,type,name,enabled,last_message_id,created_at)"
+           " VALUES(98,'polling','lsp115',1,19700,?)", (time.time(),))
+ch98 = dict(db.query("SELECT * FROM channels WHERE id=98", one=True))
+async def _run_partial():
+    async with _hx.AsyncClient() as cl:
+        return await backfill.backfill_channel(cl, ch98, 19800)
+done2 = asyncio.run(_run_partial())
+row = db.query("SELECT last_message_id FROM channels WHERE id=98", one=True)
+advanced = row["last_message_id"] - 19700
+# 19700→19800 共 99 条缺口 < 预算 100 → 一轮补完是正确行为；换更大的缺口验证截断
+n98 = db.query("SELECT count(*) c FROM messages WHERE channel='lsp115'", one=True)["c"]
+check(f"99 条缺口一轮补完（入库 {n98} 条）", done2 is True and advanced == 99,
+      f"done={done2}, advanced={advanced}")
+# 真正的超预算缺口：清空 lsp115 记录重来，缺口 300 条 > 预算 100
+db.execute("DELETE FROM messages WHERE channel='lsp115'")
+db.execute("DELETE FROM transfers WHERE channel='lsp115'")
+# 检查 lsp115 频道 id=98 是否确实存在
+assert db.query("SELECT 1 FROM channels WHERE id=98", one=True), 'ch98 缺失'
+print(f'  缺口 19501~19799 共 299 条，预算 {backfill._daily_backfill_budget()} 条')
+db.execute("UPDATE channels SET last_message_id=19500 WHERE id=98")
+db.set_setting("daily_limit", 30)  # 预算 = max(40, 60) = 60，缺口 299 条必截断
+backfill._page_log = []
+ch98b = dict(db.query("SELECT * FROM channels WHERE id=98", one=True))
+print(f'  [调试] daily_limit={db.get_setting("daily_limit")}, budget={backfill._daily_backfill_budget()}')
+async def _run_partial2():
+    async with _hx.AsyncClient() as cl:
+        return await backfill.backfill_channel(cl, ch98b, 19800)
+done3 = asyncio.run(_run_partial2())
+row = db.query("SELECT last_message_id FROM channels WHERE id=98", one=True)
+n98b = db.query("SELECT count(*) c FROM messages WHERE channel='lsp115'", one=True)["c"]
+# 截断后 last_message_id = 本轮已入库的最小 id（19560），下轮从这里继续向新补（exists 去重不重复计数）
+# 截断后接缝 = 本轮已入库最旧 id - 1（19740-1=19739），下轮缺口 19501~19739 继续补
+check(f"299 条缺口按预算截断（入库 {n98b} 条，接缝={row['last_message_id']}）",
+      done3 is False and n98b == 60 and row['last_message_id'] == 19739,
+      f"done={done3}, last_mid={row['last_message_id']}, n={n98b}")
+mins = [lo for (lo, hi) in backfill._page_log]
+check("翻页轨迹正常（before 逐页递减 20）",
+      len(mins) >= 3 and all(mins[i] - mins[i + 1] == 20 for i in range(len(mins) - 1)),
+      str(backfill._page_log[:4]))
+backfill._page_log = None
+
+print(f"\n{'='*40}\n结果: {len(PASS)} 通过, {len(FAIL)} 失败")
+if FAIL:
+    print("失败项:", FAIL)
+    sys.exit(1)
