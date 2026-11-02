@@ -66,13 +66,14 @@
 </template>
 
 <script setup>
-import { onMounted, reactive, ref } from 'vue'
+import { onMounted, onUnmounted, reactive, ref } from 'vue'
+import { ElMessage, ElNotification } from 'element-plus'
+import { api, errMsg, fmtSize, fmtTime, saveOk, statusLabel } from '../api'
 
 const isMobile = ref(window.innerWidth <= 768)
 const onRz = () => { isMobile.value = window.innerWidth <= 768 }
-window.addEventListener('resize', onRz)
-import { ElMessage, ElNotification } from 'element-plus'
-import { api, errMsg, fmtSize, fmtTime, saveOk, statusLabel } from '../api'
+onMounted(() => window.addEventListener('resize', onRz))
+onUnmounted(() => window.removeEventListener('resize', onRz))
 
 const items = ref([])
 const total = ref(0)
@@ -110,14 +111,18 @@ const retryAll = async () => {
   } catch (e) { ElMessage.error(errMsg(e)) } finally { retrying.value = false }
 }
 const retry = async (row) => {
-  await api.post(`/api/transfers/${row.id}/retry`)
-  ElMessage.success('已重新入队')
-  load()
+  try {
+    await api.post(`/api/transfers/${row.id}/retry`)
+    ElMessage.success('已重新入队')
+    load()
+  } catch (e) { ElMessage.error(errMsg(e)) }
 }
 const del = async (row) => {
-  await api.delete(`/api/transfers/${row.id}`)
-  ElMessage.success('任务记录已删除')
-  load()
+  try {
+    await api.delete(`/api/transfers/${row.id}`)
+    ElMessage.success('任务记录已删除')
+    load()
+  } catch (e) { ElMessage.error(errMsg(e)) }
 }
 onMounted(load)
 </script>

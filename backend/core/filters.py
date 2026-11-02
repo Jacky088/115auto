@@ -21,6 +21,12 @@ def _blacklist() -> dict:
     return _cache[0]
 
 
+def invalidate():
+    """黑名单变更后立即失效缓存（否则最多 5 秒内仍用旧名单）。"""
+    global _cache
+    _cache = ({}, 0.0)
+
+
 def check_message(text: str, channel: str | None = None) -> tuple[bool, str, str]:
     """消息级检查：频道黑名单 + 标题关键词。返回 (blocked, rule_type, rule_value)。"""
     if channel:
@@ -43,7 +49,10 @@ def check_files(file_names: list[str], total_size: int) -> tuple[bool, str, str]
                     return True, "file_pattern", pat
             except re.error:
                 continue
-    min_size_gb = float(db.get_setting("min_size_gb", 0.2) or 0)
+    try:
+        min_size_gb = float(db.get_setting("min_size_gb", 0.2) or 0)
+    except (TypeError, ValueError):
+        min_size_gb = 0.2
     if min_size_gb > 0 and total_size > 0 and total_size < min_size_gb * (1 << 30):
         return True, "min_size", f"{min_size_gb}GB"
     return False, "", ""

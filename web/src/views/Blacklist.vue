@@ -229,9 +229,11 @@ const restoreDefaults = async () => {
   } catch (e) { ElMessage.error(errMsg(e)) }
 }
 const del = async (row) => {
-  await api.delete(`/api/blacklist/${tab.value}/${row.id}`)
-  ElMessage.success('已删除')
-  load()
+  try {
+    await api.delete(`/api/blacklist/${tab.value}/${row.id}`)
+    ElMessage.success('已删除')
+    load()
+  } catch (e) { ElMessage.error(errMsg(e)) }
 }
 const release = async (row) => {
   try {

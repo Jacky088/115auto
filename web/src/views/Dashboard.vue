@@ -34,7 +34,7 @@
     <el-card shadow="never" class="page-card">
       <template #header>
         <div class="toolbar" style="margin-bottom: 0">
-          <span>分类占比（累计）</span>
+          <span>最近 20 条转存的分类占比</span>
         </div>
       </template>
       <div ref="pieRef" class="pie-chart"></div>
@@ -126,7 +126,10 @@ const ts = (t) => {
 }
 
 let ws = null
+let wsTimer = null
+let disposed = false
 const connectWs = () => {
+  if (disposed) return
   const proto = location.protocol === 'https:' ? 'wss' : 'ws'
   ws = new WebSocket(`${proto}://${location.host}/ws/logs?token=${localStorage.getItem('token')}`)
   ws.onopen = () => { wsOk.value = true }
@@ -135,20 +138,27 @@ const connectWs = () => {
     if (lines.value.length > 400) lines.value.splice(0, lines.value.length - 400)
     if (autoScroll.value) nextTick(() => { if (logBox.value) logBox.value.scrollTop = logBox.value.scrollHeight })
   }
-  ws.onclose = () => { wsOk.value = false; setTimeout(connectWs, 3000) }
+  ws.onclose = () => {
+    wsOk.value = false
+    if (!disposed) wsTimer = setTimeout(connectWs, 3000)
+  }
   ws.onerror = () => ws.close()
 }
 
-const load = async () => {
-  const [s, r] = await Promise.all([api.get('/api/dashboard/stats'), api.get('/api/dashboard/recent')])
-  stats.value = s.data
-  recent.value = r.data
-  // 空间信息（登录后才有）
+const load = async (withSpace = false) => {
   try {
-    const sp = await api.get('/api/account/115/status')
-    if (sp.data.space) space.value = sp.data.space
-  } catch { /* ignore */ }
-  renderPie()
+    const [s, r] = await Promise.all([api.get('/api/dashboard/stats'), api.get('/api/dashboard/recent')])
+    stats.value = s.data
+    recent.value = r.data
+    // 空间信息（登录后才有）：调用会打 115 接口，只在需要时刷新（后端另有 5 分钟缓存）
+    if (withSpace) {
+      try {
+        const sp = await api.get('/api/account/115/status')
+        if (sp.data.space) space.value = sp.data.space
+      } catch { /* ignore */ }
+    }
+    renderPie()
+  } catch { /* 网络抖动时保留上次数据，不打断定时刷新 */ }
 }
 
 const renderPie = () => {
@@ -180,14 +190,21 @@ const renderPie = () => {
 }
 
 let timer = null
+let tick = 0
 onMounted(() => {
-  load()
+  load(true)
   connectWs()
-  timer = setInterval(load, 10000)
+  // 10 秒刷新统计/最近记录；115 空间每 60 秒才查一次，避免频繁请求 115 接口
+  timer = setInterval(() => {
+    tick += 1
+    load(tick % 6 === 0)
+  }, 10000)
   window.addEventListener('resize', onResize)
 })
 onUnmounted(() => {
+  disposed = true
   clearInterval(timer)
+  clearTimeout(wsTimer)
   window.removeEventListener('resize', onResize)
   if (ws) ws.onclose = null
   if (ws) ws.close()

@@ -8,6 +8,7 @@ const routes = [
     children: [
       { path: '', redirect: '/dashboard' },
       { path: 'dashboard', component: () => import('./views/Dashboard.vue') },
+      { path: 'files', component: () => import('./views/Files.vue') },
       { path: 'channels', component: () => import('./views/Channels.vue') },
       { path: 'rules', component: () => import('./views/Rules.vue') },
       { path: 'blacklist', component: () => import('./views/Blacklist.vue') },

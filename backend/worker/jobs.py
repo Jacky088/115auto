@@ -158,12 +158,15 @@ async def cookie_check_loop():
     last_state = None
     while True:
         try:
-            if db.get_setting("cookie_ok", None) is not False:
-                st = await asyncio.to_thread(pan.check_login)
-                if not st.get("ok") and last_state is True:
-                    logstream.error("115", f"115 cookie 失效，请到网页重新扫码！({st.get('err', '')})")
-                    notify("⚠️ 115 cookie 已失效，请打开管理页面重新扫码登录")
-                last_state = st.get("ok")
+            # 每 10 分钟真实校验一次（force 跳过缓存）：既监控失效，也能发现恢复
+            st = await asyncio.to_thread(pan.check_login, True)
+            ok = bool(st.get("ok"))
+            if not ok and last_state is True:
+                logstream.error("115", f"115 cookie 失效，请到网页重新扫码！({st.get('err', '')})")
+                await asyncio.to_thread(notify, "⚠️ 115 cookie 已失效，请打开管理页面重新扫码登录")
+            elif ok and last_state is False:
+                logstream.info("115", "115 cookie 已恢复有效")
+            last_state = ok
         except Exception:
             pass
         await asyncio.sleep(600)
@@ -189,20 +192,23 @@ OFFLINE_CONFIRM_WINDOW = 3 * 86400  # 云下载提交后 3 天内跟踪结果
 async def offline_check_loop():
     """每 10 分钟核对"已提交"云下载任务的真实结果（下载完成/失败），防止误报成功。
 
-    115 任务状态：percent>=100 或 status 10-11 为完成；status 1-9 为失败。
+    115 任务状态：percent>=100、status 10-11、status>=13 为完成；status 1-9 为失败；
+    status 12 为下载中。
     """
     logstream.info("transfer", "云下载结果跟踪任务启动（每 10 分钟核对一次）")
     while True:
         try:
-            subs = db.query(
-                "SELECT * FROM transfers WHERE status='submitted' AND created_at>?",
-                (time.time() - OFFLINE_CONFIRM_WINDOW,))
+            # 扫描全部「已提交」任务（不只是 3 天内）：超窗且列表里找不到的会在此被判失败，
+            # 避免任务永远卡在 submitted
+            subs = db.query("SELECT * FROM transfers WHERE status='submitted'")
             if subs:
                 try:
                     tasks = await asyncio.to_thread(pan.task_list_all)
                 except Exception as e:
-                    logstream.warn("transfer", f"拉取 115 云下载任务列表失败: {e}")
-                    tasks = []
+                    # 接口异常时绝不能按「列表中找不到」判失败，本轮直接跳过
+                    logstream.warn("transfer", f"拉取 115 云下载任务列表失败，本轮跳过核对: {e}")
+                    await asyncio.sleep(600)
+                    continue
                 by_url = {}
                 for t in tasks:
                     u = t.get("url") or ""
@@ -213,15 +219,23 @@ async def offline_check_loop():
                     if t is None:
                         # 列表里找不到：超窗后按失败处理，否则继续等
                         if time.time() - job["created_at"] > OFFLINE_CONFIRM_WINDOW:
-                            _finish_offline(job, ok=False,
-                                            reason="提交后 3 天内未在 115 任务列表中找到该任务")
+                            await asyncio.to_thread(
+                                _finish_offline, job, False, "",
+                                "提交后 3 天内未在 115 任务列表中找到该任务")
                         continue
-                    percent = float(t.get("percent", 0) or 0)
-                    status = t.get("status", 0)
-                    if percent >= 100 or status in (10, 11):
-                        _finish_offline(job, ok=True, name=t.get("name", ""))
+                    try:
+                        percent = float(t.get("percent", 0) or 0)
+                    except (TypeError, ValueError):
+                        percent = 0.0
+                    try:
+                        status = int(t.get("status", 0) or 0)
+                    except (TypeError, ValueError):
+                        status = 0
+                    if percent >= 100 or status in (10, 11) or status >= 13:
+                        await asyncio.to_thread(_finish_offline, job, True, t.get("name", ""), "")
                     elif 1 <= status <= 9:
-                        _finish_offline(job, ok=False, reason="115 下载任务失败（链接无效或无资源）")
+                        await asyncio.to_thread(
+                            _finish_offline, job, False, "", "115 下载任务失败（链接无效或无资源）")
                     # 其余状态 = 下载中，继续等待
         except Exception as e:
             logstream.error("transfer", f"云下载结果核对异常: {e}")

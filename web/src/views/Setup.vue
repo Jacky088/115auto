@@ -165,14 +165,27 @@ const startNow = async () => {
   starting.value = true
   try {
     await api.post('/api/wizard/complete')
+  } catch (e) {
+    // 向导完成失败：留在当前页，避免进入未完成初始化的仪表盘
+    ElMessage.error(errMsg(e))
+    starting.value = false
+    return
+  }
+  try {
     await api.post('/api/system/start')
     ElMessage.success('🚀 系统已开始运行')
-    router.push('/dashboard')
-  } catch (e) { ElMessage.error(errMsg(e)); router.push('/dashboard') } finally { starting.value = false }
+  } catch (e) {
+    ElMessage.error(errMsg(e))
+  } finally {
+    starting.value = false
+  }
+  router.push('/dashboard')
 }
 const finish = async () => {
-  await api.post('/api/wizard/complete')
-  router.push('/dashboard')
+  try {
+    await api.post('/api/wizard/complete')
+    router.push('/dashboard')
+  } catch (e) { ElMessage.error(errMsg(e)) }
 }
 </script>
 

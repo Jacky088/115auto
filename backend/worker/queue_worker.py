@@ -51,9 +51,19 @@ def validate_link(kind: str, share_code: str, share_url: str) -> str:
     return "不支持的链接协议（115 云下载仅支持 HTTP/FTP/磁力/电驴），无法云下载"
 
 
+def _num_setting(key: str, default: float) -> float:
+    """读取数值型设置，非法/负数时回退默认值（防止脏配置导致工作器崩溃）。"""
+    try:
+        v = float(db.get_setting(key, default))
+    except (TypeError, ValueError):
+        return float(default)
+    return v if v >= 0 else float(default)
+
+
 def _interval() -> float:
-    lo = int(db.get_setting("transfer_interval_min", 30))
-    hi = int(db.get_setting("transfer_interval_max", 90))
+    lo = _num_setting("transfer_interval_min", 30)
+    hi = _num_setting("transfer_interval_max", 90)
+    lo, hi = max(lo, 1.0), max(hi, 1.0)  # 至少 1 秒，避免忙轮询
     return random.uniform(lo, max(hi, lo))
 
 
@@ -86,6 +96,14 @@ def _process_one(job: dict):
     # ---- 分享转存任务 ----
     snap = pan.share_snap_all(code, rc)
     title = snap["title"] or job["title"][:100] or code
+
+    # 1.5 分享内没有任何文件（空目录/链接空壳）：无法转存，直接跳过而不是反复重试
+    if not snap["files"]:
+        reason = "分享内没有可转存的文件（可能为空目录或分享内容已失效）"
+        db.execute("UPDATE transfers SET status='skipped', title=?, error=? WHERE id=?",
+                   (title, reason, job["id"]))
+        logstream.warn("transfer", f"分享 {code} 跳过：{reason}")
+        return
 
     # 2. 内容黑名单：文件名 + 体积（放行任务跳过）
     if not job.get("bypass_filters"):
@@ -145,6 +163,29 @@ def _verify_receive(cid: int, snap: dict) -> bool:
         return True
 
 
+def _backoff(attempts: int) -> float:
+    """按尝试次数取退避秒数；配置为空/非法时使用默认阶梯，避免 IndexError。"""
+    raw = db.get_setting("retry_backoff", [60, 300, 1800])
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        values = [float(raw)] if raw > 0 else []
+    elif isinstance(raw, (list, tuple)):
+        values = []
+        for v in raw:
+            if isinstance(v, bool):
+                continue
+            try:
+                f = float(v)
+            except (TypeError, ValueError):
+                continue
+            if f > 0:
+                values.append(f)
+    else:
+        values = []
+    if not values:
+        values = [60.0, 300.0, 1800.0]
+    return int(values[min(max(attempts, 1) - 1, len(values) - 1)])
+
+
 def _fail(job: dict, err: str):
     attempts = job["attempts"] + 1
     if attempts >= MAX_ATTEMPTS:
@@ -157,8 +198,7 @@ def _fail(job: dict, err: str):
             job.get("channel", ""), err[:200],
             retry_info=f"💡 已自动重试 {attempts} 次仍未成功，请检查分享链接是否失效")
     else:
-        backoffs = db.get_setting("retry_backoff", [60, 300, 1800])
-        delay = backoffs[min(attempts - 1, len(backoffs) - 1)]
+        delay = _backoff(attempts)
         db.execute("UPDATE transfers SET status='queued', attempts=?, error=?, next_retry_at=? WHERE id=?",
                    (attempts, err[:500], time.time() + delay, job["id"]))
         logstream.warn("transfer",
@@ -233,7 +273,7 @@ async def queue_worker():
                 continue
             schedule_logged = False
 
-            limit = int(db.get_setting("daily_limit", 50))
+            limit = int(_num_setting("daily_limit", 50))
             if limit > 0 and db.quota_today() >= limit:
                 logstream.warn("transfer", f"已达每日限额 {limit}，明日 0 点自动恢复")
                 await asyncio.sleep(600)
@@ -260,10 +300,14 @@ async def queue_worker():
                 continue
             job["status"] = "running"
 
-            # cookie 检查（快速失败）
+            # cookie 检查（不消耗重试次数：长时间失效不应把排队任务打成 failed）
             st = await asyncio.to_thread(pan.check_login)
             if not st.get("ok"):
-                _fail(job, f"115 未登录或 cookie 失效: {st.get('err', '')}")
+                err = f"115 未登录或 cookie 失效: {st.get('err', '')}"
+                db.execute("UPDATE transfers SET status='queued', error=?, next_retry_at=? WHERE id=?",
+                           (err[:500], time.time() + 60, job["id"]))
+                logstream.warn("transfer",
+                               f"115 cookie 失效，任务 #{job['id']} 暂缓 60s（不计入重试次数）")
                 await asyncio.sleep(60)
                 continue
 

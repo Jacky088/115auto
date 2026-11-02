@@ -5,6 +5,12 @@
 缺口检测（polling 主循环内）：最新 20 条中最小 id > last_message_id+1 → 存在缺口
 回溯方式：从「最新 20 条里最小的 id」开始向旧方向翻页，直到覆盖 last_message_id
 节奏控制：每轮只处理 limited 条（与每日限额挂钩），未补完的缺口保留到下一轮
+
+可靠性：
+- 未补完时**绝不推进** last_message_id（否则缺口会被永久跳过）
+- 分页异常/网络异常时同样不推进，保留缺口等下一轮重试
+- 无文本消息也写入 messages 表，避免每轮重复扫描同一批消息
+- 未补完时把续补游标存入 _backfill_state，下一轮从断点继续，不重复翻已处理的页
 """
 import asyncio
 import random
@@ -17,7 +23,7 @@ from ..core import logstream
 from . import resolver
 
 _TIMEOUT = httpx.Timeout(20.0)
-_backfill_state: dict[int, dict] = {}  # channel_id -> {until_id, done}（内存态，重启重新检测）
+_backfill_state: dict[int, dict] = {}  # channel_id -> {until_id, before, hi}（内存态，重启重新检测）
 
 
 def _proxy() -> str | None:
@@ -46,79 +52,109 @@ def _daily_backfill_budget() -> int:
     return max(40, limit * 2)
 
 
+def _remember_message(name: str, m: dict, text: str | None = None):
+    """写入 messages 表（去重）。用于无文本消息与解析失败的消息，避免重复处理。"""
+    db.execute(
+        "INSERT OR IGNORE INTO messages(channel,message_id,text,processed_at) VALUES(?,?,?,?)",
+        (name, m["id"], (text if text is not None else (m.get("text") or ""))[:2000], time.time()))
+
+
 async def backfill_channel(client: httpx.AsyncClient, ch: dict, newest_min_id: int) -> bool:
     """为一个频道补一段缺口 [last_message_id+1, newest_min_id-1]。
 
-    返回 True 表示缺口已全部补完，False 表示本轮预算用完、还有剩余。
+    返回 True 表示缺口已全部补完，False 表示本轮预算用完/分页异常、还有剩余。
+    未补完时不会推进 last_message_id，下一轮从 _backfill_state 记录的游标继续。
     """
     name = ch["name"]
-    until_id = ch["last_message_id"]  # 补到这里为止（含）
+    until_id = int(ch["last_message_id"])
     budget = _daily_backfill_budget()
     processed = 0
-    before = newest_min_id  # 从最新一页的最小 id 向旧方向翻
-    logstream.info("backfill", f"[{name}] 检测到消息缺口（{until_id + 1} ~ {newest_min_id - 1}），"
-                               f"开始按页回溯（本轮预算 {budget} 条）")
+
+    state = _backfill_state.get(ch["id"])
+    if state and state.get("until_id") == until_id and int(state.get("before", 0)) > until_id:
+        # 继续上一轮未补完的缺口（游标指向下一处未处理的右边界，且上方已全部处理）
+        before = int(state["before"])
+        hi = int(state.get("hi", newest_min_id))
+        logstream.info("backfill", f"[{name}] 继续补漏缺口（{until_id + 1} ~ {before - 1}），"
+                                   f"本轮预算 {budget} 条")
+    else:
+        before = int(newest_min_id)
+        hi = int(newest_min_id)
+        if before <= until_id:
+            _backfill_state.pop(ch["id"], None)  # 无缺口：清掉可能残留的续补状态
+            return True
+        _backfill_state[ch["id"]] = {"until_id": until_id, "before": before, "hi": hi}
+        logstream.info("backfill", f"[{name}] 检测到消息缺口（{until_id + 1} ~ {hi - 1}），"
+                                   f"开始按页回溯（本轮预算 {budget} 条）")
+
+    def remember(before_cursor: int):
+        _backfill_state[ch["id"]] = {"until_id": until_id, "before": int(before_cursor), "hi": hi}
+
+    def finish_complete() -> bool:
+        """缺口全部覆盖：接缝推进到缺口右端（hi-1）。"""
+        marker = max(hi - 1, until_id)
+        if marker > until_id:
+            db.execute("UPDATE channels SET last_message_id=?, last_fetch_at=? WHERE id=?",
+                       (marker, time.time(), ch["id"]))
+            ch["last_message_id"] = marker
+        _backfill_state.pop(ch["id"], None)
+        logstream.info("backfill", f"[{name}] 缺口补漏完成，本轮共处理 {processed} 条")
+        return True
+
+    def partial(cursor: int) -> bool:
+        remaining = max(cursor - until_id - 1, 0)
+        logstream.info("backfill", f"[{name}] 本轮预算用完，已补 {processed} 条，"
+                                   f"剩余约 {remaining} 条下一轮继续（接缝保持 {until_id}）")
+        return False
+
     # 从测试注入的采集器（存在时记录每次翻页的 ID 范围，便于测试与调试）
     import sys
     page_log = getattr(sys.modules[__name__], "_page_log", None)
 
-    while processed < budget:
+    while True:
         msgs = await _fetch_before(client, name, before)
         if not msgs:
-            break  # 已到频道最早消息
+            return finish_complete()  # 已到频道最早消息，缺口范围内再没有可补的消息
         ids = [m["id"] for m in msgs]
         if max(ids) >= before:
-            # 防御：服务端偶尔忽略 before 参数，避免死循环
-            logstream.warn("backfill", f"[{name}] 分页参数异常（before={before} 未生效），本轮终止")
-            break
+            # 防御：服务端偶尔忽略 before 参数。不推进接缝，下一轮重试，避免死循环与漏消息
+            logstream.warn("backfill", f"[{name}] 分页参数异常（before={before} 未生效），"
+                                       f"本轮终止并保留缺口")
+            remember(before)
+            return False
         if page_log is not None:
             page_log.append((min(ids), max(ids)))
+
         # 只处理缺口范围内的（从旧到新）；已入过库的（上次截断点之后重复拉到的）不重复计数
         in_range = sorted([m for m in msgs if until_id < m["id"] < before], key=lambda m: m["id"])
         for m in in_range:
+            if processed >= budget:
+                # 预算在页中间用完：把游标停在第一条未处理消息上，下一轮从这里继续
+                remember(m["id"] + 1)
+                return partial(m["id"] + 1)
             exists = db.query("SELECT 1 FROM messages WHERE channel=? AND message_id=?",
                               (name, m["id"]), one=True)
-            if not exists:
-                if m["text"] or m.get("buttons"):
-                    try:
-                        full_text = await resolver.resolve_message(m["text"], m.get("buttons") or [])
-                        if full_text:
-                            from ..core import pipeline
-                            pipeline.process_message(name, m["id"], full_text)
-                    except Exception as e:
-                        logstream.error("backfill", f"[{name}] 补漏消息 {m['id']} 处理失败: {e}")
-                processed += 1  # 只统计真正新处理的，与预算语义一致
-        if processed >= budget:
-            # 接缝点 = 缺口内已入库的最小 id - 1（限定缺口范围防其他来源 id 污染）。
-            # 下轮从接缝+1 继续向新补，已入库的会被去重，未补的中间段不会被跳过
-            filled_min = db.query(
-                "SELECT min(message_id) m FROM messages WHERE channel=? AND message_id>? AND message_id<?",
-                (name, until_id, newest_min_id), one=True)["m"]
-            marker = (filled_min - 1) if filled_min else until_id
-            if marker > until_id:
-                db.execute("UPDATE channels SET last_message_id=?, last_fetch_at=? WHERE id=?",
-                           (marker, time.time(), ch["id"]))
-                ch["last_message_id"] = marker
-            remaining = newest_min_id - 1 - marker
-            if remaining > 0:
-                logstream.info("backfill", f"[{name}] 本轮预算用完，已补 {processed} 条，"
-                                           f"接缝推进到 {marker}，剩余约 {remaining} 条下一轮继续")
-                return False
-        # 这一页全部落在缺口之外（更旧）→ 已补完
-        if min(ids) <= until_id:
-            break
+            if exists:
+                continue
+            if m.get("text") or m.get("buttons"):
+                try:
+                    full_text = await resolver.resolve_message(m["text"], m.get("buttons") or [])
+                    if full_text:
+                        from ..core import pipeline
+                        pipeline.process_message(name, m["id"], full_text)
+                    else:
+                        _remember_message(name, m)
+                except Exception as e:
+                    logstream.error("backfill", f"[{name}] 补漏消息 {m['id']} 处理失败: {e}")
+                    _remember_message(name, m)
+            else:
+                _remember_message(name, m)
+            processed += 1
+
         before = min(ids)
+        if before <= until_id:
+            return finish_complete()
+        remember(before)
+        if processed >= budget:
+            return partial(before)
         await asyncio.sleep(random.uniform(3, 6))  # 翻页间隔，避免触发风控
-    # 循环结束（预算内补完）：缺口已全部覆盖，接缝推进到缺口右端
-    # （newest_min_id-1 即本轮回溯的起点消息 id，该点之前的缺口全部补完；
-    #   若循环因"到达频道最早消息"退出且未补到缺口右端，说明缺口范围超出了频道历史，
-    #   也以已入库消息的最大 id 兜底）
-    filled_max = db.query(
-        "SELECT max(message_id) m FROM messages WHERE channel=? AND message_id>? AND message_id<?",
-        (name, until_id, newest_min_id), one=True)["m"]
-    marker = max(newest_min_id - 1, (filled_max or until_id))
-    if marker > until_id:
-        db.execute("UPDATE channels SET last_message_id=?, last_fetch_at=? WHERE id=?",
-                   (marker, time.time(), ch["id"]))
-    logstream.info("backfill", f"[{name}] 缺口补漏完成，本轮共处理 {processed} 条")
-    return True

@@ -16,9 +16,24 @@ from ..core import logstream
 _lock = threading.Lock()
 _client = None  # P115Client 单例（懒加载）
 
+# 登录态/容量查询缓存：后台仪表盘与文件浏览会频繁调用，避免每次都打 115 接口
+_cache_lock = threading.Lock()
+_login_cache: tuple[float, dict] | None = None  # (过期时间, 结果)
+_space_cache: tuple[float, dict] | None = None
+_LOGIN_OK_TTL = 60      # 登录有效：60 秒内复用
+_LOGIN_BAD_TTL = 30     # 登录失效：30 秒内复用（便于恢复后尽快识别）
+_SPACE_TTL = 300        # 容量信息：5 分钟
+
 
 class Pan115Error(Exception):
     pass
+
+
+def _invalidate_caches():
+    global _login_cache, _space_cache
+    with _cache_lock:
+        _login_cache = None
+        _space_cache = None
 
 
 def _get_client():
@@ -40,6 +55,7 @@ def reset_client():
     global _client
     with _lock:
         _client = None
+    _invalidate_caches()
 
 
 # ---------- 扫码登录 ----------
@@ -93,8 +109,15 @@ def qrcode_finish(uid: str, app: str) -> dict:
 
 # ---------- 账号 ----------
 
-def space_info() -> dict:
-    """容量信息 {total, use, free, ratio}（字节）。"""
+def space_info(force: bool = False) -> dict:
+    """容量信息 {total, use, free, ratio}（字节）。默认复用 5 分钟缓存。"""
+    global _space_cache
+    now = time.time()
+    if not force:
+        with _cache_lock:
+            cached = _space_cache
+        if cached and now < cached[0]:
+            return cached[1]
     client = _get_client()
     resp = client.user_space_info()
     if not resp.get("state"):
@@ -104,22 +127,40 @@ def space_info() -> dict:
     use = int(data.get("use_size", 0))
     free = int(data.get("free_size", max(total - use, 0)))
     ratio = round(use / total * 100, 1) if total else 0
-    return {"total": total, "use": use, "free": free, "ratio": ratio}
+    result = {"total": total, "use": use, "free": free, "ratio": ratio}
+    with _cache_lock:
+        _space_cache = (now + _SPACE_TTL, result)
+    return result
 
-def check_login() -> dict:
-    """校验 cookie，返回 {ok, name, err}。"""
+
+def check_login(force: bool = False) -> dict:
+    """校验 cookie，返回 {ok, name, err}。成功缓存 60s、失败缓存 30s（force 跳过缓存）。"""
+    global _login_cache
+    now = time.time()
+    if not force:
+        with _cache_lock:
+            cached = _login_cache
+        if cached and now < cached[0]:
+            return cached[1]
     try:
         client = _get_client()
         resp = client.user_my_info()
         if resp.get("state"):
             data = resp.get("data", {})
             db.set_setting("cookie_ok", True)
-            return {"ok": True, "name": data.get("user_name", "") or data.get("uname", "")}
-        db.set_setting("cookie_ok", False)
-        return {"ok": False, "err": str(resp)[:200]}
+            result = {"ok": True, "name": data.get("user_name", "") or data.get("uname", "")}
+            ttl = _LOGIN_OK_TTL
+        else:
+            db.set_setting("cookie_ok", False)
+            result = {"ok": False, "err": str(resp)[:200]}
+            ttl = _LOGIN_BAD_TTL
     except Exception as e:
         db.set_setting("cookie_ok", False)
-        return {"ok": False, "err": str(e)[:200]}
+        result = {"ok": False, "err": str(e)[:200]}
+        ttl = _LOGIN_BAD_TTL
+    with _cache_lock:
+        _login_cache = (now + ttl, result)
+    return result
 
 
 # ---------- 文件系统 ----------
@@ -134,7 +175,7 @@ def _list_dir(pid: int = 0) -> dict[str, int]:
         if not resp.get("state"):
             raise Pan115Error(f"fs_files 失败: {str(resp)[:200]}")
         for f in resp.get("data", []):
-            if f.get("fc") == "0":  # 目录
+            if str(f.get("fc")) == "0":  # 目录
                 dirs[f["file_name"]] = int(f["fid"])
         total = int(resp.get("count", 0))
         offset += 1150
@@ -201,7 +242,7 @@ def share_snap_all(share_code: str, receive_code: str, max_files: int = 5000) ->
                 title = resp.get("shareinfo", {}).get("share_title", "") or resp.get("title", "") or ""
             for f in data:
                 fid = f.get("fid") or f.get("file_id")
-                if f.get("fc") == "0":  # 子目录，继续遍历
+                if str(f.get("fc")) == "0":  # 子目录，继续遍历
                     stack.append(int(fid))
                 else:
                     size = int(f.get("fs", 0) or 0)
@@ -243,13 +284,21 @@ def offline_download(url: str, cid: int) -> dict:
 
 
 def task_list_all(max_pages: int = 5) -> list[dict]:
-    """拉取 115 云下载任务列表（含 url/name/percent/status 字段）。"""
+    """拉取 115 云下载任务列表（含 url/name/percent/status 字段）。
+
+    任一页接口失败都会抛出 Pan115Error（而不是返回不完整/空列表），
+    调用方据此跳过本轮判定，避免把「接口异常」误判成「任务不存在 → 下载失败」。
+    """
     client = _get_client()
     out: list[dict] = []
     for page in range(1, max_pages + 1):
-        resp = client.clouddownload_task_list({"page": page, "page_size": 100})
+        try:
+            resp = client.clouddownload_task_list({"page": page, "page_size": 100})
+        except Exception as e:
+            raise Pan115Error(f"拉取云下载任务列表失败: {e}")
         if not resp.get("state"):
-            break
+            msg = resp.get("error", "") or str(resp)[:200]
+            raise Pan115Error(f"拉取云下载任务列表失败: {msg}")
         tasks = resp.get("tasks") or []
         out.extend(tasks)
         if len(tasks) < 100:

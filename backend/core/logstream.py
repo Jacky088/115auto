@@ -7,6 +7,16 @@ from .. import database as db
 
 _buf: deque = deque(maxlen=500)
 _subscribers: set[asyncio.Queue] = set()
+_loop: asyncio.AbstractEventLoop | None = None  # WebSocket 所在事件循环（日志可能来自工作线程）
+
+
+def _push(q: asyncio.Queue, entry: dict):
+    try:
+        q.put_nowait(entry)
+    except asyncio.QueueFull:
+        pass  # 客户端消费太慢：丢弃这一条实时日志，保留订阅（不能因此永久退订）
+    except Exception:
+        _subscribers.discard(q)
 
 
 def log(level: str, module: str, message: str):
@@ -16,14 +26,20 @@ def log(level: str, module: str, message: str):
         db.add_log(level, module, message)
     except Exception:
         pass
-    dead = []
-    for q in _subscribers:
-        try:
-            q.put_nowait(entry)
-        except Exception:
-            dead.append(q)
-    for q in dead:
-        _subscribers.discard(q)
+    try:
+        current = asyncio.get_running_loop()
+    except RuntimeError:
+        current = None
+    target = _loop
+    for q in list(_subscribers):
+        if target is not None and current is not target:
+            # 来自线程池（如转存工作器）：切换到事件循环线程，asyncio.Queue 不是线程安全的
+            try:
+                target.call_soon_threadsafe(_push, q, entry)
+            except RuntimeError:
+                _subscribers.discard(q)  # 事件循环已关闭
+        else:
+            _push(q, entry)
 
 
 def info(module, message): log("info", module, message)
@@ -36,10 +52,18 @@ def recent(n: int = 200) -> list[dict]:
 
 
 def subscribe() -> asyncio.Queue:
+    global _loop
+    try:
+        _loop = asyncio.get_running_loop()
+    except RuntimeError:
+        _loop = None
     q: asyncio.Queue = asyncio.Queue(maxsize=200)
     _subscribers.add(q)
     return q
 
 
 def unsubscribe(q: asyncio.Queue):
+    global _loop
     _subscribers.discard(q)
+    if not _subscribers:
+        _loop = None

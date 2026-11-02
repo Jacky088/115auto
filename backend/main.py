@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from . import auth, config, database as db
-from .api import account, manage, ws
+from .api import account, files, manage, ws
 from .core import logstream
 from .tg import polling, userbot
 from .worker import bot_commands, jobs, queue_worker
@@ -19,6 +19,10 @@ _background: list[asyncio.Task] = []
 async def lifespan(app: FastAPI):
     auth.ensure_initial_password()
     logstream.info("system", "115 自动转存助手启动")
+    # 进程重启恢复：上一轮被中断的 running 任务重新排队，否则会永久卡在「转存中」
+    recovered = db.execute("UPDATE transfers SET status='queued' WHERE status='running'")
+    if recovered:
+        logstream.warn("transfer", f"检测到 {recovered} 个上次中断的转存任务，已重新加入队列")
     # 后台任务
     mode = db.get_setting("tg_mode", "polling")
     if mode in ("polling", "both"):
@@ -38,6 +42,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="115 自动转存助手", lifespan=lifespan)
 app.include_router(manage.router)
 app.include_router(account.router)
+app.include_router(files.router)
 app.include_router(ws.router)
 
 

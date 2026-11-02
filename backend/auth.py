@@ -10,6 +10,7 @@ import jwt
 from . import config, database as db
 
 _jwt_secret = ""
+_secret_lock = threading.Lock()
 _fail_lock = threading.Lock()
 _fail_records: list[float] = []  # 登录失败时间戳（内存，重启清零）
 FAIL_LIMIT = 5       # 窗口内最大失败次数
@@ -32,12 +33,15 @@ def record_login_fail():
 
 def _load_secret() -> str:
     global _jwt_secret
-    if not _jwt_secret:
-        if config.SECRET_FILE.exists():
-            _jwt_secret = config.SECRET_FILE.read_text().strip()
-        else:
-            _jwt_secret = secrets.token_hex(32)
-            config.SECRET_FILE.write_text(_jwt_secret)
+    if _jwt_secret:
+        return _jwt_secret
+    with _secret_lock:
+        if not _jwt_secret:
+            if config.SECRET_FILE.exists():
+                _jwt_secret = config.SECRET_FILE.read_text().strip()
+            if not _jwt_secret:
+                _jwt_secret = secrets.token_hex(32)
+                config.SECRET_FILE.write_text(_jwt_secret)
     return _jwt_secret
 
 

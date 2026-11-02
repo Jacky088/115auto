@@ -1,10 +1,12 @@
 """主业务路由：登录/向导/仪表盘/频道/规则/黑名单/转存记录/设置/日志。"""
+import re
 import time
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from .. import auth, database as db
-from ..core import classifier, logstream, pipeline
+from .. import auth, config, database as db
+from ..core import classifier, filters, logstream, pipeline
+from ..pan115 import client as pan
 from ..worker import jobs
 from .deps import require_user
 
@@ -20,7 +22,7 @@ def login(body: dict):
         logstream.warn("system", "登录请求被限速（连续失败过多）")
         raise HTTPException(429, "失败次数过多，请 1 分钟后再试")
     stored = db.get_setting("web_password_hash", "")
-    if username != "admin" or not auth.verify_password(password, stored):
+    if username != str(config.WEB_USERNAME or "admin") or not auth.verify_password(password, stored):
         auth.record_login_fail()
         logstream.warn("system", "网页登录失败（用户名或密码错误）")
         raise HTTPException(401, "用户名或密码错误")
@@ -62,8 +64,10 @@ def wizard_complete(_=Depends(require_user)):
 @router.post("/system/start")
 def system_start(_=Depends(require_user)):
     """开始运行：启动监听与转存。启动前做就绪检查。"""
-    if not db.get_setting("cookie_ok", None):
-        raise HTTPException(400, "115 未登录，请先到「账号管理」扫码登录")
+    # 强制校验一次真实登录态（避免 DB 里的 cookie_ok 过期/未初始化导致误判）
+    st = pan.check_login(True)
+    if not st.get("ok"):
+        raise HTTPException(400, f"115 未登录或 Cookie 失效：{st.get('err', '请先到「账号管理」扫码登录')}")
     n_ch = db.query("SELECT count(*) c FROM channels WHERE enabled=1", one=True)["c"]
     if n_ch == 0:
         raise HTTPException(400, "尚未添加监控频道，请先到「频道管理」添加")
@@ -99,8 +103,11 @@ def system_state(_=Depends(require_user)):
 # ---------- dashboard ----------
 @router.get("/dashboard/stats")
 def dashboard(_=Depends(require_user)):
+    from datetime import datetime
+
     today_quota = db.quota_today()
-    today_start = time.time() - (time.time() % 86400) - 8 * 3600  # 近似当日 0 点（东八区）
+    # 以服务器本地时区的 0 点为今日起点（与 quota_today 的 date.today() 保持一致）
+    today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
     rows = db.query(
         "SELECT status, count(*) c FROM transfers WHERE created_at>=? GROUP BY status", (today_start,))
     by_status = {r["status"]: r["c"] for r in rows}
@@ -137,7 +144,6 @@ def add_channel(body: dict, _=Depends(require_user)):
     name = (body.get("name") or "").strip()
     ctype = body.get("type", "polling")
     # 允许粘贴完整链接
-    import re
     m = re.search(r"t\.me/(?:s/)?@?([0-9A-Za-z_]+)", name)
     if m:
         name = m.group(1)
@@ -197,22 +203,76 @@ def get_rules(_=Depends(require_user)):
 
 @router.put("/rules")
 def save_rules(body: dict, _=Depends(require_user)):
-    rules = body.get("rules", [])
-    db.execute("DELETE FROM rules")
-    for i, r in enumerate(rules):
-        db.execute("INSERT INTO rules(pattern,category,priority,enabled) VALUES(?,?,?,?)",
-                   (r["pattern"], r["category"], int(r.get("priority", i + 1)),
-                    1 if r.get("enabled", 1) else 0))
-    for r in body.get("routes", []):
-        db.execute(
-            "INSERT INTO routes(category,target_dir,offline_dir) VALUES(?,?,?)"
-            " ON CONFLICT(category) DO UPDATE SET target_dir=excluded.target_dir,"
-            " offline_dir=excluded.offline_dir",
-            (r["category"], r["target_dir"], r.get("offline_dir", "")))
+    """保存规则与目录映射。
+
+    - 只有请求里带 `rules` 时才替换规则（前端「目录映射」保存只传 routes，不能清空规则）
+    - 带 `routes` 时按提交的完整列表同步：未提交的分类会被删除（支持删除分类映射）
+    """
+    saved_rules = saved_routes = None
+
+    if "rules" in body:
+        rules = body.get("rules") or []
+        if not isinstance(rules, list):
+            raise HTTPException(400, "rules 必须是数组")
+        cleaned = []
+        for i, r in enumerate(rules):
+            if not isinstance(r, dict):
+                raise HTTPException(400, f"第 {i + 1} 条规则格式不正确")
+            pattern = str(r.get("pattern") or "").strip()
+            category = str(r.get("category") or "").strip()
+            if not pattern or not category:
+                raise HTTPException(400, f"第 {i + 1} 条规则的正则和分类不能为空")
+            try:
+                re.compile(pattern)
+            except re.error as e:
+                raise HTTPException(400, f"第 {i + 1} 条规则的正则无效（{pattern}）: {e}")
+            try:
+                priority = int(r.get("priority", i + 1))
+            except (TypeError, ValueError):
+                raise HTTPException(400, f"第 {i + 1} 条规则的优先级必须是数字")
+            cleaned.append((pattern, category, priority, 1 if r.get("enabled", 1) else 0))
+        db.execute("DELETE FROM rules")
+        for item in cleaned:
+            db.execute("INSERT INTO rules(pattern,category,priority,enabled) VALUES(?,?,?,?)", item)
+        saved_rules = len(cleaned)
+
+    if "routes" in body:
+        routes = body.get("routes") or []
+        if not isinstance(routes, list):
+            raise HTTPException(400, "routes 必须是数组")
+        categories = set()
+        for i, r in enumerate(routes):
+            if not isinstance(r, dict):
+                raise HTTPException(400, f"第 {i + 1} 个分类映射格式不正确")
+            category = str(r.get("category") or "").strip()
+            target = str(r.get("target_dir") or "").strip()
+            offline = str(r.get("offline_dir") or "").strip()
+            if not category:
+                raise HTTPException(400, f"第 {i + 1} 个分类映射的分类名不能为空")
+            if not target:
+                raise HTTPException(400, f"分类「{category}」的分享转存目录不能为空（可填 skip）")
+            categories.add(category)
+            db.execute(
+                "INSERT INTO routes(category,target_dir,offline_dir) VALUES(?,?,?)"
+                " ON CONFLICT(category) DO UPDATE SET target_dir=excluded.target_dir,"
+                " offline_dir=excluded.offline_dir",
+                (category, target, offline))
+        # 全量同步：删除本次未提交的分类映射
+        for row in db.query("SELECT category FROM routes"):
+            if row["category"] not in categories:
+                db.execute("DELETE FROM routes WHERE category=?", (row["category"],))
+        saved_routes = len(categories)
+
     if "unclassified_action" in body:
         db.set_setting("unclassified_action", body["unclassified_action"])
-    logstream.info("rules", f"分类规则/目录映射已更新（{len(body.get('rules', []))} 条规则, "
-                            f"{len(body.get('routes', []))} 个分类映射）")
+
+    classifier.invalidate()
+    parts = []
+    if saved_rules is not None:
+        parts.append(f"{saved_rules} 条规则")
+    if saved_routes is not None:
+        parts.append(f"{saved_routes} 个分类映射")
+    logstream.info("rules", f"分类规则/目录映射已更新（{'、'.join(parts) or '无变更'}）")
     return {"ok": True}
 
 
@@ -225,6 +285,7 @@ def reset_rules(_=Depends(require_user)):
         db.execute("INSERT INTO rules(pattern,category,priority) VALUES(?,?,?)", (pat, cat, pri))
     for cat, d in DEFAULT_ROUTES:
         db.execute("INSERT OR IGNORE INTO routes(category,target_dir,offline_dir) VALUES(?,?,'')", (cat, d))
+    classifier.invalidate()
     logstream.info("rules", f"已恢复默认规则（{len(DEFAULT_RULES)} 条），缺失的默认分类目录已补齐")
     return {"ok": True, "count": len(DEFAULT_RULES)}
 
@@ -273,6 +334,7 @@ def restore_blacklist_defaults(_=Depends(require_user)):
         added += db.execute(
             "INSERT OR IGNORE INTO blacklist(type,value,note,created_at) VALUES('keyword',?,'',?)",
             (kw, time.time()))
+    filters.invalidate()
     logstream.info("blacklist", f"已补齐默认关键词黑名单（新增 {added} 条）")
     return {"ok": True, "added": added, "total": len(DEFAULT_BLACKLIST_KEYWORDS)}
 
@@ -299,6 +361,7 @@ def add_blacklist(btype: str, body: dict, _=Depends(require_user)):
             db.execute("INSERT OR IGNORE INTO blacklist(type,value,note,created_at) VALUES(?,?,?,?)",
                        (btype, line, body.get("note", ""), time.time()))
     label = {"keyword": "关键词", "channel": "频道", "file_pattern": "文件名正则"}[btype]
+    filters.invalidate()
     logstream.info("blacklist", f"添加{label}黑名单: {value.splitlines()[0][:40]}"
                                 f"{' 等' if len(value.splitlines()) > 1 else ''}")
     return {"ok": True}
@@ -306,8 +369,9 @@ def add_blacklist(btype: str, body: dict, _=Depends(require_user)):
 
 @router.delete("/blacklist/{btype}/{item_id}")
 def del_blacklist(btype: str, item_id: int, _=Depends(require_user)):
-    row = db.query("SELECT value FROM blacklist WHERE id=? AND type=?", (item_id, btype))
+    row = db.query("SELECT value FROM blacklist WHERE id=? AND type=?", (item_id, btype), one=True)
     db.execute("DELETE FROM blacklist WHERE id=? AND type=?", (item_id, btype))
+    filters.invalidate()
     if row:
         logstream.info("blacklist", f"删除黑名单条目: {row['value'][:40]}")
     return {"ok": True}
@@ -337,6 +401,10 @@ def retry_transfer(t_id: int, _=Depends(require_user)):
     row = db.query("SELECT status FROM transfers WHERE id=?", (t_id,), one=True)
     if not row:
         raise HTTPException(404, "记录不存在")
+    # 成功/已提交下载/正在转存的任务不能重试，否则会重复转存
+    if row["status"] in ("success", "submitted", "running"):
+        label = {"success": "已成功", "submitted": "已提交云下载", "running": "正在转存"}[row["status"]]
+        raise HTTPException(400, f"任务{label}，不能重复重试")
     db.execute("UPDATE transfers SET status='queued', attempts=0, error='', next_retry_at=NULL WHERE id=?", (t_id,))
     logstream.info("transfer", f"手动重试任务 #{t_id}（原状态: {row['status']}）")
     return {"ok": True}
@@ -353,11 +421,86 @@ def retry_all_failed(_=Depends(require_user)):
 
 @router.delete("/transfers/{t_id}")
 def cancel_transfer(t_id: int, _=Depends(require_user)):
-    db.execute("DELETE FROM transfers WHERE id=? AND status IN ('queued','running','failed','skipped')", (t_id,))
+    row = db.query("SELECT status FROM transfers WHERE id=?", (t_id,), one=True)
+    if not row:
+        raise HTTPException(404, "记录不存在")
+    # 与前端删除按钮保持一致：可删除排队/已提交跟踪/失败/跳过/拦截的记录；
+    # 正在转存或已成功的记录不允许删除，避免误删正在使用/已完成的数据。
+    if row["status"] in ("running", "success"):
+        label = {"running": "正在转存", "success": "已成功"}[row["status"]]
+        raise HTTPException(400, f"任务{label}，不能删除")
+    db.execute("DELETE FROM transfers WHERE id=?", (t_id,))
+    logstream.info("transfer", f"已删除任务记录 #{t_id}（原状态: {row['status']}）")
     return {"ok": True}
 
 
 # ---------- settings ----------
+_INT_SETTINGS = {
+    "poll_interval_min": (1, 3600),
+    "poll_interval_max": (1, 3600),
+    "transfer_interval_min": (1, 3600),
+    "transfer_interval_max": (1, 3600),
+    "daily_limit": (0, 10000),
+    "tg_api_id": (0, 2 ** 31 - 1),
+}
+_BOOL_SETTINGS = {"enable_share_transfer", "enable_offline_download",
+                  "notify_transfer_success", "schedule_enabled"}
+
+
+def _norm_setting(k: str, v):
+    """归一化设置值；非法输入抛 400，避免脏配置让后台任务崩溃。"""
+    if k == "tg_api_id":
+        # Userbot 未配置时该值为空串：Settings 页会原样回传，必须允许空值，
+        # 否则「保存设置」会被误判为非法整数而整体失败；非空值仍走下方整数范围校验。
+        if v is None or (isinstance(v, str) and not v.strip()):
+            return ""
+    if k in _BOOL_SETTINGS:
+        if isinstance(v, str):
+            return v.strip().lower() in ("1", "true", "yes", "on")
+        return bool(v)
+    if k in _INT_SETTINGS:
+        lo, hi = _INT_SETTINGS[k]
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            raise HTTPException(400, f"{k} 必须是整数")
+        return max(lo, min(hi, n))
+    if k == "min_size_gb":
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "min_size_gb 必须是数字")
+        return max(0.0, min(1000.0, f))
+    if k == "retry_backoff":
+        if not isinstance(v, (list, tuple)) or not v:
+            raise HTTPException(400, "重试退避至少需要填写一个大于 0 的秒数")
+        vals = []
+        for item in v:
+            try:
+                n = int(float(item))
+            except (TypeError, ValueError):
+                raise HTTPException(400, "重试退避只能包含数字（秒）")
+            if n < 1:
+                raise HTTPException(400, "重试退避的秒数必须大于 0")
+            vals.append(min(n, 86400))
+        return vals[:10]
+    if k in ("schedule_start", "schedule_end"):
+        s = str(v).strip()
+        if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", s):
+            raise HTTPException(400, f"{k} 需为 HH:MM 格式（如 08:30）")
+        return s
+    if k == "tg_mode":
+        s = str(v).strip()
+        if s not in ("polling", "userbot", "both"):
+            raise HTTPException(400, "tg_mode 仅支持 polling / userbot / both")
+        return s
+    if k == "unclassified_action":
+        return str(v).strip() or "skip"
+    if v is None:
+        return ""
+    return v if isinstance(v, str) else str(v)
+
+
 @router.get("/settings")
 def get_settings(_=Depends(require_user)):
     keys = ["tg_mode", "enable_share_transfer", "enable_offline_download",
@@ -379,11 +522,16 @@ def put_settings(body: dict, _=Depends(require_user)):
                "notify_transfer_success", "proxy",
                "schedule_enabled", "schedule_start", "schedule_end",
                "tg_api_id", "tg_api_hash", "tg_phone"}
-    for k, v in body.items():
-        if k in allowed:
-            db.set_setting(k, v)
-    changed = [k for k in body if k in allowed]
-    logstream.info("system", f"系统设置已修改: {', '.join(changed) if changed else '（无变更）'}")
+    # 先整体校验再落库：任一字段非法时不写入，避免半新半旧配置
+    updates = {k: _norm_setting(k, v) for k, v in body.items() if k in allowed}
+    # 间隔成对提交时保证 min <= max
+    for lo_k, hi_k in (("poll_interval_min", "poll_interval_max"),
+                       ("transfer_interval_min", "transfer_interval_max")):
+        if lo_k in updates and hi_k in updates and updates[lo_k] > updates[hi_k]:
+            updates[lo_k], updates[hi_k] = updates[hi_k], updates[lo_k]
+    for k, v in updates.items():
+        db.set_setting(k, v)
+    logstream.info("system", f"系统设置已修改: {', '.join(updates) if updates else '（无变更）'}")
     return {"ok": True}
 
 

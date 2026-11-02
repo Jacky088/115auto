@@ -132,7 +132,7 @@
 </template>
 
 <script setup>
-import { nextTick, onMounted, ref, watch } from 'vue'
+import { nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { api, errMsg, saveOk } from '../api'
 
@@ -142,7 +142,9 @@ const retryText = ref('')
 const testing = ref(false)
 const dirty = ref(false)
 const isMobile = ref(window.innerWidth <= 768)
-window.addEventListener('resize', () => { isMobile.value = window.innerWidth <= 768 })
+const onRz = () => { isMobile.value = window.innerWidth <= 768 }
+onMounted(() => window.addEventListener('resize', onRz))
+onUnmounted(() => window.removeEventListener('resize', onRz))
 let suppressWatch = false
 
 watch([f, retryText], () => {
@@ -160,6 +162,10 @@ const load = async () => {
 }
 const save = async () => {
   const backoff = retryText.value.split(',').map((s) => parseInt(s.trim())).filter((n) => n > 0)
+  if (!backoff.length) {
+    ElMessage.error('重试退避至少需要填写一个大于 0 的秒数，例如 60, 300, 1800')
+    return
+  }
   try {
     await api.put('/api/settings', { ...f.value, retry_backoff: backoff })
     dirty.value = false

@@ -13,8 +13,15 @@ def _rules() -> list[dict]:
     now = time.time()
     if now - _cache[1] > _CACHE_TTL:
         rows = db.query("SELECT * FROM rules WHERE enabled=1 ORDER BY priority ASC, id ASC")
-        _cache = ([dict(r) for r in rows], now)
+        # 空正则 re.search("") 会命中一切——过滤掉，避免整站分类被一条坏规则劫持
+        _cache = ([dict(r) for r in rows if (r["pattern"] or "").strip()], now)
     return _cache[0]
+
+
+def invalidate():
+    """规则/路由变更后立即失效缓存（否则最多 5 秒内仍用旧规则）。"""
+    global _cache
+    _cache = ([], 0.0)
 
 
 def classify(text: str) -> tuple[str, str]:

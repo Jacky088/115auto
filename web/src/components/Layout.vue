@@ -10,6 +10,7 @@
         </div>
         <el-menu :default-active="$route.path" router class="aside-menu" @select="menuOpen = false">
           <el-menu-item index="/dashboard"><el-icon><Odometer /></el-icon>仪表盘</el-menu-item>
+          <el-menu-item index="/files"><el-icon><FolderOpened /></el-icon>网盘文件</el-menu-item>
           <el-menu-item index="/channels"><el-icon><Connection /></el-icon>频道管理</el-menu-item>
           <el-menu-item index="/rules"><el-icon><Sort /></el-icon>分类规则</el-menu-item>
           <el-menu-item index="/blacklist"><el-icon><CircleClose /></el-icon>黑名单</el-menu-item>
@@ -29,6 +30,7 @@
       </div>
       <el-menu :default-active="$route.path" router class="aside-menu">
         <el-menu-item index="/dashboard"><el-icon><Odometer /></el-icon>仪表盘</el-menu-item>
+        <el-menu-item index="/files"><el-icon><FolderOpened /></el-icon>网盘文件</el-menu-item>
         <el-menu-item index="/channels"><el-icon><Connection /></el-icon>频道管理</el-menu-item>
         <el-menu-item index="/rules"><el-icon><Sort /></el-icon>分类规则</el-menu-item>
         <el-menu-item index="/blacklist"><el-icon><CircleClose /></el-icon>黑名单</el-menu-item>
@@ -97,8 +99,9 @@ import { api, errMsg, saveOk } from '../api'
 
 const route = useRoute()
 const router = useRouter()
-const titles = { dashboard: '仪表盘', channels: '频道管理', rules: '分类规则', blacklist: '黑名单',
-                 transfers: '转存记录', history: '日志查询', account: '账号管理', settings: '系统设置', setup: '初始化向导' }
+const titles = { dashboard: '仪表盘', files: '网盘文件', channels: '频道管理', rules: '分类规则',
+                 blacklist: '黑名单', transfers: '转存记录', history: '日志查询',
+                 account: '账号管理', settings: '系统设置', setup: '初始化向导' }
 const title = computed(() => titles[route.path.slice(1)] || '')
 
 // 移动端菜单抽屉
@@ -130,8 +133,6 @@ const stopSystem = async () => {
     loadSys()
   } catch (e) { ElMessage.error(errMsg(e)) } finally { toggling.value = false }
 }
-loadSys()
-setInterval(loadSys, 10000)
 
 const isMobile = ref(window.innerWidth <= 768)
 const onResize = () => {
@@ -148,8 +149,19 @@ const check = async () => {
     cookieExpired.value = data.cookie_ok === false && data.completed
   } catch { /* ignore */ }
 }
-check()
-setInterval(check, 60000)
+// 定时刷新系统状态/ cookie 状态：随组件销毁一起清理，避免退出登录后定时器累积
+let sysTimer = null
+let cookieTimer = null
+onMounted(() => {
+  loadSys()
+  check()
+  sysTimer = setInterval(loadSys, 10000)
+  cookieTimer = setInterval(check, 60000)
+})
+onUnmounted(() => {
+  clearInterval(sysTimer)
+  clearInterval(cookieTimer)
+})
 
 const pwdVisible = ref(false)
 const pwdForm = reactive({ old: '', new: '' })

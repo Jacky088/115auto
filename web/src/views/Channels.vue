@@ -72,7 +72,7 @@
 </template>
 
 <script setup>
-import { onMounted, reactive, ref } from 'vue'
+import { onMounted, onUnmounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { api, errMsg, fmtTime, highlightLinks, statusLabel, statusTagType } from '../api'
 
@@ -83,7 +83,9 @@ const previewVisible = ref(false)
 const previewCh = ref('')
 const previewMsgs = ref([])
 const drawerSize = ref(window.innerWidth <= 768 ? '94%' : '600px')
-window.addEventListener('resize', () => { drawerSize.value = window.innerWidth <= 768 ? '94%' : '600px' })
+const onRz = () => { drawerSize.value = window.innerWidth <= 768 ? '94%' : '600px' }
+onMounted(() => window.addEventListener('resize', onRz))
+onUnmounted(() => window.removeEventListener('resize', onRz))
 
 const load = async () => { channels.value = (await api.get('/api/channels')).data }
 const add = async () => {
@@ -96,19 +98,28 @@ const add = async () => {
   } catch (e) { ElMessage.error(errMsg(e)) }
 }
 const toggle = async (row, v) => {
-  await api.put(`/api/channels/${row.id}`, { enabled: v })
-  row.enabled = v ? 1 : 0
-  ElMessage.success(v ? `已启用监控 @${row.name}` : `已停用监控 @${row.name}`)
+  try {
+    await api.put(`/api/channels/${row.id}`, { enabled: v })
+    row.enabled = v ? 1 : 0
+    ElMessage.success(v ? `已启用监控 @${row.name}` : `已停用监控 @${row.name}`)
+  } catch (e) {
+    row.enabled = v ? 0 : 1  // 保存失败时恢复开关显示
+    ElMessage.error(errMsg(e))
+  }
 }
 const del = async (row) => {
-  await api.delete(`/api/channels/${row.id}`)
-  ElMessage.success(`已删除频道 @${row.name}`)
-  load()
+  try {
+    await api.delete(`/api/channels/${row.id}`)
+    ElMessage.success(`已删除频道 @${row.name}`)
+    load()
+  } catch (e) { ElMessage.error(errMsg(e)) }
 }
 const preview = async (row) => {
-  previewCh.value = row.name
-  previewMsgs.value = (await api.get(`/api/channels/${row.id}/messages`)).data
-  previewVisible.value = true
+  try {
+    previewCh.value = row.name
+    previewMsgs.value = (await api.get(`/api/channels/${row.id}/messages`)).data
+    previewVisible.value = true
+  } catch (e) { ElMessage.error(errMsg(e)) }
 }
 onMounted(load)
 </script>

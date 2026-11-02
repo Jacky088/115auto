@@ -1,124 +1,264 @@
 """Telethon Userbot：用户账号实时监听频道。支持网页驱动登录（手机号→验证码→两步验证密码）。
 
-登录状态机（供 API 调用）：
-  login_start(api_id, api_hash, phone) → 发送验证码
-  login_submit(code) → 若有两步验证则返回 needs_password
-  login_password(pwd) → 完成
+登录状态机（供 API 调用，全部为 async，运行在主事件循环上）：
+  await login_start(api_id, api_hash, phone) → 发送验证码
+  await login_submit(code) → 若有两步验证则返回 needs_password
+  await login_password(pwd) → 完成
 登录态保存在 data/tg_session.session，重启后自动连接。
+
+实现要点：
+- 登录过程使用独立的临时 session（data/tg_login.session），成功后原子替换主 session，
+  避免与正在运行的 userbot 争抢同一个 SQLite session 文件；
+- 所有 Telethon 调用直接 await，不在线程池里另建事件循环；
+- 接收循环（_pump）在主事件循环上用 asyncio.create_task 拉起。
 """
 import asyncio
-import threading
+from pathlib import Path
 
 from telethon import TelegramClient, events
+from telethon.errors import SessionPasswordNeededError
 
 from .. import config, database as db
 from ..core import logstream, pipeline
 from . import resolver
 
-_lock = threading.Lock()
+try:
+    from telethon.errors import PhoneCodeExpiredError, SessionExpiredError
+except Exception:  # pragma: no cover - 兼容不同 Telethon 版本
+    class PhoneCodeExpiredError(Exception):
+        pass
+
+    class SessionExpiredError(Exception):
+        pass
+
+_lock = asyncio.Lock()
 client: TelegramClient | None = None
 _login_flow: dict = {}  # 网页登录中间状态
 
+_LOGIN_SESSION = config.TG_SESSION_FILE.parent / "tg_login"
+_SESSION_SUFFIXES = (".session", ".session-journal")
 
-def _make(api_id: int, api_hash: str, loop: asyncio.AbstractEventLoop | None = None) -> TelegramClient:
-    proxy = db.get_setting("proxy", "")
-    kw = {}
-    if loop is not None:
-        kw["loop"] = loop
-    if proxy:
-        # socks5://host:port 或 http://host:port（python-socks 两种都支持）
+
+def _session_files(base: Path) -> list[Path]:
+    return [base.with_name(base.name + suffix) for suffix in _SESSION_SUFFIXES]
+
+
+def _remove_session_files(base: Path):
+    for path in _session_files(base):
         try:
-            import python_socks  # noqa: F401
-            from telethon import connection
-            from python_socks import parse_proxy_url
-            kw["connection"] = connection.ConnectionTcpSOCKS5
-            kw["proxy"] = parse_proxy_url(proxy)
-        except ImportError:
-            logstream.warn("userbot", "未安装 python-socks，忽略代理设置")
-        except Exception as e:
-            logstream.warn("userbot", f"代理地址解析失败（{proxy}）: {e}")
-    return TelegramClient(config.TG_SESSION_FILE, api_id, api_hash, **kw)
+            path.unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
-def status() -> dict:
-    ok = db.get_setting("userbot_ok", None)
-    return {"configured": bool(db.get_setting("tg_api_id") and db.get_setting("tg_api_hash")),
-            "connected": bool(client and client.is_connected() and client.is_user_authorized()),
-            "login_pending": bool(_login_flow.get("pending")),
-            "ok": ok}
+def _proxy_kw() -> dict:
+    """把设置页的代理地址转成 Telethon 支持的 proxy 参数。
+
+    python-socks 的 parse_proxy_url 返回 (type, host, port, username, password)，
+    而 Telethon 需要 (proxy_type, addr, port, username, password, rdns) 或等价 dict；
+    这里显式构造 dict，避免元组顺序错位（rdns 被误当成用户名）。
+    """
+    proxy = str(db.get_setting("proxy", "") or "").strip()
+    if not proxy:
+        return {}
+    try:
+        from python_socks import parse_proxy_url
+
+        parsed = parse_proxy_url(proxy)
+        proxy_type, host, port = parsed[0], parsed[1], parsed[2]
+        username = parsed[3] if len(parsed) > 3 else None
+        password = parsed[4] if len(parsed) > 4 else None
+        return {"proxy": {
+            "proxy_type": proxy_type,
+            "addr": host,
+            "port": int(port),
+            "username": username or None,
+            "password": password or None,
+            "rdns": True,
+        }}
+    except Exception as e:
+        logstream.warn("userbot", f"代理配置无效（{proxy}），本次将直连: {e}")
+        return {}
 
 
-def login_start(api_id: int, api_hash: str, phone: str) -> dict:
-    """同步接口（在线程池跑），发送验证码。"""
-    with _lock:
-        global client
-        _login_flow.clear()
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        c = _make(api_id, api_hash, loop=loop)
-        c.connect()
-        sent = c.loop.run_until_complete(c.send_code_request(phone))
-        _login_flow.update({"pending": True, "client": c, "loop": loop, "phone": phone,
-                            "phone_code_hash": sent.phone_code_hash,
-                            "api_id": api_id, "api_hash": api_hash})
+def _make(api_id: int, api_hash: str, session_path: Path | None = None) -> TelegramClient:
+    return TelegramClient(
+        str(session_path or config.TG_SESSION_FILE), int(api_id), str(api_hash), **_proxy_kw())
+
+
+async def status() -> dict:
+    connected = False
+    if client is not None:
+        try:
+            connected = bool(client.is_connected()) and bool(await client.is_user_authorized())
+        except Exception:
+            connected = False
+    return {
+        "configured": bool(db.get_setting("tg_api_id") and db.get_setting("tg_api_hash")),
+        "connected": connected,
+        "login_pending": bool(_login_flow.get("pending")),
+        "ok": db.get_setting("userbot_ok", None),
+    }
+
+
+async def _cleanup_flow():
+    """放弃当前登录流程：断开临时客户端并清理临时 session。"""
+    flow = _login_flow
+    c = flow.get("client")
+    if c is not None:
+        try:
+            await c.disconnect()
+        except Exception:
+            pass
+    _login_flow.clear()
+    _remove_session_files(_LOGIN_SESSION)
+
+
+async def login_start(api_id: int, api_hash: str, phone: str) -> dict:
+    """发送登录验证码（在临时 session 中完成，成功后替换主 session）。"""
+    async with _lock:
+        await _cleanup_flow()
+        c = _make(api_id, api_hash, _LOGIN_SESSION)
+        try:
+            await c.connect()
+            sent = await c.send_code_request(phone)
+        except Exception:
+            try:
+                await c.disconnect()
+            except Exception:
+                pass
+            _remove_session_files(_LOGIN_SESSION)
+            raise
+        _login_flow.update({
+            "pending": True,
+            "client": c,
+            "phone": phone,
+            "phone_code_hash": sent.phone_code_hash,
+            "api_id": int(api_id),
+            "api_hash": api_hash,
+        })
         return {"sent": True}
 
 
-def login_submit(code: str) -> dict:
-    with _lock:
-        flow = dict(_login_flow)
+async def login_submit(code: str) -> dict:
+    async with _lock:
+        flow = _login_flow
         if not flow.get("pending"):
-            raise RuntimeError("没有进行中的登录")
+            raise RuntimeError("没有进行中的登录，请先发送验证码")
         c: TelegramClient = flow["client"]
-        loop: asyncio.AbstractEventLoop = flow["loop"]
-        asyncio.set_event_loop(loop)
         try:
-            loop.run_until_complete(c.sign_in(phone=flow["phone"], code=code,
-                                              phone_code_hash=flow["phone_code_hash"]))
-        except Exception as e:
-            if "PASSWORD" in str(e).upper() or "SessionPasswordNeeded" in type(e).__name__:
-                _login_flow["needs_password"] = True
-                return {"needs_password": True}
+            await c.sign_in(phone=flow["phone"], code=code,
+                            phone_code_hash=flow["phone_code_hash"])
+        except SessionPasswordNeededError:
+            flow["needs_password"] = True
+            return {"needs_password": True}
+        except (PhoneCodeExpiredError, SessionExpiredError) as e:
+            await _cleanup_flow()
+            raise RuntimeError(f"验证码已失效，请重新发送验证码（{type(e).__name__}）")
+        try:
+            await _finish_login(c, flow)
+        except Exception:
+            # 收尾阶段失败（如网络中断导致新 session 校验失败）：清理流程，让用户重新发起登录
+            await _cleanup_flow()
             raise
-        _finish_login(c, flow)
         return {"ok": True}
 
 
-def login_password(pwd: str) -> dict:
-    with _lock:
-        flow = dict(_login_flow)
+async def login_password(pwd: str) -> dict:
+    async with _lock:
+        flow = _login_flow
         if not flow.get("needs_password"):
             raise RuntimeError("当前不需要两步验证密码")
         c: TelegramClient = flow["client"]
-        loop: asyncio.AbstractEventLoop = flow["loop"]
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(c.sign_in(password=pwd))
-        _finish_login(c, flow)
+        await c.sign_in(password=pwd)
+        try:
+            await _finish_login(c, flow)
+        except Exception:
+            await _cleanup_flow()
+            raise
         return {"ok": True}
 
 
-def _finish_login(c: TelegramClient, flow: dict):
+async def _finish_login(c: TelegramClient, flow: dict):
+    """登录成功：用临时 session 替换主 session，并拉起接收循环。"""
     global client
-    me = c.loop.run_until_complete(c.get_me())
-    db.set_setting("tg_api_id", flow["api_id"])
+    me = await c.get_me()
+    await c.disconnect()
+
+    # 断开旧客户端，确保主 session 文件可替换
+    old = client
+    client = None
+    if old is not None:
+        try:
+            await old.disconnect()
+        except Exception:
+            pass
+
+    _remove_session_files(config.TG_SESSION_FILE)
+    for suffix in _SESSION_SUFFIXES:
+        src = _LOGIN_SESSION.with_name(_LOGIN_SESSION.name + suffix)
+        dst = config.TG_SESSION_FILE.with_name(config.TG_SESSION_FILE.name + suffix)
+        if src.exists():
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            src.replace(dst)
+
+    db.set_setting("tg_api_id", int(flow["api_id"]))
     db.set_setting("tg_api_hash", flow["api_hash"])
     db.set_setting("tg_phone", flow["phone"])
+
+    # 用新的主 session 重新连接并校验，确认登录态真正可用
+    c2 = _make(int(flow["api_id"]), flow["api_hash"])
+    await c2.connect()
+    if not await c2.is_user_authorized():
+        await c2.disconnect()
+        raise RuntimeError("登录状态校验失败，请重新发送验证码登录")
+
+    client = c2
     db.set_setting("userbot_ok", True)
-    client = c
     _login_flow.clear()
-    logstream.info("userbot", f"Userbot 登录成功: {getattr(me, 'username', None) or getattr(me, 'first_name', '')}")
-    # 注册消息处理器并开始接收
-    _register_handlers(c)
-    # 拉起接收循环
-    asyncio.get_event_loop().create_task(_pump(c))
+    _remove_session_files(_LOGIN_SESSION)
+    _register_handlers(c2)
+    asyncio.create_task(_pump(c2), name="userbot-pump")
+    logstream.info("userbot",
+                   f"Userbot 登录成功: {getattr(me, 'username', None) or getattr(me, 'first_name', '')}")
 
 
 async def _pump(c: TelegramClient):
     try:
         await c.run_until_disconnected()
+    except asyncio.CancelledError:
+        raise
     except Exception as e:
         logstream.error("userbot", f"接收循环退出: {e}")
+    else:
+        logstream.warn("userbot", "Userbot 连接已断开")
+    # 只有当前客户端退出才标记失效：重新登录时旧客户端断开不应覆盖新登录状态
+    if client is c:
         db.set_setting("userbot_ok", False)
+
+
+def _norm_id(value) -> str:
+    s = str(value or "").strip().lstrip("@").lower()
+    if s.startswith("-100"):
+        return s[4:]
+    if s.startswith("-"):
+        return s[1:]
+    return s
+
+
+def _match_channel(rows, chat) -> str | None:
+    """按 username 或数字 id 匹配已配置的 userbot 频道，返回配置里的频道名。"""
+    username = (getattr(chat, "username", None) or "").strip().lstrip("@").lower()
+    chat_id = _norm_id(getattr(chat, "id", ""))
+    for r in rows:
+        name = str(r["name"] or "").strip().lstrip("@")
+        if not name:
+            continue
+        if username and name.lower() == username:
+            return name
+        if chat_id and _norm_id(name) == chat_id:
+            return name
+    return None
 
 
 def _register_handlers(c: TelegramClient):
@@ -129,11 +269,13 @@ def _register_handlers(c: TelegramClient):
     async def on_new_message(event):
         try:
             chat = await event.get_chat()
-            name = getattr(chat, "username", None) or str(getattr(chat, "id", ""))
             watched = db.query("SELECT name FROM channels WHERE type='userbot' AND enabled=1")
-            names = {r["name"].lstrip("@").lower() for r in watched}
-            if names and (name or "").lower() not in names:
-                return
+            name = _match_channel(watched, chat)
+            if name is None:
+                # 未配置任何 userbot 频道时保持旧行为：处理所有消息
+                if watched:
+                    return
+                name = getattr(chat, "username", None) or str(getattr(chat, "id", ""))
             text = event.message.message or ""
             buttons = []
             rows = event.message.buttons
@@ -170,10 +312,12 @@ async def start_if_configured():
             client = c
             db.set_setting("userbot_ok", True)
             _register_handlers(c)
-            asyncio.get_event_loop().create_task(_pump(c))
+            asyncio.create_task(_pump(c), name="userbot-pump")
             logstream.info("userbot", "Userbot 已自动连接")
         else:
+            await c.disconnect()
             db.set_setting("userbot_ok", False)
             logstream.warn("userbot", "已有配置但 session 失效，请在网页重新登录")
     except Exception as e:
+        db.set_setting("userbot_ok", False)
         logstream.error("userbot", f"自动连接失败: {e}")

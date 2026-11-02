@@ -78,19 +78,28 @@ def _handle_command(text: str, chat_id: str) -> str:
 
 
 async def bot_command_loop():
-    """TG Bot long polling：处理远程指令。未配置 Token 时跳过。"""
+    """TG Bot long polling：处理远程指令。未配置 Token 时跳过。
+
+    每轮 long polling 前重新读取 Token/Chat ID/代理：网页改了配置后，
+    当前客户端会被主动关闭并按新配置重建（配置热更新）。
+    """
     global _last_update_id
     while True:
-        token = db.get_setting("notify_token", "")
-        chat_id = str(db.get_setting("notify_chat_id", "") or "")
+        token = str(db.get_setting("notify_token", "") or "").strip()
+        chat_id = str(db.get_setting("notify_chat_id", "") or "").strip()
+        proxy = _tg_proxy()
         if not token or not chat_id:
             await asyncio.sleep(30)
             continue
         try:
-            async with httpx.AsyncClient(proxy=_tg_proxy(), timeout=40) as client:
+            async with httpx.AsyncClient(proxy=proxy, timeout=40) as client:
                 logstream.info("system", "TG Bot 远程指令已启动（/help 查看指令）")
                 while True:
-                    # 每轮重新读 paused/token，保证 /pause 即时生效、配置热更新
+                    # 配置变化 → 退出内层循环，用新配置重建客户端
+                    cur_token = str(db.get_setting("notify_token", "") or "").strip()
+                    cur_chat = str(db.get_setting("notify_chat_id", "") or "").strip()
+                    if cur_token != token or cur_chat != chat_id or _tg_proxy() != proxy:
+                        break
                     params = {"timeout": 30, "offset": _last_update_id + 1,
                               "allowed_updates": '["message"]'}
                     resp = await client.get(f"https://api.telegram.org/bot{token}/getUpdates",

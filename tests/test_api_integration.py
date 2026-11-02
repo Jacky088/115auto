@@ -59,25 +59,31 @@ t = c.post("/api/rules/test", headers=h, json={"text": "某某电影预告"}).js
 check("关键词黑名单拦截", t["blocked"] and t["block_rule_value"] == "预告")
 
 print("\n=== E. 真实 TG 轮询（等待抓取）===")
-print("  等待轮询器抓取 regeng115 真实消息（最长 60s）...")
-deadline = time.time() + 60
-msgs = []
-while time.time() < deadline:
-    msgs = c.get("/api/channels/1/messages", headers=h).json()
-    if msgs:
-        break
-    time.sleep(5)
-check("抓到真实频道消息", len(msgs) > 0, f"{len(msgs)} 条")
-tr = c.get("/api/transfers", headers=h, params={"size": 100}).json()
-real = [i for i in tr["items"] if len(i["share_code"]) >= 5]
-print(f"  频道消息 {len(msgs)} 条，提取分享链接 {tr['total']} 条")
-cats = {}
-for i in tr["items"]:
-    cats[i["category"] or "(未分类)"] = cats.get(i["category"] or "(未分类)", 0) + 1
-print(f"  分类分布: {cats}")
-queued = [i for i in tr["items"] if i["status"] == "queued"]
-check("真实分享已入队", len(queued) > 0, str(len(queued)))
-check("入队任务均有目标目录", all(i["target_dir"] for i in queued))
+state = c.get("/api/system/state", headers=h).json()
+running = bool(state.get("running"))
+queued = []
+if not running:
+    print("  ⏭️  系统未开始运行（需先扫码登录 115 并在「开始运行」后启动），"
+          "跳过真实频道抓取与工作器验证")
+else:
+    print("  等待轮询器抓取 regeng115 真实消息（最长 60s）...")
+    deadline = time.time() + 60
+    msgs = []
+    while time.time() < deadline:
+        msgs = c.get("/api/channels/1/messages", headers=h).json()
+        if msgs:
+            break
+        time.sleep(5)
+    check("抓到真实频道消息", len(msgs) > 0, f"{len(msgs)} 条")
+    tr = c.get("/api/transfers", headers=h, params={"size": 100}).json()
+    print(f"  频道消息 {len(msgs)} 条，提取分享链接 {tr['total']} 条")
+    cats = {}
+    for i in tr["items"]:
+        cats[i["category"] or "(未分类)"] = cats.get(i["category"] or "(未分类)", 0) + 1
+    print(f"  分类分布: {cats}")
+    queued = [i for i in tr["items"] if i["status"] == "queued"]
+    check("真实分享已入队", len(queued) > 0, str(len(queued)))
+    check("入队任务均有目标目录", all(i["target_dir"] for i in queued))
 
 print("\n=== F. 115 扫码 API 状态机 ===")
 q = c.post("/api/account/115/qrcode", headers=h).json()
@@ -87,17 +93,20 @@ p = c.post("/api/account/115/qrcode/poll", headers=h, json={"token": q["token"],
 check("长轮询扫码状态返回", p.get("status") == 0, str(p))
 
 print("\n=== G. 无 Cookie 时工作器行为（等待一轮处理）===")
-print("  等待 45s 观察工作器消费队列...")
-time.sleep(45)
-tr2 = c.get("/api/transfers", headers=h, params={"size": 100}).json()
-running_or_tried = [i for i in tr2["items"] if i["attempts"] > 0]
-check("工作器已尝试处理队列", len(running_or_tried) > 0,
-      f"{len(running_or_tried)} 个任务已尝试")
-if running_or_tried:
-    sample = running_or_tried[0]
-    check("失败任务标记 115 未登录", "未登录" in sample["error"] or "cookie" in sample["error"].lower(),
-          sample["error"][:80])
-    check("已安排退避重试", sample["next_retry_at"] is not None)
+if not running:
+    print("  ⏭️  系统未运行，跳过工作器消费验证")
+else:
+    print("  等待 45s 观察工作器消费队列...")
+    time.sleep(45)
+    tr2 = c.get("/api/transfers", headers=h, params={"size": 100}).json()
+    running_or_tried = [i for i in tr2["items"] if i["attempts"] > 0]
+    check("工作器已尝试处理队列", len(running_or_tried) > 0,
+          f"{len(running_or_tried)} 个任务已尝试")
+    if running_or_tried:
+        sample = running_or_tried[0]
+        check("失败任务标记 115 未登录", "未登录" in sample["error"] or "cookie" in sample["error"].lower(),
+              sample["error"][:80])
+        check("已安排退避重试", sample["next_retry_at"] is not None)
 
 print("\n=== H. 转存记录操作 ===")
 if queued:

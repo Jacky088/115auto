@@ -57,14 +57,27 @@ async def _poll_one(client: httpx.AsyncClient, ch: dict):
 
     # 缺口检测：最新一页的最小 id 超过 last+1 → 中间有消息没见过（高频更新/停机漏掉）
     # 交给 backfill 按 ID 向旧方向逐页回溯补齐（按每日限额节奏慢慢补）
+    preserve_gap = False
     if last > 0 and new[0]["id"] > last + 1:
         try:
             done = await backfill.backfill_channel(client, ch, new[0]["id"])
-            if not done:
-                return  # 本轮预算用完，剩余缺口下轮继续；最新消息下轮一起正常入队
-            # 补漏已推进到 new[0]-1，后续把最新这批照常入队
         except Exception as e:
-            logstream.error("backfill", f"[{name}] 补漏任务异常（跳过补漏继续正常流程）: {e}")
+            # 补漏失败（网络/分页异常）：缺口必须保留，否则 last_message_id 一推进就永久漏消息
+            logstream.error("backfill", f"[{name}] 补漏任务异常（保留缺口，下一轮重试）: {e}")
+            preserve_gap = True
+        else:
+            if not done:
+                return  # 本轮预算用完，剩余缺口下轮继续；最新消息下轮一起入队
+            # 续补完成后，最新页与接缝之间可能仍有新缺口（期间又来了新消息），再补一次
+            if new[0]["id"] > ch["last_message_id"] + 1:
+                try:
+                    done = await backfill.backfill_channel(client, ch, new[0]["id"])
+                except Exception as e:
+                    logstream.error("backfill", f"[{name}] 补漏任务异常（保留缺口，下一轮重试）: {e}")
+                    preserve_gap = True
+                else:
+                    if not done:
+                        return
 
     for m in new:
         if m["text"] or m.get("buttons"):
@@ -75,6 +88,9 @@ async def _poll_one(client: httpx.AsyncClient, ch: dict):
                     pipeline.process_message(name, m["id"], full_text)
             except Exception as e:
                 logstream.error("polling", f"[{name}] 消息 {m['id']} 处理失败: {e}")
+    if preserve_gap:
+        logstream.warn("polling", f"[{name}] 补漏未完成，本轮不推进 last_message_id（下一轮继续补）")
+        return
     db.execute("UPDATE channels SET last_message_id=?, last_fetch_at=? WHERE id=?",
                (new[-1]["id"], time.time(), ch["id"]))
     logstream.info("polling", f"[{name}] 新增 {len(new)} 条消息")
@@ -100,8 +116,11 @@ async def polling_loop():
                         await _poll_one(client, ch)
                     except Exception as e:
                         logstream.error("polling", f"[{ch['name']}] 抓取失败: {e}")
-                    lo = int(db.get_setting("poll_interval_min", 30))
-                    hi = int(db.get_setting("poll_interval_max", 120))
+                    try:
+                        lo = max(1, int(db.get_setting("poll_interval_min", 30)))
+                        hi = max(1, int(db.get_setting("poll_interval_max", 120)))
+                    except (TypeError, ValueError):
+                        lo, hi = 30, 120
                     await asyncio.sleep(random.uniform(lo, min(hi, lo + 5)) if hi > lo else lo)
         else:
             await asyncio.sleep(15)
