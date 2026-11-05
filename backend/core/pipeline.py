@@ -10,7 +10,8 @@ _runtime_flags: dict[str, bool] = {}
 
 def process_message(channel: str, message_id: int, text: str, bypass: bool = False) -> dict:
     """处理一条 TG 消息，返回处理摘要（供测试与调试）。bypass=True 时跳过消息级黑名单。"""
-    result = {"channel": channel, "message_id": message_id, "links": 0, "queued": 0, "blocked": False}
+    result = {"channel": channel, "message_id": message_id, "links": 0, "queued": 0,
+              "duplicates": 0, "blocked": False}
 
     # 1. 消息去重
     cur = db.execute(
@@ -61,20 +62,13 @@ def process_message(channel: str, message_id: int, text: str, bypass: bool = Fal
         if not links:
             return result
 
-    # 4. 分类
+    # 4. 分类（优先采用频道消息自带标签），名称取频道消息首个有效行
     category, matched = classifier.classify(text or "")
+    display_title = classifier.headline(text or "") or (text or "")[:300]
 
     for link in links:
         code = link["share_code"]
         kind = link.get("kind", "share")
-        # 5. 分享码去重：已排队/处理中/已成功的不重复入队
-        row = db.query(
-            "SELECT 1 FROM transfers WHERE share_code=?"
-            " AND status IN ('queued','running','submitted','success') LIMIT 1",
-            (code,), one=True,
-        )
-        if row:
-            continue
 
         # 按链接类型路由目录（分享/云下载可分别指定）
         target = classifier.resolve_target(category, kind=kind) if category else ""
@@ -82,11 +76,33 @@ def process_message(channel: str, message_id: int, text: str, bypass: bool = Fal
             action = db.get_setting("unclassified_action", "skip")
             target = "" if action == "skip" else str(action)
 
+        # 5. 分享码去重：已排队/处理中/已成功的不重复入队；
+        #    被跳过的重复链接也落一条 duplicate 记录，便于追溯来源频道与时间
+        row = db.query(
+            "SELECT id, status, channel FROM transfers WHERE share_code=?"
+            " AND status IN ('queued','running','submitted','success') ORDER BY id LIMIT 1",
+            (code,), one=True,
+        )
+        if row:
+            err = (f"重复链接：已存在记录 #{row['id']}"
+                   f"（{row['status']}，来源 @{row['channel'] or '-'}）")
+            db.execute(
+                "INSERT INTO transfers(kind,share_code,receive_code,share_url,title,channel,message_id,"
+                "category,target_dir,status,error,bypass_filters,created_at)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (kind, code, link["receive_code"], link["share_url"], display_title,
+                 channel, message_id, category, target, "duplicate", err,
+                 1 if bypass else 0, time.time()),
+            )
+            result["duplicates"] += 1
+            logstream.info("pipeline", f"[{channel}] 跳过重复链接 {code}：{err}")
+            continue
+
         status = "queued" if target else "skipped"
         db.execute(
             "INSERT INTO transfers(kind,share_code,receive_code,share_url,title,channel,message_id,"
             "category,target_dir,status,bypass_filters,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-            (kind, code, link["receive_code"], link["share_url"], (text or "")[:300],
+            (kind, code, link["receive_code"], link["share_url"], display_title,
              channel, message_id, category, target, status, 1 if bypass else 0, time.time()),
         )
         if status == "queued":

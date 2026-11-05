@@ -55,6 +55,35 @@ async def fetch_channel(client: httpx.AsyncClient, name: str) -> list[dict]:
     return parse_page(resp.text)
 
 
+async def check_channel(name: str) -> dict:
+    """添加频道前的可访问性校验：网页能打开该频道的 t.me/s 页面才算通过。
+
+    返回 {ok, title, err}。区分「不存在/用户名错」「存在但网页预览不可用」两类原因，
+    便于用户按提示修正（改用 Userbot 或核对名称）。
+    """
+    async with httpx.AsyncClient(proxy=_proxy(), follow_redirects=True) as client:
+        try:
+            resp = await client.get(
+                f"https://t.me/s/{name}", timeout=_TIMEOUT,
+                headers={"User-Agent": "Mozilla/5.0"})
+        except Exception as e:
+            return {"ok": False, "title": "", "err": (
+                f"无法访问 Telegram 网页，请检查网络/代理设置："
+                f"{type(e).__name__}: {str(e)[:120]}")}
+    if resp.status_code != 200:
+        return {"ok": False, "title": "", "err": (
+            f"HTTP {resp.status_code}（频道不存在、已注销或为私密频道）")}
+    html = resp.text
+    if "tgme_channel_info" not in html:
+        if "Telegram: Contact @" in html:
+            return {"ok": False, "title": "", "err": "频道不存在或用户名错误，请核对 @用户名/链接"}
+        return {"ok": False, "title": "", "err": (
+            "该频道无法通过网页访问（私密频道或未开启网页预览），请改用 Userbot 接入")}
+    m = re.search(r'<meta property="og:title" content="([^"]*)"', html)
+    title = (m.group(1).strip() if m else "") or name
+    return {"ok": True, "title": title, "err": ""}
+
+
 async def _poll_one(client: httpx.AsyncClient, ch: dict):
     name = ch["name"]
     msgs = await fetch_channel(client, name)

@@ -29,14 +29,22 @@
           <el-switch :model-value="!!row.enabled" @change="(v) => toggle(row, v)" />
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="180">
+      <el-table-column label="操作" width="250">
         <template #default="{ row }">
-          <el-button @click="preview(row)">消息预览</el-button>
-          <el-popconfirm title="确认删除该频道？删除后不再监控此频道。" confirm-button-text="删除"
-                         cancel-button-text="取消" confirm-button-type="danger" width="240"
-                         @confirm="del(row)">
-            <template #reference><el-button type="danger" text>删除</el-button></template>
-          </el-popconfirm>
+          <div class="ch-actions">
+            <el-button @click="preview(row)">消息预览</el-button>
+            <el-popconfirm
+              title="重置后该频道将清除已处理消息 ID 记忆，从最新消息重新获取；已成功的分享不会重复转存。确认重置？"
+              confirm-button-text="重置" cancel-button-text="取消" confirm-button-type="warning"
+              width="300" @confirm="reset(row)">
+              <template #reference><el-button type="warning" text>重置</el-button></template>
+            </el-popconfirm>
+            <el-popconfirm title="删除后将不再监控该频道，并清除其消息 ID 记忆；重新添加会按新频道重新抓取。确认删除？"
+                           confirm-button-text="删除" cancel-button-text="取消" confirm-button-type="danger"
+                           width="300" @confirm="del(row)">
+              <template #reference><el-button type="danger" text>删除</el-button></template>
+            </el-popconfirm>
+          </div>
         </template>
       </el-table-column>
     </el-table>
@@ -56,7 +64,7 @@
     </el-form>
     <template #footer>
       <el-button @click="addVisible = false">取消</el-button>
-      <el-button type="primary" @click="add">确定</el-button>
+      <el-button type="primary" :loading="adding" @click="add">确定</el-button>
     </template>
   </el-dialog>
 
@@ -99,14 +107,18 @@ const ubConnected = ref(false)
 const loadUb = async () => {
   try { ubConnected.value = !!(await api.get('/api/tg/userbot/status')).data.connected } catch { /* ignore */ }
 }
+const adding = ref(false)
 const add = async () => {
+  if (adding.value) return
+  adding.value = true
   try {
-    await api.post('/api/channels', addForm)
-    ElMessage.success('已添加')
+    const { data } = await api.post('/api/channels', addForm)
+    ElMessage.success(data.title ? `已添加 @${data.name}（${data.title}）` : `已添加 @${data.name}`)
     addVisible.value = false
     addForm.name = ''
     load()
   } catch (e) { ElMessage.error(errMsg(e)) }
+  finally { adding.value = false }
 }
 const toggle = async (row, v) => {
   try {
@@ -155,10 +167,17 @@ const changeType = async (row, v) => {
     ).then(doSave).catch(() => {})
   } catch { doSave() }  // 状态查询失败时直接保存（服务端照常校验）
 }
+const reset = async (row) => {
+  try {
+    const { data } = await api.post(`/api/channels/${row.id}/reset`)
+    ElMessage.success(`@${row.name} 已重置：清除 ${data.cleared} 条消息 ID 记录，将从最新消息重新获取`)
+    load()
+  } catch (e) { ElMessage.error(errMsg(e)) }
+}
 const del = async (row) => {
   try {
-    await api.delete(`/api/channels/${row.id}`)
-    ElMessage.success(`已删除频道 @${row.name}`)
+    const { data } = await api.delete(`/api/channels/${row.id}`)
+    ElMessage.success(`已删除频道 @${row.name}，并清除 ${data.cleared ?? 0} 条消息 ID 记忆`)
     load()
   } catch (e) { ElMessage.error(errMsg(e)) }
 }
@@ -173,6 +192,9 @@ onMounted(load)
 </script>
 
 <style scoped>
+.ch-actions { display: flex; align-items: center; flex-wrap: nowrap; gap: 6px; white-space: nowrap; }
+.ch-actions :deep(.el-button) { margin-left: 0 !important; }
+.ch-actions :deep(.el-tooltip__trigger) { display: inline-flex; }
 .msg-item { border: 1px solid #e9eefb; border-radius: 10px; padding: 12px 14px; margin-bottom: 12px;
             background: #fff; }
 .msg-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }

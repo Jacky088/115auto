@@ -7,6 +7,9 @@
       <el-input v-model="filter.search" placeholder="搜索标题/分享码" clearable style="width: 220px"
                 @keyup.enter="load" @clear="load" />
       <el-button @click="load">查询</el-button>
+      <el-button type="danger" plain :disabled="!selected.length" @click="delSelected">
+        批量删除{{ selected.length ? `（${selected.length}）` : '' }}
+      </el-button>
       <el-popconfirm title="确认重试全部失败任务？将重新入队。" confirm-button-text="重试"
                      cancel-button-text="取消" confirm-button-type="primary" width="240"
                      @confirm="retryAll">
@@ -16,13 +19,15 @@
       </el-popconfirm>
     </div>
 
-    <el-table :data="items" size="small" v-loading="loading" empty-text="暂无记录">
+    <el-table ref="tableRef" :data="items" size="small" v-loading="loading" empty-text="暂无记录"
+              @selection-change="onSelect">
+      <el-table-column type="selection" width="42" :selectable="canDelete" />
       <el-table-column prop="created_at" label="时间" width="150">
         <template #default="{ row }">{{ fmtTime(row.created_at) }}</template>
       </el-table-column>
       <el-table-column prop="title" label="标题" min-width="240" show-overflow-tooltip>
         <template #default="{ row }">
-          <el-tooltip :content="row.share_url"><span>{{ row.title || row.share_code }}</span></el-tooltip>
+          <span>{{ row.title || row.share_code }}</span>
         </template>
       </el-table-column>
       <el-table-column prop="channel" label="来源" width="120" />
@@ -47,15 +52,18 @@
           </el-tooltip>
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="130">
+      <el-table-column label="操作" width="150">
         <template #default="{ row }">
-          <el-button v-if="['failed', 'skipped', 'blocked'].includes(row.status)"
-                     type="primary" text @click="retry(row)">重试</el-button>
-          <el-popconfirm v-if="['queued', 'submitted', 'failed', 'skipped'].includes(row.status)" title="确认删除该任务记录？"
-                         confirm-button-text="删除" cancel-button-text="取消" confirm-button-type="danger"
-                         width="220" @confirm="del(row)">
-            <template #reference><el-button type="danger" text>删除</el-button></template>
-          </el-popconfirm>
+          <div class="op-actions">
+            <el-button v-if="['failed', 'skipped', 'blocked'].includes(row.status)"
+                       type="primary" text @click="retry(row)">重试</el-button>
+            <el-popconfirm v-if="['queued', 'submitted', 'failed', 'skipped', 'duplicate'].includes(row.status)"
+                           title="确认删除该任务记录？"
+                           confirm-button-text="删除" cancel-button-text="取消" confirm-button-type="danger"
+                           width="220" @confirm="del(row)">
+              <template #reference><el-button type="danger" text>删除</el-button></template>
+            </el-popconfirm>
+          </div>
         </template>
       </el-table-column>
     </el-table>
@@ -69,7 +77,7 @@
 
 <script setup>
 import { onMounted, onUnmounted, reactive, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { api, errMsg, fmtSize, fmtTime, saveOk, statusLabel } from '../api'
 
 const isMobile = ref(window.innerWidth <= 768)
@@ -84,6 +92,9 @@ const size = ref(50)  // 每页条数：默认 50，可在分页器里切换（2
 const loading = ref(false)
 const retrying = ref(false)
 const filter = reactive({ status: '', search: '' })
+const tableRef = ref(null)
+const selected = ref([])
+const canDelete = (row) => !['running', 'success'].includes(row.status)
 
 const statusTag = (s) => ({ success: 'success', failed: 'danger', blocked: 'warning',
                             queued: 'info', running: 'primary', duplicate: 'info', skipped: 'info' }[s] || 'info')
@@ -115,6 +126,30 @@ const retryAll = async () => {
     load()
   } catch (e) { ElMessage.error(errMsg(e)) } finally { retrying.value = false }
 }
+const onSelect = (rows) => { selected.value = rows }
+const delSelected = async () => {
+  const n = selected.value.length
+  if (!n) return
+  try {
+    await ElMessageBox.confirm(
+      `确认删除选中的 ${n} 条任务记录？删除后仪表盘的最近转存记录会同步移除。`,
+      '批量删除', { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' })
+  } catch { return }  // 用户取消
+  try {
+    const { data } = await api.post('/api/transfers/batch-delete',
+      { ids: selected.value.map(r => r.id) })
+    if (data.skipped) {
+      ElMessage.warning(`已删除 ${data.deleted} 条；${data.skipped} 条因正在转存/已成功被跳过`)
+    } else {
+      ElMessage.success(`已删除 ${data.deleted} 条任务记录`)
+    }
+    tableRef.value?.clearSelection()
+    selected.value = []
+    // 当前页被删空时回到上一页，避免停在空白页
+    if (items.value.length <= n && page.value > 1) page.value -= 1
+    load()
+  } catch (e) { ElMessage.error(errMsg(e)) }
+}
 const retry = async (row) => {
   try {
     await api.post(`/api/transfers/${row.id}/retry`)
@@ -126,8 +161,27 @@ const del = async (row) => {
   try {
     await api.delete(`/api/transfers/${row.id}`)
     ElMessage.success('任务记录已删除')
+    tableRef.value?.clearSelection()
+    selected.value = []
+    if (items.value.length <= 1 && page.value > 1) page.value -= 1
     load()
   } catch (e) { ElMessage.error(errMsg(e)) }
 }
 onMounted(load)
 </script>
+
+<style scoped>
+/* 操作列：重试 / 删除 固定左右排列，不随列宽换行堆叠 */
+.op-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 6px;
+  white-space: nowrap;
+}
+.op-actions :deep(.el-button) {
+  margin-left: 0 !important;
+  padding: 4px 6px;
+}
+.op-actions :deep(.el-tooltip__trigger) { display: inline-flex; }
+</style>

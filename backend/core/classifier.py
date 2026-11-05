@@ -6,6 +6,48 @@ from .. import database as db
 _cache: tuple[list[dict], float] = ([], 0.0)
 _CACHE_TTL = 5.0
 
+# 频道消息自带的分类标签（如 #电影 / #剧集）优先于正则规则：
+# 标签是频道维护者的显式标注，比标题里的年份/画质等特征更可靠。
+_TAG_ALIASES = {
+    "电影": "电影", "剧集": "电视剧", "电视剧": "电视剧",
+    "动漫": "动漫", "动画": "动漫", "番剧": "动漫",
+    "综艺": "综艺", "纪录": "纪录片", "纪录片": "纪录片",
+    "少儿": "少儿", "儿童": "少儿",
+}
+_TAG_RE = re.compile(r"#([\u4e00-\u9fa5A-Za-z0-9]{1,10})")
+# 行首装饰符号（emoji、竖线、破折号等）
+_DECOR_RE = re.compile(r"^[\W_]+")
+
+
+def headline(text: str, limit: int = 120) -> str:
+    """从频道消息中提取展示名称：跳过纯表情/符号行与链接行，取首个有效行。
+
+    频道帖子通常是「📺 / 名称 (年份) / 简中 1080P ...」的多行结构，
+    通知应显示名称本身，而不是 115 分享里的文件夹名（如 Season 04）。
+    """
+    for raw in (text or "").splitlines():
+        s = raw.strip()
+        if not s:
+            continue
+        low = s.lower()
+        if low.startswith(("http://", "https://", "magnet:", "ed2k:", "ftp://", "tg://")):
+            continue
+        s = _DECOR_RE.sub("", s).strip().lstrip("#").strip()
+        if not s:
+            continue
+        return s[:limit]
+    return ""
+
+
+def _tag_category(text: str) -> tuple[str, str]:
+    """返回频道标签对应的分类（仅当该分类存在于路由表时生效）。"""
+    known = {r["category"] for r in db.query("SELECT category FROM routes")}
+    for m in _TAG_RE.finditer(text):
+        cat = _TAG_ALIASES.get(m.group(1))
+        if cat and cat in known:
+            return cat, "#" + m.group(1)
+    return "", ""
+
 
 def _rules() -> list[dict]:
     global _cache
@@ -25,9 +67,15 @@ def invalidate():
 
 
 def classify(text: str) -> tuple[str, str]:
-    """返回 (category, matched_pattern)。未命中返回 ("", "")。"""
+    """返回 (category, matched_pattern)。未命中返回 ("", "")。
+
+    优先采用频道消息里的显式标签（#电影/#剧集/#动漫…），其次才按规则匹配标题。
+    """
     if not text:
         return "", ""
+    cat, tag = _tag_category(text)
+    if cat:
+        return cat, tag
     for rule in _rules():
         try:
             if re.search(rule["pattern"], text, re.IGNORECASE):

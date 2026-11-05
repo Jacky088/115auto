@@ -7,7 +7,7 @@ from urllib.parse import unquote
 import httpx
 
 from .. import database as db
-from ..core import logstream
+from ..core import classifier, logstream
 from ..pan115 import client as pan
 
 LOG_RETENTION_SECONDS = 7 * 86400  # 日志保留 7 天，到期永久删除
@@ -108,6 +108,7 @@ def notify_failure(kind: str, title: str, category: str, source: str, reason: st
     try:
         if not db.get_setting("notify_transfer_success", True):
             return
+        title = classifier.headline(title) or title
         lines = ["❌ 云下载失败" if kind == "offline" else "❌ 转存失败", ""]
         lines.append("📺 " + (title or "未命名")[:80])
         if category:
@@ -129,6 +130,7 @@ def notify_transfer(title: str, category: str, source: str, target: str,
     try:
         if not db.get_setting("notify_transfer_success", True):
             return
+        title = classifier.headline(title) or title
         head = {"offline": "☁️ 云下载任务已添加", "offline_done": "✅ 云下载任务完成"}.get(kind, "✅ 转存成功")
         lines = [head, ""]
         lines.append("📺 " + (title or "未命名")[:80])
@@ -372,12 +374,14 @@ async def offline_check_loop():
 
 def _finish_offline(job: dict, ok: bool, name: str = "", reason: str = ""):
     if ok:
+        # 名称优先取频道消息标题，115 返回的文件名仅兜底
+        shown = classifier.headline(job.get("title", "")) or name or job["title"]
         db.execute("UPDATE transfers SET status='success', title=?, finished_at=? WHERE id=?",
-                   ((name or job["title"])[:200], time.time(), job["id"]))
+                   (shown[:200], time.time(), job["id"]))
         db.quota_incr()
         logstream.info("transfer",
-                       f"✅ 云下载任务完成（②）: {(name or job['title'])[:60]} → {job['target_dir']}，文件已保存至目标目录")
-        notify_transfer(name or job["title"], job.get("category", ""), job.get("channel", ""),
+                       f"✅ 云下载任务完成（②）: {shown[:60]} → {job['target_dir']}，文件已保存至目标目录")
+        notify_transfer(shown, job.get("category", ""), job.get("channel", ""),
                         job["target_dir"], kind="offline_done")
     else:
         db.execute("UPDATE transfers SET status='failed', error=? WHERE id=?",

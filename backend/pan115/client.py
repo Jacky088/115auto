@@ -444,15 +444,24 @@ def share_snap_all(share_code: str, receive_code: str, max_files: int = 5000) ->
 
 
 def receive(share_code: str, receive_code: str, cid: int, file_ids: list[str]) -> dict:
-    """转存指定文件到目录 cid。"""
+    """转存指定文件到目录 cid。
+
+    注意：不能传 ``is_check=1``——115 把它当作「只校验能否转存」的预检请求，
+    接口照样返回 ``state: true``，但实际不会落文件到网盘（线上表现为反查目录
+    永远没有文件、任务无限重试）。官方网页真正执行转存时不带该参数。
+    """
     client = _get_client()
-    resp = client.share_receive({
+    payload = {
         "share_code": share_code,
         "receive_code": receive_code,
         "file_id": ",".join(file_ids),
         "cid": cid,
-        "is_check": 1,
-    })
+    }
+    try:
+        payload["user_id"] = client.user_id  # 与 115 网页请求一致；取不到时省略
+    except Exception:
+        pass
+    resp = client.share_receive(payload)
     if not resp.get("state"):
         code = resp.get("error_code", "")
         msg = resp.get("error", "") or str(resp)[:200]

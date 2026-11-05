@@ -146,6 +146,27 @@ async def test() -> dict:
     return {"ok": ok_all, "me": who, "channels": channels}
 
 
+async def check_channel(name: str) -> dict:
+    """添加频道前的可访问性校验：账号能解析到该频道实体才算通过。
+
+    返回 {ok, title, err}。未登录时直接失败，避免添加一个永远收不到消息的 Userbot 频道。
+    """
+    if client is None:
+        return {"ok": False, "title": "", "err": "Userbot 未登录，请先在「账号管理」完成登录"}
+    try:
+        if not (client.is_connected() and await client.is_user_authorized()):
+            return {"ok": False, "title": "", "err": "Userbot 已断开或登录失效，请重新登录"}
+    except Exception as e:
+        return {"ok": False, "title": "", "err": f"连接检查失败: {type(e).__name__}: {e}"}
+    try:
+        entity = await client.get_entity(_entity_ref(name))
+    except Exception as e:
+        return {"ok": False, "title": "",
+                "err": (f"无法访问该频道（账号未加入该频道，或用户名/ID 填错？）"
+                        f"{type(e).__name__}: {str(e)[:120]}")}
+    return {"ok": True, "title": getattr(entity, "title", "") or name, "err": ""}
+
+
 def _entity_ref(name: str):
     """频道名 → Telethon 实体引用：数字 ID 用 PeerChannel，其余按 username 处理。"""
     s = name.strip().lstrip("@")

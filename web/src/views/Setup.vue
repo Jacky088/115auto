@@ -309,6 +309,7 @@ const channelLines = computed(() => {
 const addChannels = async () => {
   adding.value = true
   let ok = 0
+  const fails = []
   try {
     for (const line of channelText.value.split('\n')) {
       const name = line.trim()
@@ -319,7 +320,20 @@ const addChannels = async () => {
       try {
         await api.post('/api/channels', { name, type })
         ok++
-      } catch (e) { ElMessage.warning(`${name}: ${errMsg(e)}`) }
+      } catch (e) {
+        const msg = errMsg(e)
+        // 重试时已添加成功的行会返回“已存在”，按成功处理
+        if (msg.includes('已存在')) ok++
+        else fails.push(`${name}（${msg}）`)
+      }
+    }
+    if (fails.length) {
+      ElMessageBox.alert(
+        `以下频道未通过访问校验，请修正后重试：<br/><br/>${fails.join('<br/>')}`,
+        '频道添加失败',
+        { dangerouslyUseHTMLString: true, confirmButtonText: '知道了', type: 'error' },
+      ).catch(() => {})
+      return
     }
     ElMessage.success(`已添加 ${ok} 个频道`)
     step.value = 3

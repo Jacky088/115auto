@@ -981,6 +981,28 @@ check("115 返回 percent 编码的同一链接也能匹配",
 check("磁力链按 btih 匹配（忽略 dn 等参数）",
       _jobs._offline_key("magnet:?xt=urn:btih:ABCDEF0123456789&dn=x") == "btih:abcdef0123456789")
 
+print("\n=== 24. 转存请求参数（不能带 is_check）===")
+_captured = {}
+
+
+class _FakeReceiveClient:
+    user_id = 777
+
+    def share_receive(self, payload):
+        _captured.update(payload)
+        return {"state": True}
+
+
+_pan_cli._get_client = lambda: _FakeReceiveClient()
+try:
+    _pan_cli.receive("swl3d0b3zrk", "k727", 12345, ["900001"])
+finally:
+    _pan_cli._get_client = _orig_get_client
+check("转存请求不带 is_check（该参数会变成只校验、不落地文件）", "is_check" not in _captured)
+check("转存请求带目标目录 cid 与文件 id",
+      _captured.get("cid") == 12345 and _captured.get("file_id") == "900001", str(_captured))
+check("转存请求带 user_id", _captured.get("user_id") == 777, str(_captured))
+
 print(f"\n{'='*40}\n结果: {len(PASS)} 通过, {len(FAIL)} 失败, {len(SKIP)} 跳过（外网不可达）")
 if FAIL:
     print("失败项:", FAIL)

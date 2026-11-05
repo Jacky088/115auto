@@ -212,7 +212,7 @@ def list_channels(_=Depends(require_user)):
 
 
 @router.post("/channels")
-def add_channel(body: dict, _=Depends(require_user)):
+async def add_channel(body: dict, _=Depends(require_user)):
     name = (body.get("name") or "").strip()
     ctype = body.get("type", "polling")
     # 允许粘贴完整链接
@@ -232,9 +232,19 @@ def add_channel(body: dict, _=Depends(require_user)):
     n = db.query("SELECT count(*) c FROM channels", one=True)["c"]
     if n >= 50:
         raise HTTPException(400, "监控频道已达上限 50 个，请先清理不需要的频道")
+
+    # 添加前校验：确认该频道当前确实可被对应方式访问（轮询→t.me/s 可打开；Userbot→账号可解析）
+    from ..tg import polling as tg_polling, userbot as tg_userbot
+    res = await (tg_userbot.check_channel(name) if ctype == "userbot"
+                 else tg_polling.check_channel(name))
+    if not res.get("ok"):
+        raise HTTPException(400, f"无法添加 @{name}：{res.get('err') or '频道不可访问，请核对后重试'}")
+    title = str(res.get("title") or "")
+
     db.execute("INSERT INTO channels(type,name,created_at) VALUES(?,?,?)", (ctype, name, time.time()))
-    logstream.info("channels", f"添加监控频道 @{name}（接入方式：{ctype}）")
-    return {"ok": True, "name": name}
+    logstream.info("channels",
+                   f"添加监控频道 @{name}（{title}，接入方式：{ctype}，已通过访问校验）")
+    return {"ok": True, "name": name, "title": title}
 
 
 @router.put("/channels/{ch_id}")
@@ -264,12 +274,53 @@ def update_channel(ch_id: int, body: dict, _=Depends(require_user)):
 
 @router.delete("/channels/{ch_id}")
 def delete_channel(ch_id: int, _=Depends(require_user)):
+    """删除频道：连同该频道的消息 ID 记忆一起清除。
+
+    重新添加同名频道时 messages 已为空、游标从 0 开始，等同新频道重新抓取；
+    转存记录保留（已成功的分享码仍会命中去重，不会重复转存）。
+    """
     ch = db.query("SELECT name FROM channels WHERE id=?", (ch_id,), one=True)
+    if not ch:
+        return {"ok": True, "cleared": 0}
+    name = ch["name"]
+    n = db.execute("DELETE FROM messages WHERE channel=?", (name,))
     db.execute("DELETE FROM channels WHERE id=?", (ch_id,))
     db.set_setting(f"poll_fail_{ch_id}", 0)  # 清理失败计数，避免残留影响健康判定
-    if ch:
-        logstream.info("channels", f"删除监控频道 @{ch['name']}")
-    return {"ok": True}
+    try:
+        from ..tg import backfill as _backfill
+        _backfill._backfill_state.pop(ch_id, None)
+    except Exception:
+        pass
+    logstream.info("channels",
+                   f"删除监控频道 @{name}：已清除 {n} 条消息 ID 记忆（重新添加将按新频道处理）")
+    return {"ok": True, "cleared": n}
+
+
+@router.post("/channels/{ch_id}/reset")
+def reset_channel(ch_id: int, _=Depends(require_user)):
+    """重置频道：清除消息 ID 记忆与抓取游标，回到初始状态重新获取数据。
+
+    - 删除 messages 表中该频道的去重记录（否则旧消息仍会被判重跳过）
+    - last_message_id 归零：轮询下一轮把最新一页当作新消息处理（不触发历史补漏）
+    - 清空失败计数与内存中的补漏游标，避免继续从旧断点接续
+    - 转存记录保留：已成功的分享码仍会命中去重，不会重复转存
+    """
+    ch = db.query("SELECT * FROM channels WHERE id=?", (ch_id,), one=True)
+    if not ch:
+        raise HTTPException(404, "频道不存在")
+    n = db.execute("DELETE FROM messages WHERE channel=?", (ch["name"],))
+    db.execute("UPDATE channels SET last_message_id=0, last_fetch_at=NULL, msg_count=0 WHERE id=?",
+               (ch_id,))
+    db.set_setting(f"poll_fail_{ch_id}", 0)
+    try:
+        from ..tg import backfill as _backfill
+        _backfill._backfill_state.pop(ch_id, None)  # 清掉续补游标，防止从旧断点继续
+    except Exception:
+        pass
+    logstream.info("channels",
+                   f"重置监控频道 @{ch['name']}：清除 {n} 条消息 ID 记录，抓取游标归零，"
+                   "下一轮从最新消息重新开始")
+    return {"ok": True, "cleared": n}
 
 
 @router.get("/channels/{ch_id}/messages")
@@ -519,6 +570,35 @@ def retry_all_failed(_=Depends(require_user)):
                    " WHERE status='failed'")
     logstream.info("transfer", f"批量重试 {n} 个失败任务")
     return {"ok": True, "count": n}
+
+
+@router.post("/transfers/batch-delete")
+def batch_delete_transfers(body: dict, _=Depends(require_user)):
+    """批量删除任务记录（正在转存/已成功的不可删）。"""
+    raw = body.get("ids") if isinstance(body, dict) else None
+    if not isinstance(raw, list) or not raw:
+        raise HTTPException(400, "请选择要删除的记录")
+    ids = []
+    for x in raw[:500]:  # 单次上限，避免超大 SQL
+        try:
+            ids.append(int(x))
+        except (TypeError, ValueError):
+            continue
+    if not ids:
+        raise HTTPException(400, "记录 id 无效")
+    ids = list(dict.fromkeys(ids))
+    rows = db.query(
+        f"SELECT id, status FROM transfers WHERE id IN ({','.join('?' * len(ids))})",
+        tuple(ids))
+    deletable = [r["id"] for r in rows if r["status"] not in ("running", "success")]
+    skipped = len(ids) - len(deletable)  # 含不存在/正在转存/已成功
+    n = 0
+    if deletable:
+        n = db.execute(
+            f"DELETE FROM transfers WHERE id IN ({','.join('?' * len(deletable))})",
+            tuple(deletable))
+        logstream.info("transfer", f"批量删除 {n} 条任务记录（跳过 {skipped} 条不可删除记录）")
+    return {"ok": True, "deleted": n, "skipped": skipped}
 
 
 @router.delete("/transfers/{t_id}")

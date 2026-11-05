@@ -50,6 +50,22 @@ body {
 .el-drawer__header { margin-bottom: 0; padding: 16px 20px; border-bottom: 1px solid var(--saas-line);
                      color: var(--saas-text-main); font-weight: 600; }
 .el-popconfirm__action { display: flex; gap: 6px; }
+/* 二次确认图标：红底问号。宽高统一用 em（随文字字号自适应），保持 1:1 正圆
+   iconColor 默认以行内样式写死为 #f90，必须用 !important 才能覆盖成红色 */
+.el-popconfirm__main { align-items: center; }
+.el-popconfirm__icon {
+  color: var(--el-color-danger) !important;
+  flex: none;
+  align-self: center;       /* 圆心与整个文字块垂直居中对齐 */
+  width: 2.2em;
+  height: 2.2em;
+  margin: 0 10px 0 0;
+}
+.el-popconfirm__icon svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
 .el-notification { border-radius: 10px; }
 
 /* ---- 表格 ---- */
@@ -161,24 +177,48 @@ body {
   --el-message-text-color: var(--el-text-color-regular);
 }
 
-/* ---- 文字按钮可读性：默认带浅色底（"软按钮"），不再是白底上的裸文字 ---- */
+/* ---- 文字按钮可读性：默认带浅色底（"软按钮"），不再是白底上的裸文字 ----
+   注意：Element Plus 的悬停规则带 :not(.is-disabled)，权重更高；若这里不加同样的
+   :not(.is-disabled)，悬停背景会被框架规则压回静止色，表现为"悬停没有高亮"。 */
 .el-button.is-text {
   background-color: var(--el-fill-color-light);
 }
-.el-button.is-text:hover,
-.el-button.is-text:focus-visible {
-  background-color: var(--el-fill-color);
-}
-.el-button.is-text:active {
+.el-button.is-text:not(.is-disabled):hover,
+.el-button.is-text:not(.is-disabled):focus-visible {
   background-color: var(--el-fill-color-dark);
 }
-/* 按语义着色：主操作浅蓝底、危险操作浅红底，颜色即含义 */
+.el-button.is-text:not(.is-disabled):active {
+  background-color: var(--el-fill-color-darker);
+}
+/* 按语义着色：主操作浅蓝、危险操作浅红、警告操作浅橙，悬停统一加深一档 */
 .el-button--primary.is-text { background-color: var(--el-color-primary-light-9); }
-.el-button--primary.is-text:hover,
-.el-button--primary.is-text:focus-visible { background-color: var(--el-color-primary-light-8); }
+.el-button--primary.is-text:not(.is-disabled):hover,
+.el-button--primary.is-text:not(.is-disabled):focus-visible {
+  background-color: var(--el-color-primary-light-8);
+}
 .el-button--danger.is-text { background-color: var(--el-color-danger-light-9); }
-.el-button--danger.is-text:hover,
-.el-button--danger.is-text:focus-visible { background-color: var(--el-color-danger-light-8); }
+.el-button--danger.is-text:not(.is-disabled):hover,
+.el-button--danger.is-text:not(.is-disabled):focus-visible {
+  background-color: var(--el-color-danger-light-8);
+}
+.el-button--warning.is-text {
+  background-color: var(--el-color-warning-light-9);
+  color: var(--el-color-warning-dark-2);  /* 默认橙色偏浅，压深后更醒目 */
+}
+.el-button--warning.is-text:not(.is-disabled):hover,
+.el-button--warning.is-text:not(.is-disabled):focus-visible {
+  background-color: var(--el-color-warning-light-8);
+}
+.el-button--success.is-text { background-color: var(--el-color-success-light-9); }
+.el-button--success.is-text:not(.is-disabled):hover,
+.el-button--success.is-text:not(.is-disabled):focus-visible {
+  background-color: var(--el-color-success-light-8);
+}
+.el-button--info.is-text { background-color: var(--el-fill-color-light); }
+.el-button--info.is-text:not(.is-disabled):hover,
+.el-button--info.is-text:not(.is-disabled):focus-visible {
+  background-color: var(--el-fill-color-dark);
+}
 .el-button.is-text.is-disabled,
 .el-button.is-text:disabled {
   background-color: var(--el-fill-color-lighter);
@@ -269,6 +309,16 @@ body {
   .el-dialog { width: 97vw !important; max-width: 97vw !important; }
   .el-form-item__label { font-size: 12px; }
   .stat-value { font-size: 20px !important; }
+}
+
+/* 表格长文本悬浮提示：限制最大宽度并自动换行，避免长标题把提示条撑满整页 */
+.el-popper.is-dark {
+  max-width: min(460px, calc(100vw - 32px));
+}
+.el-popper.is-dark .el-popper__content {
+  white-space: normal;
+  word-break: break-word;
+  line-height: 1.5;
 }
 
 /* ================== 触摸优化（手机端可点性） ================== */

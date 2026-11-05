@@ -12,7 +12,7 @@ import re
 import time
 
 from .. import database as db
-from ..core import filters, logstream
+from ..core import classifier, filters, logstream
 from ..pan115 import client as pan
 from . import jobs
 
@@ -87,15 +87,17 @@ def _process_one(job: dict):
         # 提交成功 ≠ 下载完成：标记 submitted，由 offline_check_loop 跟踪真实结果
         db.execute("UPDATE transfers SET status='submitted', finished_at=NULL WHERE id=?",
                    (job["id"],))
+        display = classifier.headline(job["title"]) or job["title"][:80]
         logstream.info("transfer",
-                       f"☁️ 云下载任务已添加（①）: {job['title'][:60]} → {target}（已提交 115，下载完成后推送第②条通知）")
-        jobs.notify_transfer(job["title"][:80], job.get("category", ""), job.get("channel", ""),
+                       f"☁️ 云下载任务已添加（①）: {display[:60]} → {target}（已提交 115，下载完成后推送第②条通知）")
+        jobs.notify_transfer(display, job.get("category", ""), job.get("channel", ""),
                              target, kind="offline")
         return
 
     # ---- 分享转存任务 ----
     snap = pan.share_snap_all(code, rc)
-    title = snap["title"] or job["title"][:100] or code
+    # 名称优先取频道消息里的标题（如「塔尔萨之王 (2022)」），分享内的文件夹名（如 Season 04）仅兜底
+    title = (classifier.headline(job["title"]) or snap["title"] or job["title"][:100] or code)
 
     # 1.5 分享内没有任何文件（空目录/链接空壳）：无法转存，直接跳过而不是反复重试
     if not snap["files"]:
@@ -224,7 +226,8 @@ def _fail(job: dict, err: str):
         logstream.error("transfer", f"分享 {job['share_code']} 转存失败（已达最大重试）: {err}")
         kind = job.get("kind", "share")
         jobs.notify_failure(
-            kind, job.get("title", "") or job["share_code"], job.get("category", ""),
+            kind, (classifier.headline(job.get("title", "")) or job.get("title", "")
+                   or job["share_code"]), job.get("category", ""),
             job.get("channel", ""), err[:200],
             retry_info=f"💡 已自动重试 {attempts} 次仍未成功，请检查分享链接是否失效")
     else:
@@ -352,7 +355,8 @@ async def queue_worker():
                 db.execute("UPDATE transfers SET status='failed', attempts=?, error=? WHERE id=?",
                            (job["attempts"] + 1, str(e)[:500], job["id"]))
                 logstream.error("transfer", f"任务永久失败: {str(e)}")
-                jobs.notify_failure(job.get("kind", "share"), job.get("title", ""),
+                jobs.notify_failure(job.get("kind", "share"),
+                                    classifier.headline(job.get("title", "")) or job.get("title", ""),
                                     job.get("category", ""), job.get("channel", ""),
                                     str(e), retry_info="💡 该链接无法被 115 处理，不会自动重试")
                 consecutive_fails = 0  # 任务自身问题不计入熔断
