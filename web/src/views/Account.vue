@@ -9,10 +9,11 @@
             <el-tag v-else type="danger" size="small">未登录 / 失效</el-tag>
           </el-descriptions-item>
           <el-descriptions-item label="账号">{{ s115.name || '-' }}</el-descriptions-item>
-          <el-descriptions-item label="说明">转存使用 Cookie 接口，失效后需重新扫码；系统每 10 分钟自动巡检</el-descriptions-item>
+          <el-descriptions-item label="说明">转存使用 Cookie 接口；国内服务器推荐扫码登录，海外 VPS 扫码被风控时用「手动导入 Cookie」。系统每 10 分钟自动巡检</el-descriptions-item>
         </el-descriptions>
-        <div style="margin-top: 14px; display: flex; gap: 10px">
+        <div class="btn-row" style="margin-top: 14px">
           <el-button type="primary" @click="openQr">扫码登录 / 重新登录</el-button>
+          <el-button @click="cookieVisible = true">手动导入 Cookie</el-button>
           <el-button @click="load">刷新状态</el-button>
         </div>
       </el-card>
@@ -33,8 +34,25 @@
           </el-descriptions-item>
           <el-descriptions-item label="说明">用于实时监听频道（含私有频道）。建议使用小号；api_id/api_hash 从 my.telegram.org 申请</el-descriptions-item>
         </el-descriptions>
-        <div style="margin-top: 14px">
+        <div class="btn-row" style="margin-top: 14px">
           <el-button type="primary" @click="tgVisible = true">登录 / 重新登录</el-button>
+          <el-button :loading="tgTesting" @click="runTgTest">测试连接与频道</el-button>
+        </div>
+        <div v-if="tgTestResult" class="tg-test">
+          <el-alert v-if="!tgTestResult.ok && tgTestResult.err" :title="tgTestResult.err"
+                    type="error" :closable="false" show-icon />
+          <template v-else>
+            <el-alert :title="tgTestResult.ok ? `✅ 连接与授权正常${tgTestResult.me ? '（' + tgTestResult.me + '）' : ''}${tgTestResult.channels.length ? '，已启用频道全部可访问' : ''}` : '⚠️ 部分频道无法访问，请检查账号是否已加入'"
+                      :type="tgTestResult.ok ? 'success' : 'warning'" :closable="false" show-icon />
+            <div v-for="c in tgTestResult.channels" :key="c.name" class="tg-ch">
+              <el-icon :size="14" :class="c.ok ? 'ok' : 'bad'">
+                <CircleCheckFilled v-if="c.ok" /><CircleCloseFilled v-else />
+              </el-icon>
+              <span class="tg-ch-name">{{ c.name }}</span>
+              <span v-if="c.ok" class="tg-ch-sub">{{ c.title }}</span>
+              <span v-else class="tg-ch-err">{{ c.err }}</span>
+            </div>
+          </template>
         </div>
       </el-card>
   </div>
@@ -44,35 +62,25 @@
     <div style="text-align: center; min-height: 220px">
       <template v-if="qr.svg">
         <div class="qr-box" v-html="qr.svg" @click="createQr"></div>
-        <p v-if="qr.scanned" style="color: #67c23a; margin: 4px">✅ 已扫描，请在手机上确认</p>
+        <p v-if="qr.err" class="qr-err">❌ {{ qr.err }}</p>
+        <p v-else-if="qr.scanned" style="color: #67c23a; margin: 4px">✅ 已扫描，请在手机上确认</p>
         <p v-else style="color: #999; font-size: 12px">请用 115 App 扫码（点击可刷新）</p>
       </template>
-      <el-button v-else :loading="qr.loading" @click="createQr">生成二维码</el-button>
+      <el-button v-else type="primary" :loading="qr.loading" @click="createQr">生成二维码</el-button>
+    </div>
+    <div v-if="qr.err" style="text-align: center">
+      <el-button text type="primary" @click="cookieVisible = true; qrVisible = false">
+        扫码被风控？改用手动导入 Cookie →
+      </el-button>
     </div>
   </el-dialog>
 
+  <!-- 手动导入 Cookie -->
+  <CookieImportDialog v-model="cookieVisible" @success="load" />
+
   <!-- Userbot 登录对话框 -->
-  <el-dialog v-model="tgVisible" title="Userbot 登录" width="440px" @close="resetTgFlow">
-    <el-form label-width="100px">
-      <template v-if="tgStep === 0">
-        <el-form-item label="API ID"><el-input v-model="tgForm.api_id" placeholder="my.telegram.org 获取" /></el-form-item>
-        <el-form-item label="API Hash"><el-input v-model="tgForm.api_hash" /></el-form-item>
-        <el-form-item label="手机号"><el-input v-model="tgForm.phone" placeholder="+8613800138000" /></el-form-item>
-      </template>
-      <template v-else-if="tgStep === 1">
-        <el-form-item label="验证码"><el-input v-model="tgForm.code" placeholder="TG 收到的验证码" /></el-form-item>
-      </template>
-      <template v-else-if="tgStep === 2">
-        <el-form-item label="两步验证密码"><el-input v-model="tgForm.password" type="password" show-password /></el-form-item>
-      </template>
-      <el-alert v-if="tgError" :title="tgError" type="error" :closable="false" style="margin-bottom: 10px" />
-    </el-form>
-    <template #footer>
-      <el-button @click="tgVisible = false">取消</el-button>
-      <el-button type="primary" :loading="tgLoading" @click="tgNext">
-        {{ tgStep === 0 ? '发送验证码' : tgStep === 1 ? '提交验证码' : '完成登录' }}
-      </el-button>
-    </template>
+  <el-dialog v-model="tgVisible" title="Userbot 登录" width="480px" @close="load">
+    <UserbotLogin compact @update="load" />
   </el-dialog>
 </template>
 
@@ -80,12 +88,19 @@
 import { onMounted, onUnmounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { api, errMsg } from '../api'
+import CookieImportDialog from '../components/CookieImportDialog.vue'
+import UserbotLogin from '../components/UserbotLogin.vue'
 
 const s115 = ref({})
 const tg = ref({})
 const qrVisible = ref(false)
-const qr = reactive({ loading: false, svg: '', token: null, app: '', scanned: false })
-let pollTimer = null
+const cookieVisible = ref(false)
+const qr = reactive({ loading: false, svg: '', token: null, app: '', scanned: false, err: '' })
+let pollSeq = 0   // 轮询会话号：关闭弹窗/重新生成二维码时 +1 使旧循环退出
+let pollErrCount = 0
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+const stopQrPoll = () => { pollSeq++ }
 
 const load = async () => {
   s115.value = (await api.get('/api/account/115/status')).data
@@ -95,62 +110,71 @@ const load = async () => {
 // ---- 115 QR ----
 const openQr = () => { qrVisible.value = true; qr.svg = ''; createQr() }
 const createQr = async () => {
+  const my = ++pollSeq
   qr.loading = true
   qr.scanned = false
+  qr.svg = ''
+  qr.err = ''
+  pollErrCount = 0
   try {
     const { data } = await api.post('/api/account/115/qrcode')
+    if (my !== pollSeq) return
     qr.svg = data.qr_svg
     qr.token = data.token
     qr.app = data.app
-    stopQrPoll()
-    pollTimer = setInterval(async () => {
-      try {
-        const { data } = await api.post('/api/account/115/qrcode/poll',
-          { token: qr.token, app: qr.app }, { timeout: 45000 })
-        if (data.status === 1) qr.scanned = true
-        if (data.ok || data.status === 2) {
-          stopQrPoll()
+    pollLoop(my)
+  } catch (e) { ElMessage.error(errMsg(e)) } finally { qr.loading = false }
+}
+
+// 115 状态接口是长轮询（挂起最长 30s）：必须等上一次返回后再发下一次，
+// 否则并发请求堆积，手机确认瞬间会同时触发多次取 cookie，触发 115 风控导致登录失败
+const pollLoop = async (my) => {
+  while (my === pollSeq && qr.token) {
+    try {
+      const { data } = await api.post('/api/account/115/qrcode/poll',
+        { token: qr.token, app: qr.app }, { timeout: 45000 })
+      if (my !== pollSeq) return
+      if (data.status === 1) qr.scanned = true
+      if (data.status === 2) {
+        if (data.ok) {
           ElMessage.success('115 登录成功')
           qrVisible.value = false
           load()
-        } else if (data.status < 0) { stopQrPoll(); qr.svg = '' }
-      } catch { /* ignore */ }
-    }, 3000)
-  } catch (e) { ElMessage.error(errMsg(e)) } finally { qr.loading = false }
-}
-const stopQrPoll = () => { if (pollTimer) { clearInterval(pollTimer); pollTimer = null } }
-
-// ---- TG login flow ----
-const tgVisible = ref(false)
-const tgStep = ref(0)
-const tgLoading = ref(false)
-const tgError = ref('')
-const tgForm = reactive({ api_id: '', api_hash: '', phone: '', code: '', password: '' })
-
-const resetTgFlow = () => { tgStep.value = 0; tgError.value = '' }
-const tgNext = async () => {
-  tgLoading.value = true
-  tgError.value = ''
-  try {
-    if (tgStep.value === 0) {
-      await api.post('/api/tg/userbot/start-login', {
-        api_id: Number(tgForm.api_id), api_hash: tgForm.api_hash, phone: tgForm.phone,
-      })
-      tgStep.value = 1
-      ElMessage.success('验证码已发送，请查收 TG 消息')
-    } else if (tgStep.value === 1) {
-      const { data } = await api.post('/api/tg/userbot/submit-code', { code: tgForm.code })
-      if (data.needs_password) { tgStep.value = 2 } else { tgDone() }
-    } else {
-      await api.post('/api/tg/userbot/submit-password', { password: tgForm.password })
-      tgDone()
+        } else {
+          qr.err = data.error || '获取 Cookie 失败，请点击二维码刷新重试'
+        }
+        return
+      }
+      if (data.status < 0) {
+        qr.svg = ''
+        qr.err = '二维码已过期，请点击重新生成'
+        return
+      }
+    } catch (e) {
+      if (my !== pollSeq) return
+      if (++pollErrCount === 3) {
+        ElMessage.warning('登录状态查询失败：' + errMsg(e) + '（将继续自动重试）')
+      }
+      await sleep(3000)
+      continue
     }
-  } catch (e) { tgError.value = errMsg(e) } finally { tgLoading.value = false }
+    await sleep(500) // 轻微节流，避免接口异常时紧密循环
+  }
 }
-const tgDone = () => {
-  ElMessage.success('Userbot 登录成功')
-  tgVisible.value = false
-  load()
+
+// ---- TG userbot：登录弹窗复用 UserbotLogin 组件；卡片级一键测试 ----
+const tgVisible = ref(false)
+const tgTesting = ref(false)
+const tgTestResult = ref(null)
+
+const runTgTest = async () => {
+  tgTesting.value = true
+  tgTestResult.value = null
+  try {
+    tgTestResult.value = (await api.post('/api/tg/userbot/test')).data
+  } catch (e) {
+    tgTestResult.value = { ok: false, err: errMsg(e) }
+  } finally { tgTesting.value = false }
 }
 
 onMounted(load)
@@ -158,8 +182,20 @@ onUnmounted(stopQrPoll)
 </script>
 
 <style scoped>
-.account-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
+.account-grid { display: grid; grid-template-columns: 1fr 1fr; align-items: stretch; }
 @media (max-width: 1100px) { .account-grid { grid-template-columns: 1fr; } }
+/* 两张卡片撑满等高，视觉对齐 */
+.account-grid > .el-card { height: 100%; }
+/* 标签不换行（如「登录状态」），内容列自适应 */
+.account-grid :deep(.el-descriptions__label) { white-space: nowrap; }
 .qr-box { width: 200px; margin: 0 auto; cursor: pointer; background: #fff; padding: 8px; border-radius: 8px; }
 .qr-box :deep(svg) { width: 100%; height: auto; display: block; }
+.qr-err { color: #f56c6c; font-size: 13px; margin: 4px; }
+.tg-test { margin-top: 12px; display: flex; flex-direction: column; gap: 6px; }
+.tg-ch { display: flex; align-items: center; gap: 6px; font-size: 13px; }
+.tg-ch .ok { color: #67c23a; }
+.tg-ch .bad { color: #f56c6c; }
+.tg-ch-name { font-weight: 600; }
+.tg-ch-sub { color: #909399; }
+.tg-ch-err { color: #f56c6c; font-size: 12px; }
 </style>

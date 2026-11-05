@@ -33,13 +33,16 @@ docker compose up -d --build
 
 > 若自行修改前端代码（web/ 目录），需在开发机先 `cd web && npm install && npm run build` 重新生成 backend/static，再构建镜像。
 
-浏览器打开 `http://服务器IP:8000`，账号 `admin`，密码为你设置的 `WEB_PASSWORD`。
+> **海外 VPS 提示**：115 对登录接口有 IP 风控，海外/机房 IP 扫码确认后可能提示「老乡验证失败 / IP 登录异常」。
+> 此时可在本地电脑浏览器登录 115.com，按页面指引复制 Cookie，用「账号管理 → 手动导入 Cookie」完成登录。
+
+浏览器打开 `http://服务器IP:38080`，账号 `admin`，密码为你设置的 `WEB_PASSWORD`。
 
 公网访问建议加一层 Caddy 自动 HTTPS：
 
 ```
 pan.example.com {
-    reverse_proxy 127.0.0.1:8000
+    reverse_proxy 127.0.0.1:38080
 }
 ```
 

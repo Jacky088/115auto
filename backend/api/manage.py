@@ -14,15 +14,23 @@ router = APIRouter(prefix="/api")
 
 
 # ---------- auth ----------
+def _web_username() -> str:
+    """当前登录用户名：优先 DB（网页可改），回退环境变量初始值。"""
+    return str(db.get_setting("web_username") or config.WEB_USERNAME or "admin")
+
+
 @router.post("/auth/login")
 def login(body: dict):
-    username = body.get("username", "")
-    password = body.get("password", "")
+    username = str(body.get("username", ""))[:64]
+    password = str(body.get("password", ""))
+    if len(password) > 128:
+        auth.record_login_fail()
+        raise HTTPException(400, "密码过长")
     if auth.login_throttled():
         logstream.warn("system", "登录请求被限速（连续失败过多）")
         raise HTTPException(429, "失败次数过多，请 1 分钟后再试")
     stored = db.get_setting("web_password_hash", "")
-    if username != str(config.WEB_USERNAME or "admin") or not auth.verify_password(password, stored):
+    if username != _web_username() or not auth.verify_password(password, stored):
         auth.record_login_fail()
         logstream.warn("system", "网页登录失败（用户名或密码错误）")
         raise HTTPException(401, "用户名或密码错误")
@@ -30,16 +38,46 @@ def login(body: dict):
     return {"token": auth.make_token(username)}
 
 
+@router.get("/auth/me")
+def me(_=Depends(require_user)):
+    return {"username": _web_username()}
+
+
+# 显式列出允许字符（不用 \w：Python 的 \w 会放行西里尔文/韩文等所有 Unicode 文字，与前端规则不一致）
+_USERNAME_RE = re.compile(r"^[A-Za-z0-9_@\.\-\u4e00-\u9fa5]{2,32}$")
+
+
 @router.post("/auth/password")
 def change_pwd(body: dict, _=Depends(require_user)):
-    old, new = body.get("old", ""), body.get("new", "")
+    """修改用户名和/或密码（都需验证旧密码）。body: {old, new?, username?}"""
+    old = body.get("old", "")
     if not auth.verify_password(old, db.get_setting("web_password_hash", "")):
+        auth.record_login_fail()  # 旧密码连续错误同样触发限速，防止已登录会话被暴力猜密码
         raise HTTPException(400, "旧密码错误")
-    if len(new) < 6:
-        raise HTTPException(400, "新密码至少 6 位")
-    auth.change_password(new)
-    logstream.info("system", "管理员密码已在网页修改")
-    return {"ok": True}
+    if auth.login_throttled():
+        raise HTTPException(429, "失败次数过多，请 1 分钟后再试")
+    username = str(body.get("username") or "").strip()
+    new = str(body.get("new") or "")
+    if not username and not new:
+        raise HTTPException(400, "请至少填写新用户名或新密码其中一项")
+    changed = []
+    if username and username != _web_username():
+        if not _USERNAME_RE.fullmatch(username):
+            raise HTTPException(400, "用户名需为 2-32 位，仅限中英文、数字、@ . _ -")
+        db.set_setting("web_username", username)
+        changed.append(f"用户名 → {username}")
+    if new:
+        if len(new) < 8:
+            raise HTTPException(400, "新密码至少 8 位")
+        if len(new) > 128:
+            raise HTTPException(400, "新密码最长 128 位")
+        auth.change_password(new)
+        changed.append("密码")
+    logstream.info("system", "管理员账号已在网页修改（" + "、".join(changed) + "）")
+    # 轮换 JWT 签名密钥：所有旧 token（含可能被窃取的）立即失效，本会话换取新 token 无感续期
+    auth.rotate_secret()
+    return {"ok": True, "username": _web_username(),
+            "token": auth.make_token(_web_username())}
 
 
 # ---------- wizard ----------
@@ -61,18 +99,50 @@ def wizard_complete(_=Depends(require_user)):
     return {"ok": True}
 
 
+def _readiness(strict_115: bool) -> dict:
+    """启动就绪检查：115 登录 + 启用中频道 +（纯 Userbot 频道时）Userbot 在线。"""
+    st = pan.check_login(strict_115)  # strict=True 强制校验真实登录态（绕过缓存）
+    rows = db.query("SELECT type, enabled FROM channels")
+    enabled = [dict(r) for r in rows if r["enabled"]]
+    polling = [r for r in enabled if r["type"] == "polling"]
+    userbots = [r for r in enabled if r["type"] == "userbot"]
+    userbot_ok = bool(db.get_setting("userbot_ok", False))
+    # 全部是 Userbot 频道（无网页轮询兜底）时，必须 Userbot 在线才能收到消息
+    userbot_needed = bool(userbots) and not polling
+    reasons = []
+    if not st.get("ok"):
+        reasons.append("115 未登录或 Cookie 失效（请扫码登录或导入 Cookie）")
+    if not enabled:
+        reasons.append("尚未添加启用中的频道")
+    if userbot_needed and not userbot_ok:
+        reasons.append("监控的频道均为 Userbot 类型，但 Userbot 未连接")
+    return {
+        "ok_115": bool(st.get("ok")),
+        "channels": len(enabled),
+        "polling": len(polling),
+        "userbot": len(userbots),
+        "userbot_ok": userbot_ok,
+        "userbot_needed": userbot_needed,
+        "ready": not reasons,
+        "reasons": reasons,
+    }
+
+
+@router.get("/wizard/readiness")
+def wizard_readiness(_=Depends(require_user)):
+    """向导完成页的就绪清单（复用登录缓存，不打额外 115 请求）。"""
+    return _readiness(strict_115=False)
+
+
 @router.post("/system/start")
 def system_start(_=Depends(require_user)):
-    """开始运行：启动监听与转存。启动前做就绪检查。"""
-    # 强制校验一次真实登录态（避免 DB 里的 cookie_ok 过期/未初始化导致误判）
-    st = pan.check_login(True)
-    if not st.get("ok"):
-        raise HTTPException(400, f"115 未登录或 Cookie 失效：{st.get('err', '请先到「账号管理」扫码登录')}")
-    n_ch = db.query("SELECT count(*) c FROM channels WHERE enabled=1", one=True)["c"]
-    if n_ch == 0:
-        raise HTTPException(400, "尚未添加监控频道，请先到「频道管理」添加")
+    """开始运行：启动监听与转存。服务端强制就绪检查（防止前端被绕过）。"""
+    r = _readiness(strict_115=True)
+    if not r["ready"]:
+        raise HTTPException(400, "无法开始运行：" + "；".join(r["reasons"]))
     db.set_setting("running", True)
     db.set_setting("paused", False)
+    db.set_setting("auto_stop_reason", "")  # 清除上一次自动停止的原因
     logstream.info("system", "▶ 系统开始运行：监控 TG 频道并自动转存")
     return {"ok": True}
 
@@ -81,22 +151,24 @@ def system_start(_=Depends(require_user)):
 def system_stop(_=Depends(require_user)):
     """停止运行：暂停监听与转存（队列与配置保留）。"""
     db.set_setting("running", False)
+    db.set_setting("auto_stop_reason", "")  # 手动停止时清除自动停止标记
     logstream.warn("system", "⏸ 系统已停止运行（配置与队列保留，可随时再次启动）")
     return {"ok": True}
 
 
 @router.get("/system/state")
 def system_state(_=Depends(require_user)):
-    """运行状态 + 就绪检查结果（供前端显示启动条件）。"""
-    cookie_ok = db.get_setting("cookie_ok", None)
-    n_ch = db.query("SELECT count(*) c FROM channels WHERE enabled=1", one=True)["c"]
+    """运行状态 + 完整就绪检查（供顶栏「开始运行」按钮门控）。
+
+    复用登录缓存（不增加 115 请求压力）；前端按钮据此灰置，服务端 /system/start 仍会强制校验兜底。
+    """
+    r = _readiness(strict_115=False)
     return {
         "running": bool(db.get_setting("running", False)),
         "setup_completed": bool(db.get_setting("setup_completed", False)),
-        "ready": bool(cookie_ok) and n_ch > 0,
-        "cookie_ok": cookie_ok,
-        "channels": n_ch,
         "paused": bool(db.get_setting("paused", False)),
+        "auto_stop_reason": str(db.get_setting("auto_stop_reason", "") or ""),
+        **r,
     }
 
 
@@ -150,10 +222,16 @@ def add_channel(body: dict, _=Depends(require_user)):
     name = name.lstrip("@")
     if not name:
         raise HTTPException(400, "频道名不能为空")
+    if len(name) > 64:
+        raise HTTPException(400, "频道名过长（最多 64 字符）")
     if ctype not in ("polling", "userbot"):
         raise HTTPException(400, "type 必须是 polling 或 userbot")
     if db.query("SELECT 1 FROM channels WHERE type=? AND name=?", (ctype, name), one=True):
         raise HTTPException(400, "该频道已存在")
+    # 频道数量上限：防止误操作/脚本灌入海量频道拖垮轮询与 115 风控
+    n = db.query("SELECT count(*) c FROM channels", one=True)["c"]
+    if n >= 50:
+        raise HTTPException(400, "监控频道已达上限 50 个，请先清理不需要的频道")
     db.execute("INSERT INTO channels(type,name,created_at) VALUES(?,?,?)", (ctype, name, time.time()))
     logstream.info("channels", f"添加监控频道 @{name}（接入方式：{ctype}）")
     return {"ok": True, "name": name}
@@ -161,6 +239,20 @@ def add_channel(body: dict, _=Depends(require_user)):
 
 @router.put("/channels/{ch_id}")
 def update_channel(ch_id: int, body: dict, _=Depends(require_user)):
+    if "type" in body:
+        new_type = body["type"]
+        if new_type not in ("polling", "userbot"):
+            raise HTTPException(400, "type 必须是 polling 或 userbot")
+        ch = db.query("SELECT name, type FROM channels WHERE id=?", (ch_id,), one=True)
+        if not ch:
+            raise HTTPException(404, "频道不存在")
+        if ch["type"] != new_type:
+            db.execute("UPDATE channels SET type=? WHERE id=?", (new_type, ch_id))
+            db.set_setting(f"poll_fail_{ch_id}", 0)  # 类型切换后失败计数重新累计
+            label = {"polling": "网页轮询", "userbot": "Userbot"}
+            logstream.info("channels",
+                           f"频道 @{ch['name']} 接入方式已变更：{label.get(ch['type'], ch['type'])}"
+                           f" → {label[new_type]}")
     if "enabled" in body:
         ch = db.query("SELECT name FROM channels WHERE id=?", (ch_id,), one=True)
         db.execute("UPDATE channels SET enabled=? WHERE id=?", (1 if body["enabled"] else 0, ch_id))
@@ -174,6 +266,7 @@ def update_channel(ch_id: int, body: dict, _=Depends(require_user)):
 def delete_channel(ch_id: int, _=Depends(require_user)):
     ch = db.query("SELECT name FROM channels WHERE id=?", (ch_id,), one=True)
     db.execute("DELETE FROM channels WHERE id=?", (ch_id,))
+    db.set_setting(f"poll_fail_{ch_id}", 0)  # 清理失败计数，避免残留影响健康判定
     if ch:
         logstream.info("channels", f"删除监控频道 @{ch['name']}")
     return {"ok": True}
@@ -292,7 +385,9 @@ def reset_rules(_=Depends(require_user)):
 
 @router.post("/rules/test")
 def test_rule(body: dict, _=Depends(require_user)):
-    return classifier.test_text(body.get("text", ""))
+    # 截断超长输入：规则测试是同步正则执行，超大文本有拖慢接口的风险
+    text = str(body.get("text", ""))[:2000]
+    return classifier.test_text(text)
 
 
 # ---------- blacklist ----------
@@ -354,16 +449,17 @@ def add_blacklist(btype: str, body: dict, _=Depends(require_user)):
     value = (body.get("value") or "").strip()
     if not value:
         raise HTTPException(400, "内容不能为空")
+    lines = [ln.strip() for ln in value.splitlines() if ln.strip()]
+    if len(lines) > 200:
+        raise HTTPException(400, "单次最多添加 200 条，请分批操作")
     # 支持批量（每行一条）
-    for line in value.splitlines():
-        line = line.strip()
-        if line:
-            db.execute("INSERT OR IGNORE INTO blacklist(type,value,note,created_at) VALUES(?,?,?,?)",
-                       (btype, line, body.get("note", ""), time.time()))
+    for line in lines:
+        db.execute("INSERT OR IGNORE INTO blacklist(type,value,note,created_at) VALUES(?,?,?,?)",
+                   (btype, line[:500], (body.get("note") or "")[:200], time.time()))
     label = {"keyword": "关键词", "channel": "频道", "file_pattern": "文件名正则"}[btype]
     filters.invalidate()
-    logstream.info("blacklist", f"添加{label}黑名单: {value.splitlines()[0][:40]}"
-                                f"{' 等' if len(value.splitlines()) > 1 else ''}")
+    logstream.info("blacklist", f"添加{label}黑名单: {lines[0][:40]}"
+                                f"{' 等' if len(lines) > 1 else ''}")
     return {"ok": True}
 
 
@@ -378,9 +474,15 @@ def del_blacklist(btype: str, item_id: int, _=Depends(require_user)):
 
 
 # ---------- transfers ----------
+def _clamp_page(page: int, size: int, max_size: int) -> tuple[int, int]:
+    """分页参数收紧：size 设上限防一次性拖全表（DoS/内存），page 至少为 1。"""
+    return max(page, 1), max(1, min(size, max_size))
+
+
 @router.get("/transfers")
 def list_transfers(status: str = "", category: str = "", search: str = "",
                    page: int = 1, size: int = 30, _=Depends(require_user)):
+    page, size = _clamp_page(page, size, 200)
     where, params = ["1=1"], []
     if status:
         where.append("status=?"); params.append(status)
@@ -581,6 +683,7 @@ def get_logs(date: str = "", level: str = "", module: str = "", search: str = ""
              page: int = 1, size: int = 100, _=Depends(require_user)):
     """历史日志查询：按天（服务器本地时区）/级别/模块/关键词筛选，最多回溯 7 天。"""
     from datetime import datetime, timedelta
+    page, size = _clamp_page(page, size, 500)
     where, params = ["1=1"], []
     if date:
         try:

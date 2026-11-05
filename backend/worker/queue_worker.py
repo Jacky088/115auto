@@ -108,7 +108,7 @@ def _process_one(job: dict):
     # 2. 内容黑名单：文件名 + 体积（放行任务跳过）
     if not job.get("bypass_filters"):
         blocked, rule_type, rule_value = filters.check_files(
-            [f["fn"] for f in snap["files"]], snap["total_size"])
+            [f.get("fn", "") for f in snap["files"]], snap["total_size"])
         if blocked:
             filters.record_hit(job["channel"], job["message_id"], title, code,
                                rule_type, rule_value, "share_info")
@@ -125,13 +125,29 @@ def _process_one(job: dict):
         raise RuntimeError(f"目标目录无效: {target}")
 
     # 4. 转存（115 对重复文件会报"已存在"，同样视为已在目标目录）
-    file_ids = [f["fid"] for f in snap["files"]]
+    # 分享文件字段可能因接口形态不同而缺失（fid/file_id），统一过滤后再提交，
+    # 避免旧的直取 f["fid"] 在字段不匹配时抛出 KeyError（历史线上报错 'fid'）。
+    file_total = len(snap["files"])
+    flat_ids = [str(f.get("fid")) for f in snap["files"] if f.get("fid")]
+    # 优先按分享顶层条目整包转存：分享是文件夹（剧集/合集）时保留目录结构，
+    # 与 115 网页的“转存”一致；逐个子文件 id 提交在大量文件时（如 5 季 100 集、
+    # 316GB 的剧集分享）容易被 115 拒绝或只转存一部分。
+    top_ids = [str(i) for i in (snap.get("top_ids") or []) if i]
+    file_ids = top_ids or flat_ids
+    if not file_ids:
+        raise RuntimeError("分享内文件缺少有效的文件 id（115 接口返回字段异常），需要重试")
     try:
         pan.receive(code, rc, cid, file_ids)
     except pan.Pan115Error as e:
-        if "存在" not in str(e):
+        if "存在" in str(e):
+            logstream.info("transfer", f"分享 {code} 文件已存在于目标目录，视为已转存")
+        elif top_ids and flat_ids and set(flat_ids) != set(top_ids):
+            # 极少数接口形态不接受目录 id：退回逐文件提交
+            logstream.warn("transfer",
+                           f"分享 {code} 顶层整包转存被拒（{str(e)[:120]}），改为逐文件提交")
+            pan.receive(code, rc, cid, flat_ids)
+        else:
             raise
-        logstream.info("transfer", f"分享 {code} 文件已存在于目标目录，视为已转存")
 
     # 5. 双重确认：反查目标目录，确认文件真实到达（防接口误报）
     if not _verify_receive(cid, snap):
@@ -139,28 +155,42 @@ def _process_one(job: dict):
 
     db.execute("UPDATE transfers SET status='success', title=?, size=?, file_count=?, "
                "finished_at=? WHERE id=?",
-               (title, snap["total_size"], len(file_ids), time.time(), job["id"]))
+               (title, snap["total_size"], file_total, time.time(), job["id"]))
     db.quota_incr()
     logstream.info("transfer",
-                   f"转存成功: {title[:50]} → {target}（{len(file_ids)} 个文件, "
+                   f"转存成功: {title[:50]} → {target}（{file_total} 个文件, "
                    f"{snap['total_size'] / (1 << 30):.2f} GB）")
     jobs.notify_transfer(title, job.get("category", ""), job.get("channel", ""),
                          target, size=snap["total_size"], kind="share",
-                         file_count=len(file_ids))
+                         file_count=file_total)
 
 
 def _verify_receive(cid: int, snap: dict) -> bool:
-    """反查目标目录：抽查分享文件名是否真实到达。验证接口异常时不误判（信任 API 结果）。"""
-    names = [f["fn"] for f in snap["files"][:10] if f.get("fn")]
+    """反查目标目录：抽查分享条目是否真实到达。
+
+    115 转存落库有延迟，这里轮询几次再判定；候选名同时包含分享展开后的文件名
+    和分享顶层条目名（分享以文件夹整体转存时，目标目录里只有顶层文件夹名）。
+    验证接口异常时按 API 成功处理，避免把接口抖动误判成转存失败。
+    """
+    names = [f.get("fn") for f in snap["files"][:10] if f.get("fn")]
+    names += [n for n in (snap.get("top_names") or [])[:10] if n]
     if not names:
         return True
-    time.sleep(2)
+    delays = (2, 4, 8)
     try:
-        got = pan.list_file_names(cid)
-        return any(n in got for n in names)
+        for i, delay in enumerate(delays):
+            time.sleep(delay)
+            got = pan.list_file_names(cid)
+            if any(n in got for n in names):
+                return True
+            if i == len(delays) - 1:
+                logstream.warn("transfer",
+                               f"目标目录反查未命中（目录条目示例: {list(got)[:5] or '空'}），"
+                               f"抽查名示例: {names[:3]}")
     except Exception as e:
         logstream.warn("transfer", f"目录反查失败（按 API 成功处理）: {e}")
         return True
+    return False
 
 
 def _backoff(attempts: int) -> float:
@@ -275,7 +305,10 @@ async def queue_worker():
 
             limit = int(_num_setting("daily_limit", 50))
             if limit > 0 and db.quota_today() >= limit:
-                logstream.warn("transfer", f"已达每日限额 {limit}，明日 0 点自动恢复")
+                waiting = db.query("SELECT count(*) c FROM transfers WHERE status='queued'", one=True)["c"]
+                logstream.warn("transfer",
+                               f"已达每日限额 {limit}（分享+云下载共享额度），剩余 {waiting} 个任务保留在队列，"
+                               "明日 0 点额度重置后自动接续转存")
                 await asyncio.sleep(600)
                 continue
 
@@ -333,5 +366,5 @@ async def queue_worker():
 
             await asyncio.sleep(_interval())
         except Exception as e:
-            logstream.error("transfer", f"工作器异常: {e}")
+            logstream.error("transfer", f"工作器异常: {logstream.exc(e)}")
             await asyncio.sleep(30)

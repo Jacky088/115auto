@@ -850,6 +850,137 @@ backfill._page_log = None
 backfill._fetch_before = _real_fetch_before
 db.set_setting("daily_limit", 50)
 
+print("\n=== 20. 115 接口字段兼容（file_id/file_name vs fid/fn）===")
+import importlib  # noqa: E402
+import p115client  # noqa: E402
+from backend.pan115 import client as _pan_cli  # noqa: E402
+
+# 前面的用例把 pan 模块的接口整体 mock 掉了，这里重载回真实实现再验证字段兼容
+importlib.reload(_pan_cli)
+_orig_share_snap = p115client.P115Client.share_snap
+
+
+def _fake_share_snap(payload, **kw):
+    """模拟 115 新形态：文件用 file_id/file_name，目录用 cid/n + fc=0。"""
+    cid = payload.get("cid")
+    if cid == 0:
+        return {"state": True, "data": {
+            "count": 2, "shareinfo": {"share_title": "字段兼容测试"},
+            "list": [{"file_id": "111", "file_name": "a.mkv", "file_size": 1000, "fc": 1},
+                     {"cid": "222", "n": "子目录", "fc": 0}]}}
+    return {"state": True, "data": {
+        "count": 1, "list": [{"file_id": "333", "file_name": "b.mkv", "fs": 2000}]}}
+
+
+p115client.P115Client.share_snap = staticmethod(_fake_share_snap)
+try:
+    snap_new = _pan_cli.share_snap_all("compat001", "")
+finally:
+    p115client.P115Client.share_snap = _orig_share_snap
+check("share_snap_all 兼容 file_id/file_name 且递归子目录",
+      [f["fid"] for f in snap_new["files"]] == ["111", "333"], str(snap_new["files"]))
+check("分享标题从 data.shareinfo 解析", snap_new["title"] == "字段兼容测试", snap_new["title"])
+check("文件体积合计正确", snap_new["total_size"] == 3000, str(snap_new["total_size"]))
+check("分享顶层名记录（文件 + 文件夹）", snap_new["top_names"] == ["a.mkv", "子目录"],
+      str(snap_new.get("top_names")))
+check("分享顶层 id 记录（文件夹取 cid）", snap_new["top_ids"] == ["111", "222"],
+      str(snap_new.get("top_ids")))
+check("worker 过滤后无缺 id 项（不再 KeyError 'fid'）",
+      [str(f.get("fid")) for f in snap_new["files"] if f.get("fid")] == ["111", "333"])
+
+
+class _FakeFsClient:
+    def fs_files(self, payload):
+        return {"state": True, "count": 2, "data": [
+            {"cid": "555", "n": "目录A", "fc": 0},          # 整数 fc=0：必须是目录
+            {"fid": "999", "file_name": "f.mkv", "fc": "1"}]}
+
+
+_orig_get_client = _pan_cli._get_client
+_pan_cli._get_client = lambda: _FakeFsClient()
+try:
+    dirs_new = _pan_cli._list_dir(0)
+finally:
+    _pan_cli._get_client = _orig_get_client
+check("_list_dir 识别整数 fc=0 目录（修复 or 取值导致漏判）",
+      dirs_new == {"目录A": 555}, str(dirs_new))
+
+print("\n=== 21. 转存后反查（115 网页接口目录项用 n 字段）===")
+
+
+class _FakeListClient:
+    """115 网页 fs_files 的真实字段形态：文件名用 n，目录用 cid+fc=0。"""
+
+    def fs_files(self, payload):
+        return {"state": True, "count": 2, "data": [
+            {"fid": "1", "n": "走马上任 (2026) S01E11.mkv", "fc": "1"},
+            {"cid": "2", "n": "最近接收", "fc": 0}]}
+
+
+_pan_cli._get_client = lambda: _FakeListClient()
+try:
+    got_names = _pan_cli.list_file_names(123)
+finally:
+    _pan_cli._get_client = _orig_get_client
+check("list_file_names 读取 n 字段（旧实现只认 file_name 会恒为空）",
+      "走马上任 (2026) S01E11.mkv" in got_names and "最近接收" in got_names, str(got_names))
+
+_orig_list_names = pan.list_file_names
+try:
+    pan.list_file_names = lambda cid, limit=500: {"走马上任 (2026) S01E11.mkv"}
+    snap_file = {"files": [{"fn": "走马上任 (2026) S01E11.mkv"}], "top_names": []}
+    check("反查命中分享文件名 → 验证通过", queue_worker._verify_receive(12345, snap_file) is True)
+    pan.list_file_names = lambda cid, limit=500: {"走马上任 (2026) S01E11"}  # 只落了顶层文件夹
+    snap_dir = {"files": [{"fn": "inside.mkv"}], "top_names": ["走马上任 (2026) S01E11"]}
+    check("分享以文件夹整体转存 → 用顶层目录名也能验证通过",
+          queue_worker._verify_receive(12345, snap_dir) is True)
+finally:
+    pan.list_file_names = _orig_list_names
+
+print("\n=== 22. 文件夹分享整包转存（剧集/合集，如 Lsp115 19857）===")
+_orig_snap_all2, _orig_mkdirs2, _orig_receive2 = pan.share_snap_all, pan.mkdirs, pan.receive
+_received_ids = {}
+
+
+def _folder_snap(code, rc, max_files=5000):
+    """115 顶层是一个文件夹（cid），内含多季多集：老实现会把所有子文件 id 一次性提交。"""
+    return {"title": "传奇办公室 (2015)",
+            "files": [{"fid": str(i), "fn": f"S01E{i:02d}.mkv", "fs": 1 << 30} for i in range(1, 4)],
+            "total_size": 3 * (1 << 30),
+            "top_names": ["传奇办公室 (2015)"], "top_ids": ["900001"]}
+
+
+def _record_receive(code, rc, cid, ids):
+    _received_ids["ids"] = list(ids)
+    return {"state": True}
+
+
+pan.share_snap_all, pan.mkdirs, pan.receive = _folder_snap, lambda p: 12345, _record_receive
+pan.list_file_names = lambda cid, limit=500: {"传奇办公室 (2015)"}
+try:
+    job = mkjob("folder001")
+    queue_worker._process_one(job)
+finally:
+    pan.share_snap_all, pan.mkdirs, pan.receive = _orig_snap_all2, _orig_mkdirs2, _orig_receive2
+    pan.list_file_names = _orig_list_names
+row = dict(db.query("SELECT * FROM transfers WHERE id=?", (job["id"],), one=True))
+check("提交的是顶层文件夹 id 而非上百个子文件 id", _received_ids.get("ids") == ["900001"],
+      str(_received_ids.get("ids")))
+check("状态 success（反查用顶层目录名命中）", row["status"] == "success", row["status"])
+check("文件数按展开后的真实文件统计", row["file_count"] == 3, str(row["file_count"]))
+
+print("\n=== 23. 云下载链接匹配（ED2K 中文名 / percent 编码差异）===")
+from urllib.parse import quote  # noqa: E402
+from backend.worker import jobs as _jobs  # noqa: E402
+
+_raw = "ed2k://|file|厨房春光.未删减完整版.美版.iso|7976779776|48BEB437DC62ED168546DE45BB8221AB|/"
+check("ED2K 按文件 hash 匹配", _jobs._offline_key(_raw) == "ed2k:48beb437dc62ed168546de45bb8221ab",
+      _jobs._offline_key(_raw))
+check("115 返回 percent 编码的同一链接也能匹配",
+      _jobs._offline_key(quote(_raw, safe="")) == _jobs._offline_key(_raw))
+check("磁力链按 btih 匹配（忽略 dn 等参数）",
+      _jobs._offline_key("magnet:?xt=urn:btih:ABCDEF0123456789&dn=x") == "btih:abcdef0123456789")
+
 print(f"\n{'='*40}\n结果: {len(PASS)} 通过, {len(FAIL)} 失败, {len(SKIP)} 跳过（外网不可达）")
 if FAIL:
     print("失败项:", FAIL)

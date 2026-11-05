@@ -115,14 +115,75 @@ body {
 }
 
 /* ---- 表单/工具栏尺寸统一 ---- */
-.el-button + .el-button { margin-left: 0; }
-/* 相邻按钮统一留出空隙（含 text 按钮），防止视觉重叠 */
-.el-button + .el-button:not(:first-child) { margin-left: 0; }
-.el-button { margin-right: 0; }
-.toolbar .el-button + .el-button, .el-result__extra .el-button + .el-button,
-.el-dialog__footer .el-button + .el-button { margin-left: 10px; }
-/* result 区块内按钮垂直排布时纵向间距 */
-.el-result__extra .el-button { margin: 0 6px; }
+/* 全局：任意容器内相邻按钮保持 10px 间距（含 MessageBox/气泡确认等 Element 内部按钮） */
+.el-button + .el-button { margin-left: 10px; }
+/* 自带 gap 的 flex 工具栏：按钮间距由 gap 提供，只豁免直接子级避免叠加 */
+.toolbar > .el-button + .el-button,
+.files-toolbar > .el-button + .el-button,
+.head-actions > .el-button + .el-button,
+.dp-footer-left > .el-button + .el-button,
+.btn-row > .el-button + .el-button,
+.btn-stack > .el-button + .el-button { margin-left: 0; }
+/* 通用按钮排布容器：横排 / 右对齐横排 / 竖排 */
+.btn-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.btn-row.end { justify-content: flex-end; }
+.btn-stack { display: flex; flex-direction: column; align-items: center; gap: 12px; }
+
+/* ---- 顶部胶囊消息（全站统一）：位于页面顶部居中，多条自动向下堆叠不遮挡 ---- */
+.el-message {
+  border-radius: 999px;
+  border: 1px solid var(--el-message-border-color);
+  box-shadow: 0 6px 24px rgba(31, 45, 74, .12);
+  padding: 10px 18px;
+  font-weight: 500;
+  max-width: min(calc(100vw - 32px), 640px);
+}
+.el-message .el-message__content { line-height: 1.5; }
+/* 语义配色：浅底 + 深字，颜色即含义 */
+.el-message--success {
+  --el-message-bg-color: var(--el-color-success-light-9);
+  --el-message-border-color: var(--el-color-success-light-8);
+  --el-message-text-color: var(--el-color-success-dark-2);
+}
+.el-message--warning {
+  --el-message-bg-color: var(--el-color-warning-light-9);
+  --el-message-border-color: var(--el-color-warning-light-8);
+  --el-message-text-color: var(--el-color-warning-dark-2);
+}
+.el-message--error {
+  --el-message-bg-color: var(--el-color-danger-light-9);
+  --el-message-border-color: var(--el-color-danger-light-8);
+  --el-message-text-color: var(--el-color-danger-dark-2);
+}
+.el-message--info {
+  --el-message-bg-color: var(--el-fill-color-light);
+  --el-message-border-color: var(--el-border-color-lighter);
+  --el-message-text-color: var(--el-text-color-regular);
+}
+
+/* ---- 文字按钮可读性：默认带浅色底（"软按钮"），不再是白底上的裸文字 ---- */
+.el-button.is-text {
+  background-color: var(--el-fill-color-light);
+}
+.el-button.is-text:hover,
+.el-button.is-text:focus-visible {
+  background-color: var(--el-fill-color);
+}
+.el-button.is-text:active {
+  background-color: var(--el-fill-color-dark);
+}
+/* 按语义着色：主操作浅蓝底、危险操作浅红底，颜色即含义 */
+.el-button--primary.is-text { background-color: var(--el-color-primary-light-9); }
+.el-button--primary.is-text:hover,
+.el-button--primary.is-text:focus-visible { background-color: var(--el-color-primary-light-8); }
+.el-button--danger.is-text { background-color: var(--el-color-danger-light-9); }
+.el-button--danger.is-text:hover,
+.el-button--danger.is-text:focus-visible { background-color: var(--el-color-danger-light-8); }
+.el-button.is-text.is-disabled,
+.el-button.is-text:disabled {
+  background-color: var(--el-fill-color-lighter);
+  color: var(--el-text-color-placeholder);
+}
 
 /* ---- 深蓝渐变页面背景（登录/向导）---- */
 .saas-hero-bg {
@@ -234,6 +295,13 @@ body {
   }
   /* 输入框高度维持 32 但点击区域包 padding */
   .el-input__wrapper { padding: 2px 10px; }
+  /* 顶部胶囊消息：小屏收紧宽度与内边距，长文本换行也不遮挡操作区 */
+  .el-message {
+    max-width: calc(100vw - 24px);
+    padding: 8px 14px;
+    font-size: 13px;
+  }
+  .el-message .el-message__content { font-size: 13px; }
   /* switch 加大触感 */
   .el-switch { --el-switch-on-color: #2f6bff; }
   .el-switch__core { min-width: 44px; height: 24px; }

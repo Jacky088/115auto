@@ -32,8 +32,29 @@
               <el-radio value="userbot">Userbot</el-radio>
               <el-radio value="both">两者</el-radio>
             </el-radio-group>
-            <div class="tip" style="width: 100%">修改接入方式后需重启容器生效</div>
+            <div class="tip" style="width: 100%">{{ tgModeTip }}</div>
           </el-form-item>
+
+          <el-form-item v-if="f.tg_mode !== 'userbot'" label="轮询间隔（秒）">
+            <div class="range-row">
+              <el-input-number v-model="f.poll_interval_min" :min="10" controls-position="right" />
+              <span class="sep">~</span>
+              <el-input-number v-model="f.poll_interval_max" :min="15" controls-position="right" />
+              <span class="tip">区间内随机，降低被识别风险；仅作用于网页轮询频道</span>
+            </div>
+          </el-form-item>
+
+          <el-form-item v-if="f.tg_mode !== 'polling'" label="Userbot">
+            <div class="ub-inline">
+              <el-tag :type="ub.connected ? 'success' : 'danger'" size="small">
+                {{ ub.connected ? '已连接' : '未连接' }}
+              </el-tag>
+              <span class="tip">{{ ub.connected
+                ? 'TG 账号监听运行中（实时接收私有频道消息）'
+                : '尚未登录：请到「账号管理」完成 Userbot 登录，否则纯 Userbot 频道无法收到消息' }}</span>
+            </div>
+          </el-form-item>
+
           <el-form-item label="TG 代理">
             <div class="range-row" style="width: 100%">
               <el-input v-model="f.proxy" placeholder="socks5://127.0.0.1:1080 或 http://127.0.0.1:7890（仅 TG 流量走代理，留空直连）" />
@@ -42,14 +63,6 @@
             <div class="tip" style="width: 100%">
               国内部署必填：所有 TG 流量（频道抓取/补漏/按钮解析/通知/Bot 指令）都走此代理，
               115 直连不受影响。测试失败会提示具体原因。
-            </div>
-          </el-form-item>
-          <el-form-item label="轮询间隔（秒）">
-            <div class="range-row">
-              <el-input-number v-model="f.poll_interval_min" :min="10" controls-position="right" />
-              <span class="sep">~</span>
-              <el-input-number v-model="f.poll_interval_max" :min="15" controls-position="right" />
-              <span class="tip">区间内随机，降低被识别风险</span>
             </div>
           </el-form-item>
           </div>
@@ -120,7 +133,7 @@
           </div>
       </div>
 
-      <div style="margin-top: 10px">
+      <div class="btn-row" style="margin-top: 10px">
         <el-button type="primary" :disabled="!dirty" @click="save">保存设置</el-button>
         <el-button @click="backupExport">导出数据备份</el-button>
         <span class="tip" style="margin-left: 12px">
@@ -132,9 +145,10 @@
 </template>
 
 <script setup>
-import { nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { api, errMsg, saveOk } from '../api'
+import { useUnsavedGuard } from '../composables/unsavedGuard'
 
 const f = ref({})
 const loaded = ref(false)
@@ -143,9 +157,23 @@ const testing = ref(false)
 const dirty = ref(false)
 const isMobile = ref(window.innerWidth <= 768)
 const onRz = () => { isMobile.value = window.innerWidth <= 768 }
+useUnsavedGuard(dirty)  // 有未保存更改时，离开页面弹窗确认
 onMounted(() => window.addEventListener('resize', onRz))
 onUnmounted(() => window.removeEventListener('resize', onRz))
 let suppressWatch = false
+
+// Userbot 连接状态（接入方式 ≠ 网页轮询时展示）
+const ub = reactive({ connected: false })
+const loadUb = async () => {
+  try { ub.connected = !!(await api.get('/api/tg/userbot/status')).data.connected } catch { /* ignore */ }
+}
+watch(() => f.value.tg_mode, (v) => { if (v && v !== 'polling') loadUb() })
+
+const tgModeTip = computed(() => ({
+  polling: '当前模式：网页轮询——只抓取接入方式为「网页轮询」的频道（公开频道，免 TG 账号）',
+  userbot: '当前模式：Userbot——用 TG 小号实时监听接入方式为「Userbot」的频道（含私有频道）',
+  both: '当前模式：两者——按每个频道自身的接入方式分流处理，互不影响',
+}[f.value.tg_mode] || ''))
 
 watch([f, retryText], () => {
   if (!suppressWatch) dirty.value = true
@@ -155,6 +183,7 @@ const load = async () => {
   suppressWatch = true
   f.value = (await api.get('/api/settings')).data
   retryText.value = (f.value.retry_backoff || []).join(', ')
+  if (f.value.tg_mode && f.value.tg_mode !== 'polling') loadUb()
   loaded.value = true
   await nextTick()
   suppressWatch = false
@@ -238,6 +267,7 @@ onMounted(load)
 @media (max-width: 768px) { .section-card { padding: 12px 14px 2px; } }
 .tip { color: #999; font-size: 12px; }
 .switch-row { display: flex; align-items: center; gap: 10px; }
+.ub-inline { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .switch-row .tip { flex: 1; min-width: 0; }
 .range-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .range-row :deep(.el-input-number) { width: 130px; }

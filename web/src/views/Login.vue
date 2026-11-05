@@ -36,6 +36,7 @@ const submit = async () => {
   try {
     const { data } = await api.post('/api/auth/login', form)
     localStorage.setItem('token', data.token)
+    ElMessage.success('登录成功')
     router.push('/dashboard')
   } catch (e) {
     ElMessage.error(errMsg(e))

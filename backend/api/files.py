@@ -1,5 +1,6 @@
 """115 文件浏览器 API：查阅/新建目录/重命名/删除/移动/复制（基于 p115client 官方自用接口）。"""
 from fastapi import APIRouter, Depends, HTTPException, Query
+from p115pickcode import to_id as _pickcode_to_id
 
 from ..pan115 import client as pan
 from .deps import require_user
@@ -14,11 +15,30 @@ def _int(v, default: int = 0) -> int:
         return default
 
 
+def _numeric_id(f: dict, pick_code: str) -> int:
+    """从 pick_code 离线解码数值 id（pick_code 本身编码了文件/目录 id）。
+
+    某些接口形态（如 open 列表）的返回项不带 fid/file_id 数值字段，
+    导航（fs_files 的 cid 参数）必须用数值 id，因此在这里解码还原。
+    """
+    if not pick_code:
+        return 0
+    try:
+        return _pickcode_to_id(pick_code)
+    except Exception:
+        return 0
+
+
 def _item(f: dict) -> dict:
-    """统一列表项结构（兼容 115 网页接口与搜索接口的字段名）。"""
-    is_dir = f.get("fc") in (0, "0") or f.get("fid") in (0, "0")
+    """统一列表项结构（兼容 115 网页接口、open 接口与搜索接口的字段名）。"""
+    is_dir = (f.get("fc") in (0, "0") or f.get("fid") in (0, "0")
+              or f.get("file_category") in (0, "0"))
+    pick_code = f.get("pick_code") or f.get("pc") or ""
+    # 网页接口的目录项通常只有 cid（没有 fid/file_id），缺了它前端无法进入子目录
+    raw_id = f.get("fid") or f.get("file_id") or (f.get("cid") if is_dir else None)
     return {
-        "id": str(f.get("fid") or f.get("file_id") or ""),
+        # 数值 id 优先（fid/file_id/cid），缺失时从 pick_code 解码还原，最后才兜底 pick_code 字符串
+        "id": str(raw_id or _numeric_id(f, pick_code) or pick_code),
         "name": f.get("file_name") or f.get("fn") or f.get("n") or "",
         "is_dir": is_dir,
         "size": _int(f.get("file_size") or f.get("fs") or f.get("s")),

@@ -47,6 +47,22 @@ def warn(module, message): log("warn", module, message)
 def error(module, message): log("error", module, message)
 
 
+def exc(e: BaseException, tail: int = 2) -> str:
+    """异常 → 带具体原因的日志文本：异常类型: 消息 + 调用栈末尾（定位问题用）。
+
+    在 except 块里用：logstream.error("transfer", f"工作器异常: {logstream.exc(e)}")
+    """
+    import traceback
+    body = f"{type(e).__name__}: {e}"
+    try:
+        frames = traceback.format_exception(type(e), e, e.__traceback__)
+        if tail > 0 and len(frames) > 1:
+            body += "\n" + "".join(frames[-(tail + 1):-1]).strip()
+    except Exception:
+        pass
+    return body
+
+
 def recent(n: int = 200) -> list[dict]:
     return list(_buf)[-n:]
 

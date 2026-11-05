@@ -19,7 +19,12 @@ def _proxy() -> str | None:
 
 
 def parse_page(html: str) -> list[dict]:
-    """解析 t.me/s 页面，返回 [{id, text, buttons}]。buttons 为内联按钮的 URL。"""
+    """解析 t.me/s 页面，返回 [{id, text, buttons}]。buttons 为内联按钮的 URL。
+
+    关键：频道常把 115 链接放在消息正文 <a href> 里（显示为"点击跳转"），
+    get_text() 会把 href 丢掉只剩这四个字 → 链接提取为空。
+    因此把正文内所有 <a> 的 href 注回到文本中，保证提取器能看到真实链接。
+    """
     soup = BeautifulSoup(html, "html.parser")
     out = []
     for msg in soup.select(".tgme_widget_message[data-post]"):
@@ -29,6 +34,12 @@ def parse_page(html: str) -> list[dict]:
             continue
         parts = []
         for node in msg.select(".tgme_widget_message_text"):
+            # 先把 <a href> 的地址注回文本（Telegram 网页版正文链接的真实位置）
+            for a in node.find_all("a", href=True):
+                href = a["href"]
+                if href.startswith(("http://", "https://", "magnet:", "ed2k:", "thunder:",
+                                    "115:", "ftp://")):
+                    a.insert_before(soup.new_string(f"\n{href}\n"))
             parts.append(node.get_text("\n", strip=True))
         text = "\n".join(parts)
         buttons = [a.get("href") for a in msg.select(".tgme_widget_message_inline_button")
@@ -114,8 +125,17 @@ async def polling_loop():
                 for ch in chans:
                     try:
                         await _poll_one(client, ch)
+                        db.set_setting(f"poll_fail_{ch['id']}", 0)  # 成功即清零失败计数
                     except Exception as e:
-                        logstream.error("polling", f"[{ch['name']}] 抓取失败: {e}")
+                        # 连续失败计数：供运行健康监控判定 TG 通道失效（全频道超阈值 → 自动停止）
+                        fails = 0
+                        try:
+                            fails = int(db.get_setting(f"poll_fail_{ch['id']}", 0) or 0)
+                        except (TypeError, ValueError):
+                            fails = 0
+                        db.set_setting(f"poll_fail_{ch['id']}", fails + 1)
+                        logstream.error("polling", f"[{ch['name']}] 抓取失败（连续 {fails + 1} 次）: "
+                                                   f"{logstream.exc(e)}")
                     try:
                         lo = max(1, int(db.get_setting("poll_interval_min", 30)))
                         hi = max(1, int(db.get_setting("poll_interval_max", 120)))

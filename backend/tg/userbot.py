@@ -13,6 +13,7 @@
 - 接收循环（_pump）在主事件循环上用 asyncio.create_task 拉起。
 """
 import asyncio
+import re
 from pathlib import Path
 
 from telethon import TelegramClient, events
@@ -101,6 +102,62 @@ async def status() -> dict:
     }
 
 
+async def test() -> dict:
+    """一键自检：连接 + 授权 + 逐个验证 Userbot 频道可见性（能否真正收到消息）。
+
+    返回 {ok, me, channels: [{name, ok, title, err}], err}；未连接时 ok=False。
+    """
+    if client is None:
+        return {"ok": False, "err": "Userbot 未登录，请先完成登录"}
+    try:
+        if not (client.is_connected() and await client.is_user_authorized()):
+            return {"ok": False, "err": "Userbot 已断开或登录失效，请重新登录"}
+    except Exception as e:
+        return {"ok": False, "err": f"连接检查失败: {type(e).__name__}: {e}"}
+    try:
+        me = await client.get_me()
+    except Exception as e:
+        return {"ok": False, "err": f"获取账号信息失败: {type(e).__name__}: {e}"}
+    who = getattr(me, "username", None) or getattr(me, "first_name", "") or ""
+
+    rows = [dict(r) for r in db.query("SELECT name FROM channels WHERE type='userbot' AND enabled=1")]
+    channels: list[dict] = []
+    ok_all = True
+    if rows:
+        # 预热对话缓存，提高 get_entity 对已加入频道的识别率
+        try:
+            await client.get_dialogs(limit=200)
+        except Exception:
+            pass
+    for r in rows:
+        name = str(r["name"] or "").strip()
+        title, err = "", ""
+        try:
+            entity = await client.get_entity(_entity_ref(name))
+            title = getattr(entity, "title", "") or name
+        except Exception as e:
+            ok_all = False
+            err = (f"无法访问（账号未加入该频道，或用户名/ID 填错？）"
+                   f"{type(e).__name__}: {str(e)[:120]}")
+        channels.append({"name": name, "ok": not err, "title": title, "err": err})
+    if not channels:
+        # 尚未添加 Userbot 类型频道：只验证连接与授权
+        pass
+    return {"ok": ok_all, "me": who, "channels": channels}
+
+
+def _entity_ref(name: str):
+    """频道名 → Telethon 实体引用：数字 ID 用 PeerChannel，其余按 username 处理。"""
+    s = name.strip().lstrip("@")
+    if re.fullmatch(r"-100\d+", s):
+        from telethon.tl.types import PeerChannel
+        return PeerChannel(int(s[4:]))
+    if re.fullmatch(r"-?\d{8,}", s):
+        from telethon.tl.types import PeerChannel
+        return PeerChannel(int(s.lstrip("-")))
+    return s
+
+
 async def _cleanup_flow():
     """放弃当前登录流程：断开临时客户端并清理临时 session。"""
     flow = _login_flow
@@ -145,6 +202,11 @@ async def login_submit(code: str) -> dict:
         flow = _login_flow
         if not flow.get("pending"):
             raise RuntimeError("没有进行中的登录，请先发送验证码")
+        # 验证码错误次数上限：防止会话内无限暴力尝试（TG 侧也有错误次数限制，超限会封 session）
+        tries = int(flow.get("code_tries", 0))
+        if tries >= 5:
+            await _cleanup_flow()
+            raise RuntimeError("验证码错误次数过多，登录流程已取消，请重新发送验证码")
         c: TelegramClient = flow["client"]
         try:
             await c.sign_in(phone=flow["phone"], code=code,
@@ -155,6 +217,9 @@ async def login_submit(code: str) -> dict:
         except (PhoneCodeExpiredError, SessionExpiredError) as e:
             await _cleanup_flow()
             raise RuntimeError(f"验证码已失效，请重新发送验证码（{type(e).__name__}）")
+        except Exception:
+            flow["code_tries"] = tries + 1
+            raise
         try:
             await _finish_login(c, flow)
         except Exception:
@@ -169,8 +234,16 @@ async def login_password(pwd: str) -> dict:
         flow = _login_flow
         if not flow.get("needs_password"):
             raise RuntimeError("当前不需要两步验证密码")
+        tries = int(flow.get("pwd_tries", 0))
+        if tries >= 5:
+            await _cleanup_flow()
+            raise RuntimeError("两步验证密码错误次数过多，登录流程已取消，请重新发送验证码")
         c: TelegramClient = flow["client"]
-        await c.sign_in(password=pwd)
+        try:
+            await c.sign_in(password=pwd)
+        except Exception:
+            flow["pwd_tries"] = tries + 1
+            raise
         try:
             await _finish_login(c, flow)
         except Exception:
@@ -219,6 +292,7 @@ async def _finish_login(c: TelegramClient, flow: dict):
     _remove_session_files(_LOGIN_SESSION)
     _register_handlers(c2)
     asyncio.create_task(_pump(c2), name="userbot-pump")
+    asyncio.create_task(catch_up(c2), name="userbot-catchup")
     logstream.info("userbot",
                    f"Userbot 登录成功: {getattr(me, 'username', None) or getattr(me, 'first_name', '')}")
 
@@ -229,7 +303,7 @@ async def _pump(c: TelegramClient):
     except asyncio.CancelledError:
         raise
     except Exception as e:
-        logstream.error("userbot", f"接收循环退出: {e}")
+        logstream.error("userbot", f"接收循环退出: {logstream.exc(e)}")
     else:
         logstream.warn("userbot", "Userbot 连接已断开")
     # 只有当前客户端退出才标记失效：重新登录时旧客户端断开不应覆盖新登录状态
@@ -293,9 +367,53 @@ def _register_handlers(c: TelegramClient):
                 if full_text:
                     pipeline.process_message(name or "unknown", event.message.id, full_text)
         except Exception as e:
-            logstream.error("userbot", f"消息处理失败: {e}")
+            logstream.error("userbot", f"消息处理失败: {logstream.exc(e)}")
 
     c._autosave_handlers = True
+
+
+async def catch_up(c: TelegramClient):
+    """断线/重启期间漏掉的消息补偿：逐个已启用的 Userbot 频道回溯最近 100 条。
+
+    依赖 messages 表（主键 channel+message_id）天然去重，已处理过的不会重复入队；
+    补偿在连接建立后立即执行，事件流继续实时收新消息，两边互不冲突。
+    """
+    try:
+        watched = [dict(r) for r in
+                   db.query("SELECT name FROM channels WHERE type='userbot' AND enabled=1")]
+        if not watched:
+            return
+        for r in watched:
+            name = str(r["name"] or "").strip()
+            try:
+                entity = await c.get_entity(_entity_ref(name))
+            except Exception as e:
+                logstream.warn("userbot", f"[{name}] 补漏跳过（频道实体不可访问）: {type(e).__name__}")
+                continue
+            try:
+                msgs = await c.get_messages(entity, limit=100)
+            except Exception as e:
+                logstream.warn("userbot", f"[{name}] 补漏拉取失败（下一轮不再自动重试）: {type(e).__name__}: {str(e)[:120]}")
+                continue
+            fresh = 0
+            for m in reversed(msgs):  # 从旧到新处理，与频道推送顺序一致
+                if not m or m.id <= 0:
+                    continue
+                text = m.message or ""
+                buttons = [b.url for row in (m.buttons or [])
+                           for b in row if getattr(b, "url", None)]
+                if text or buttons:
+                    try:
+                        full_text = await resolver.resolve_message(text, buttons)
+                        if full_text:
+                            pipeline.process_message(name, m.id, full_text)
+                            fresh += 1
+                    except Exception as e:
+                        logstream.error("userbot", f"[{name}] 补漏消息 {m.id} 处理失败: {logstream.exc(e)}")
+            if fresh:
+                logstream.info("userbot", f"[{name}] 断线补漏完成，补处理 {fresh} 条消息")
+    except Exception as e:
+        logstream.error("userbot", f"断线补漏异常: {logstream.exc(e)}")
 
 
 async def start_if_configured():
@@ -313,6 +431,7 @@ async def start_if_configured():
             db.set_setting("userbot_ok", True)
             _register_handlers(c)
             asyncio.create_task(_pump(c), name="userbot-pump")
+            asyncio.create_task(catch_up(c), name="userbot-catchup")
             logstream.info("userbot", "Userbot 已自动连接")
         else:
             await c.disconnect()
@@ -320,4 +439,4 @@ async def start_if_configured():
             logstream.warn("userbot", "已有配置但 session 失效，请在网页重新登录")
     except Exception as e:
         db.set_setting("userbot_ok", False)
-        logstream.error("userbot", f"自动连接失败: {e}")
+        logstream.error("userbot", f"自动连接失败: {logstream.exc(e)}")

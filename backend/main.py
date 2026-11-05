@@ -21,6 +21,11 @@ async def lifespan(app: FastAPI):
     logstream.info("system", "115 自动转存助手启动")
     # 进程重启恢复：上一轮被中断的 running 任务重新排队，否则会永久卡在「转存中」
     recovered = db.execute("UPDATE transfers SET status='queued' WHERE status='running'")
+    queued = db.query("SELECT count(*) c FROM transfers WHERE status='queued'", one=True)["c"]
+    if recovered or queued:
+        logstream.info("transfer",
+                       f"队列恢复：待转存 {queued} 个任务（分享+云下载）；今日已用额度续算不清零，"
+                       "额度足时按顺序自动接续")
     if recovered:
         logstream.warn("transfer", f"检测到 {recovered} 个上次中断的转存任务，已重新加入队列")
     # 后台任务
@@ -30,7 +35,7 @@ async def lifespan(app: FastAPI):
     if mode in ("userbot", "both"):
         await userbot.start_if_configured()
     _background.append(asyncio.create_task(queue_worker.queue_worker()))
-    _background.append(asyncio.create_task(jobs.cookie_check_loop()))
+    _background.append(asyncio.create_task(jobs.health_check_loop()))
     _background.append(asyncio.create_task(jobs.log_cleanup_loop()))
     _background.append(asyncio.create_task(jobs.offline_check_loop()))
     _background.append(asyncio.create_task(bot_commands.bot_command_loop()))

@@ -4,6 +4,9 @@ import time
 from .. import database as db
 from ..core import classifier, extractor, filters, logstream
 
+# 进程内提示标记：每频道只提示一次"无链接"说明，避免刷屏
+_runtime_flags: dict[str, bool] = {}
+
 
 def process_message(channel: str, message_id: int, text: str, bypass: bool = False) -> dict:
     """处理一条 TG 消息，返回处理摘要（供测试与调试）。bypass=True 时跳过消息级黑名单。"""
@@ -30,6 +33,15 @@ def process_message(channel: str, message_id: int, text: str, bypass: bool = Fal
     # 3. 提取资源链接
     links = extractor.extract(text or "")
     result["links"] = len(links)
+    if not links:
+        # 可观测性：首条消息说明"为什么没有转存"（其余同类消息不再刷屏）
+        key = f"_no_link_logged_{channel}"
+        if not _runtime_flags.get(key):
+            _runtime_flags[key] = True
+            logstream.info(
+                "pipeline",
+                f"[{channel}] 首批消息未发现可转存的资源链接（115 分享/磁力/电驴/迅雷）——"
+                "此类消息会正常记录但不转存；若该频道应包含资源链接，请到「频道管理→消息预览」核对消息原文")
     if not links:
         return result
 
@@ -85,5 +97,7 @@ def process_message(channel: str, message_id: int, text: str, bypass: bool = Fal
             reason = "未分类且动作为 skip" if not category else f"{category} 的此类型目录为 skip"
             logstream.info("pipeline", f"[{channel}] 跳过 {code}（{reason}）")
 
-    db.execute("UPDATE channels SET msg_count=msg_count+1 WHERE name=?", (channel,))
+    # 统计口径：仅计入真实处理过的消息（入队或含链接的跳过），重复消息不重复计数
+    if result["queued"] or result["links"]:
+        db.execute("UPDATE channels SET msg_count=msg_count+1 WHERE name=?", (channel,))
     return result

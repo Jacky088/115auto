@@ -71,6 +71,17 @@ def change_password(new_password: str):
     db.set_setting("web_password_hash", hash_password(new_password))
 
 
+def rotate_secret():
+    """轮换 JWT 签名密钥：改密/改用户名后使所有已签发 token 立即失效。
+
+    旧会话（含可能被窃取的 token）无法继续访问；调用方需在响应里签发新 token 供当前会话续期。
+    """
+    global _jwt_secret
+    with _secret_lock:
+        _jwt_secret = secrets.token_hex(32)
+        config.SECRET_FILE.write_text(_jwt_secret)
+
+
 def make_token(username: str) -> str:
     payload = {"sub": username, "exp": int(time.time()) + 7 * 86400}
     return jwt.encode(payload, _load_secret(), algorithm="HS256")

@@ -12,8 +12,8 @@
           <el-menu-item index="/dashboard"><el-icon><Odometer /></el-icon>仪表盘</el-menu-item>
           <el-menu-item index="/files"><el-icon><FolderOpened /></el-icon>网盘文件</el-menu-item>
           <el-menu-item index="/channels"><el-icon><Connection /></el-icon>频道管理</el-menu-item>
-          <el-menu-item index="/rules"><el-icon><Sort /></el-icon>分类规则</el-menu-item>
-          <el-menu-item index="/blacklist"><el-icon><CircleClose /></el-icon>黑名单</el-menu-item>
+          <el-menu-item index="/dirs"><el-icon><Collection /></el-icon>转存目录</el-menu-item>
+          <el-menu-item index="/match"><el-icon><Sort /></el-icon>匹配规则</el-menu-item>
           <el-menu-item index="/transfers"><el-icon><List /></el-icon>转存记录</el-menu-item>
           <el-menu-item index="/history"><el-icon><Tickets /></el-icon>日志查询</el-menu-item>
           <el-menu-item index="/account"><el-icon><User /></el-icon>账号管理</el-menu-item>
@@ -32,8 +32,8 @@
         <el-menu-item index="/dashboard"><el-icon><Odometer /></el-icon>仪表盘</el-menu-item>
         <el-menu-item index="/files"><el-icon><FolderOpened /></el-icon>网盘文件</el-menu-item>
         <el-menu-item index="/channels"><el-icon><Connection /></el-icon>频道管理</el-menu-item>
-        <el-menu-item index="/rules"><el-icon><Sort /></el-icon>分类规则</el-menu-item>
-        <el-menu-item index="/blacklist"><el-icon><CircleClose /></el-icon>黑名单</el-menu-item>
+        <el-menu-item index="/dirs"><el-icon><Collection /></el-icon>转存目录</el-menu-item>
+        <el-menu-item index="/match"><el-icon><Sort /></el-icon>匹配规则</el-menu-item>
         <el-menu-item index="/transfers"><el-icon><List /></el-icon>转存记录</el-menu-item>
         <el-menu-item index="/history"><el-icon><Tickets /></el-icon>日志查询</el-menu-item>
         <el-menu-item index="/account"><el-icon><User /></el-icon>账号管理</el-menu-item>
@@ -52,19 +52,24 @@
           <el-tag v-else-if="sysReady" type="warning" size="small" effect="dark" class="run-tag">待启动</el-tag>
           <el-tag v-else type="info" size="small" effect="dark" class="run-tag">未就绪</el-tag>
         </div>
-        <el-button v-if="!sysRunning && sysReady" type="primary" size="small" class="start-btn"
-                   :loading="toggling" @click="startSystem">开始运行</el-button>
-        <el-button v-else-if="sysRunning" type="danger" size="small" plain class="start-btn"
-                   :loading="toggling" @click="stopSystem">停止</el-button>
+        <el-tooltip :disabled="sysRunning || sysReady" placement="bottom"
+                    :content="sysReasons.length ? '无法开始运行：' + sysReasons.join('；') : ''">
+          <span class="start-wrap">
+            <el-button v-if="!sysRunning" type="primary" class="start-btn"
+                       :disabled="!sysReady" :loading="toggling" @click="startSystem">开始运行</el-button>
+            <el-button v-else type="danger" plain class="start-btn"
+                       :loading="toggling" @click="stopSystem">停止</el-button>
+          </span>
+        </el-tooltip>
         <el-dropdown @command="onCommand">
           <div class="user-chip">
-            <div class="avatar">A</div>
-            <span class="user-name">admin</span>
+            <div class="avatar">{{ (username || 'A').slice(0, 1).toUpperCase() }}</div>
+            <span class="user-name">{{ username || 'admin' }}</span>
             <el-icon :size="12" color="#8a97b3"><ArrowDown /></el-icon>
           </div>
           <template #dropdown>
             <el-dropdown-menu>
-              <el-dropdown-item command="pwd">修改密码</el-dropdown-item>
+              <el-dropdown-item command="pwd">修改用户名 / 密码</el-dropdown-item>
               <el-dropdown-item command="logout" divided>退出登录</el-dropdown-item>
             </el-dropdown-menu>
           </template>
@@ -73,34 +78,65 @@
       <el-alert v-if="cookieExpired" type="error" :closable="false" show-icon
                 title="115 Cookie 已失效，转存已暂停 —— 请前往「账号管理」重新扫码登录"
                 style="margin: 0 10px" class="cookie-alert" />
+      <el-alert v-if="autoStop" type="error" :closable="true" show-icon class="auto-stop-alert"
+                style="margin: 8px 10px 0" @close="autoStop = ''">
+        <template #title>
+          ⛔ 系统已自动停止运行（运行期间检测到故障）
+        </template>
+        <div class="auto-stop-body">
+          <div>❓ {{ autoStop }}</div>
+          <div>🔧 请按上述提示修正后，点击顶栏「开始运行」恢复；停止期间队列与配置保留，任务不会丢失。</div>
+        </div>
+      </el-alert>
       <el-main style="padding: 0; overflow-y: auto; overflow-x: hidden">
         <router-view />
       </el-main>
     </el-container>
   </el-container>
 
-  <el-dialog v-model="pwdVisible" title="修改密码" width="400px" class="pc-dialog">
-    <el-form label-width="80px">
-      <el-form-item label="旧密码"><el-input v-model="pwdForm.old" type="password" show-password /></el-form-item>
-      <el-form-item label="新密码"><el-input v-model="pwdForm.new" type="password" show-password /></el-form-item>
+  <el-dialog v-model="pwdVisible" title="修改用户名 / 密码" width="420px" class="pc-dialog">
+    <el-form ref="pwdFormRef" :rules="pwdRules" :model="pwdForm" label-width="80px" @submit.prevent>
+      <el-form-item label="用户名" prop="username">
+        <el-input v-model="pwdForm.username" maxlength="32" placeholder="登录用户名" />
+      </el-form-item>
+      <el-form-item label="旧密码" prop="old">
+        <el-input v-model="pwdForm.old" type="password" show-password placeholder="验证身份，必填" />
+      </el-form-item>
+      <el-form-item label="新密码" prop="new">
+        <el-input v-model="pwdForm.new" type="password" show-password maxlength="128"
+                  placeholder="不修改密码请留空（8-128 位）" />
+      </el-form-item>
+      <el-form-item label="确认新密码" prop="confirm">
+        <el-input v-model="pwdForm.confirm" type="password" show-password
+                  placeholder="再次输入新密码" />
+      </el-form-item>
     </el-form>
+    <div class="pwd-tips">
+      <p class="pwd-tips-title">修改说明</p>
+      <ul>
+        <li>用户名：2-32 位，仅限中英文、数字与 @ . _ -；留空表示不修改用户名</li>
+        <li>新密码：8-128 位，建议同时包含字母和数字；留空表示不修改密码</li>
+        <li>两次新密码必须完全一致；修改任何一项都需先验证旧密码</li>
+        <li>保存后立即生效，下次登录请使用新的用户名 / 密码</li>
+      </ul>
+    </div>
     <template #footer>
       <el-button @click="pwdVisible = false">取消</el-button>
-      <el-button type="primary" @click="changePwd">确定</el-button>
+      <el-button type="primary" @click="changePwd">保存</el-button>
     </template>
   </el-dialog>
 </template>
 
 <script setup>
-import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { api, errMsg, saveOk } from '../api'
 
 const route = useRoute()
 const router = useRouter()
-const titles = { dashboard: '仪表盘', files: '网盘文件', channels: '频道管理', rules: '分类规则',
-                 blacklist: '黑名单', transfers: '转存记录', history: '日志查询',
+const titles = { dashboard: '仪表盘', files: '网盘文件', channels: '频道管理', dirs: '转存目录', match: '匹配规则',
+                 transfers: '转存记录', history: '日志查询',
                  account: '账号管理', settings: '系统设置', setup: '初始化向导' }
 const title = computed(() => titles[route.path.slice(1)] || '')
 
@@ -108,13 +144,19 @@ const title = computed(() => titles[route.path.slice(1)] || '')
 const menuOpen = ref(false)
 const sysRunning = ref(false)
 const sysReady = ref(false)
+const sysReasons = ref([])
+const autoStop = ref('')
 const toggling = ref(false)
 
 const loadSys = async () => {
   try {
     const { data } = await api.get('/api/system/state')
     sysRunning.value = data.running
-    sysReady.value = data.ready && data.setup_completed
+    // 就绪 = 115 登录 + 启用中频道 +（纯 Userbot 频道时）Userbot 在线；未就绪时按钮灰置并提示缺什么
+    sysReady.value = !!data.ready
+    sysReasons.value = data.reasons || []
+    // 运行期健康监控自动停止的原因（运行中或已手动恢复时后端返回空）
+    autoStop.value = data.auto_stop_reason || ''
   } catch { /* ignore */ }
 }
 const startSystem = async () => {
@@ -155,6 +197,7 @@ let cookieTimer = null
 onMounted(() => {
   loadSys()
   check()
+  loadUsername()
   sysTimer = setInterval(loadSys, 10000)
   cookieTimer = setInterval(check, 60000)
 })
@@ -164,21 +207,76 @@ onUnmounted(() => {
 })
 
 const pwdVisible = ref(false)
-const pwdForm = reactive({ old: '', new: '' })
+const pwdForm = reactive({ username: '', old: '', new: '', confirm: '' })
+const pwdFormRef = ref()
+// 与后端 /api/auth/password 的校验规则保持一致
+const _USERNAME_RE = /^[\w@.\-一-龥]{2,32}$/
+const pwdRules = {
+  username: [{
+    validator: (_r, v, cb) => {
+      if (!v) return cb()  // 留空 = 不修改用户名
+      if (!_USERNAME_RE.test(v)) return cb(new Error('2-32 位，仅限中英文、数字与 @ . _ -'))
+      cb()
+    }, trigger: 'blur',
+  }],
+  old: [{ required: true, message: '请输入旧密码验证身份', trigger: 'blur' }],
+  new: [{
+    validator: (_r, v, cb) => {
+      if (!v) return cb()  // 留空 = 不修改密码
+      if (v.length < 8) return cb(new Error('新密码至少 8 位'))
+      if (v.length > 128) return cb(new Error('新密码最长 128 位'))
+      if (pwdForm.confirm && v !== pwdForm.confirm) return cb(new Error('两次输入的新密码不一致'))
+      cb()
+    }, trigger: 'blur',
+  }],
+  confirm: [{
+    validator: (_r, v, cb) => {
+      if (!pwdForm.new) return cb()  // 未填写新密码时忽略
+      if (!v) return cb(new Error('请再次输入新密码'))
+      if (v !== pwdForm.new) return cb(new Error('两次输入的新密码不一致'))
+      cb()
+    }, trigger: 'blur',
+  }],
+}
+const username = ref('')
+const loadUsername = async () => {
+  try { username.value = (await api.get('/api/auth/me')).data.username || 'admin' } catch { /* ignore */ }
+}
 const onCommand = (cmd) => {
-  if (cmd === 'pwd') { pwdForm.old = ''; pwdForm.new = ''; pwdVisible.value = true }
+  if (cmd === 'pwd') {
+    pwdForm.username = username.value
+    pwdForm.old = ''; pwdForm.new = ''; pwdForm.confirm = ''
+    pwdVisible.value = true
+    nextTick(() => pwdFormRef.value?.clearValidate())
+  }
   if (cmd === 'logout') { localStorage.removeItem('token'); router.push('/login') }
 }
 const changePwd = async () => {
   try {
+    await pwdFormRef.value.validate()
+  } catch { return }  // 校验不通过：字段下方已显示红字原因，阻止修改
+  if (!pwdForm.username.trim() && !pwdForm.new) { ElMessage.warning('新用户名与新密码至少填一项'); return }
+  if (pwdForm.confirm && !pwdForm.new) { ElMessage.warning('已填写确认新密码，请同时填写新密码'); return }
+  try {
     await api.post('/api/auth/password', pwdForm)
-    saveOk('密码已修改', '下次登录请使用新密码')
-    pwdVisible.value = false
+    // 服务端已轮换 JWT 签名密钥：所有旧 token（含本会话）立即失效
+    // 强制退出到登录页，必须用新用户名/新密码重新登录（安全要求，不做无感续期）
+    localStorage.removeItem('token')
+    ElMessage.success('账号已更新，请使用新的用户名 / 密码重新登录')
+    setTimeout(() => router.push('/login'), 800)
   } catch (e) { ElMessage.error(errMsg(e)) }
 }
 </script>
 
 <style scoped>
+.auto-stop-body { font-size: 12px; line-height: 1.7; color: #606266; margin-top: 2px; }
+.pwd-tips {
+  margin-top: 4px; padding: 10px 12px; border-radius: 8px;
+  background: #f6f9ff; border: 1px solid #e9eefb;
+}
+.pwd-tips-title { margin: 0 0 6px; font-size: 12px; font-weight: 600; color: #3a4661; }
+.pwd-tips ul { margin: 0; padding-left: 16px; }
+.pwd-tips li { font-size: 12px; line-height: 1.8; color: #7c8aa5; list-style: disc; }
 .aside { background: linear-gradient(180deg, var(--saas-sidebar-1) 0%, var(--saas-sidebar-2) 100%); }
 .logo { display: flex; align-items: center; gap: 10px; padding: 20px 18px 16px; }
 .logo-mark {
@@ -208,6 +306,7 @@ const changePwd = async () => {
 .user-name { color: #44506b; font-size: 13px; }
 .menu-btn { display: none; padding: 6px; }
 .run-tag { margin-left: 8px; vertical-align: 1px; }
+.start-wrap { display: inline-flex; flex: none; }
 .start-btn { flex: none; }
 
 /* 移动端 */

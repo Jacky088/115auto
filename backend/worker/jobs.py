@@ -2,6 +2,7 @@
 import asyncio
 import re
 import time
+from urllib.parse import unquote
 
 import httpx
 
@@ -154,39 +155,166 @@ def notify_transfer(title: str, category: str, source: str, target: str,
         pass  # 通知失败不影响转存
 
 
-async def cookie_check_loop():
-    last_state = None
-    while True:
+def stop_system(reason: str):
+    """运行期出现致命故障：自动停止系统，写实时日志，并给用户设定的 TG 推送警示。"""
+    db.set_setting("running", False)
+    db.set_setting("auto_stop_reason", reason)  # 供前端仪表盘展示，用户修正后清除
+    logstream.error("system", f"⛔ 系统已自动停止运行：{reason}")
+    logstream.warn("system", "请修正上述问题后，回到网页顶栏点击「开始运行」恢复。"
+                             "停止期间队列与配置保留，不会丢失任务。")
+    try:
+        notify("⛔ 115 自动转存助手已自动停止运行\n\n"
+               f"❓ 原因：{reason}\n\n"
+               "🔧 请到管理页面修正后，点击顶栏「开始运行」恢复。\n"
+               "（停止期间队列与配置保留，任务不会丢失）")
+    except Exception:
+        pass  # 通知失败不影响停止动作本身
+
+
+def _tg_health_ok() -> bool:
+    """TG 侧健康检查：
+    - 纯 Userbot 频道（无轮询兜底）时 Userbot 必须在线；
+    - 存在启用中的轮询频道时，轮询失败率需低于阈值（如频道被删、t.me 被墙则视为失效）。
+    """
+    rows = db.query("SELECT id, type, enabled FROM channels")
+    enabled = [dict(r) for r in rows if r["enabled"]]
+    polling = [r for r in enabled if r["type"] == "polling"]
+    userbots = [r for r in enabled if r["type"] == "userbot"]
+    if userbots and not polling:
+        if not db.get_setting("userbot_ok", False):
+            return False
+    if polling and db.get_setting("running", False):
+        # 轮询失败次数由 tg/polling.py 记录：全部启用频道连续 5 轮失败视为 TG 通道失效
+        return not _polling_all_failed(list(polling))
+    return True
+
+
+def _polling_all_failed(chans: list[dict]) -> bool:
+    """所有启用中的轮询频道都处于连续失败状态（失败轮数达阈值）。"""
+    for ch in chans:
         try:
-            # 每 10 分钟真实校验一次（force 跳过缓存）：既监控失效，也能发现恢复
+            fails = int(db.get_setting(f"poll_fail_{ch['id']}", 0) or 0)
+        except (TypeError, ValueError):
+            fails = 0
+        if fails < POLL_FAIL_THRESHOLD:
+            return False
+    return True
+
+
+POLL_FAIL_THRESHOLD = 5  # 连续失败 5 轮（按最小间隔 30s 计约 2.5 分钟）视为通道失效
+
+
+async def health_check_loop():
+    """运行期健康监控（每 2 分钟）：115 Cookie 与 TG 状态任一失效 → 自动终止运行。
+
+    - 仅在 running=True 时生效（未运行只做静默记录，不打扰）
+    - 连续 2 次（约 4 分钟）确认失败才终止：避免单次网络抖动误杀
+    - 恢复后自动清除故障标记
+    """
+    logstream.info("system", "运行健康监控任务启动（每 2 分钟检查 115 与 TG 状态）")
+    fail_streak: dict[str, int] = {"115": 0, "tg": 0}
+    while True:
+        await asyncio.sleep(120)
+        try:
+            if not db.get_setting("running", False):
+                fail_streak = {"115": 0, "tg": 0}
+                continue
+
+            # --- 115 Cookie ---
             st = await asyncio.to_thread(pan.check_login, True)
-            ok = bool(st.get("ok"))
-            if not ok and last_state is True:
-                logstream.error("115", f"115 cookie 失效，请到网页重新扫码！({st.get('err', '')})")
-                await asyncio.to_thread(notify, "⚠️ 115 cookie 已失效，请打开管理页面重新扫码登录")
-            elif ok and last_state is False:
-                logstream.info("115", "115 cookie 已恢复有效")
-            last_state = ok
-        except Exception:
-            pass
-        await asyncio.sleep(600)
+            if st.get("ok"):
+                if fail_streak["115"]:
+                    logstream.info("115", "115 Cookie 已恢复有效")
+                fail_streak["115"] = 0
+            else:
+                fail_streak["115"] += 1
+                logstream.warn("115", f"115 Cookie 检查失败（连续 {fail_streak['115']} 次）: "
+                                      f"{st.get('err', '')[:200]}")
+                if fail_streak["115"] >= 2:
+                    stop_system(f"115 Cookie 失效（{st.get('err', '')[:120]}），"
+                                "转存已无法进行。请到「账号管理」重新扫码登录或导入 Cookie。")
+                    fail_streak = {"115": 0, "tg": 0}
+                    continue
+
+            # --- TG 状态 ---
+            if _tg_health_ok():
+                if fail_streak["tg"]:
+                    logstream.info("system", "TG 通道已恢复正常")
+                fail_streak["tg"] = 0
+            else:
+                fail_streak["tg"] += 1
+                logstream.warn("system", f"TG Userbot 未连接（连续 {fail_streak['tg']} 次），"
+                                         "私有频道消息无法接收")
+                if fail_streak["tg"] >= 2:
+                    # 区分两类 TG 故障给出对应修正指引
+                    rows = db.query("SELECT id, type, enabled FROM channels")
+                    enabled = [dict(r) for r in rows if r["enabled"]]
+                    polling = [r for r in enabled if r["type"] == "polling"]
+                    if polling and _polling_all_failed(polling):
+                        reason = ("TG 频道抓取持续失败（频道可能已被删除/转为私有，"
+                                  "或服务器无法访问 t.me）。请到「频道管理」用「消息预览」核对频道，"
+                                  "或检查设置页的 TG 代理。")
+                    else:
+                        reason = ("TG Userbot 已断开，监控的私有频道消息无法接收。"
+                                  "请到「账号管理」重新登录 Userbot。")
+                    stop_system(reason)
+                    fail_streak = {"115": 0, "tg": 0}
+        except Exception as e:
+            logstream.error("system", f"健康监控异常（本轮跳过）: {logstream.exc(e)}")
+
+
+MSG_RETENTION_SECONDS = 30 * 86400   # 消息去重记录保留 30 天（防重复转存的依据，需长于日志）
+HITS_RETENTION_SECONDS = 90 * 86400  # 黑名单命中记录保留 90 天（低频数据，留足复核期）
 
 
 async def log_cleanup_loop():
-    """每小时清理一次超过保留期（7 天）的日志，永久删除。"""
-    logstream.info("system", "日志自动清理任务启动（保留 7 天）")
+    """每小时清理一次过期数据，防止数据库随时间无限膨胀：
+    - 日志：保留 7 天（网页可查/导出）
+    - 消息去重记录：保留 30 天（超过后该消息若再出现会被重新处理——30 天前的资源重转风险可忽略）
+    - 黑名单命中记录：保留 90 天（低频写入，留足人工复核期）
+    转存记录永久保留：体积极小（无正文），且是用户的核心操作台账。
+    """
+    logstream.info("system", "数据自动清理任务启动（日志 7 天 / 消息 30 天 / 命中记录 90 天）")
     while True:
         try:
             deleted = db.execute("DELETE FROM logs WHERE created_at<?",
                                  (time.time() - LOG_RETENTION_SECONDS,))
             if deleted:
                 logstream.info("system", f"已永久删除 {deleted} 条过期日志（超过 7 天）")
+            stale_msgs = db.execute("DELETE FROM messages WHERE processed_at<?",
+                                    (time.time() - MSG_RETENTION_SECONDS,))
+            if stale_msgs:
+                logstream.info("system", f"已清理 {stale_msgs} 条过期消息去重记录（超过 30 天）")
+            stale_hits = db.execute("DELETE FROM blacklist_hits WHERE created_at<?",
+                                    (time.time() - HITS_RETENTION_SECONDS,))
+            if stale_hits:
+                logstream.info("system", f"已归档删除 {stale_hits} 条过期黑名单命中记录（超过 90 天）")
         except Exception as e:
-            logstream.error("system", f"日志清理失败: {e}")
+            logstream.error("system", f"数据清理失败: {logstream.exc(e)}")
         await asyncio.sleep(3600)
 
 
 OFFLINE_CONFIRM_WINDOW = 3 * 86400  # 云下载提交后 3 天内跟踪结果
+
+
+def _offline_key(url: str) -> str:
+    """云下载 URL 归一化，用于和 115 任务列表里的 url 匹配。
+
+    115 任务列表可能把 URL 做 percent-解码/编码、改大小写或去掉结尾斜杠，
+    ED2K/磁力这类带中文文件名的链接（如「厨房春光...iso」）直接字符串比对会匹配失败，
+    任务因此一直找不到、超窗后被误判为下载失败。ED2K/磁力统一按 hash 匹配，其余按小写。
+    """
+    u = unquote((url or "").strip())
+    if not u:
+        return ""
+    if u.lower().startswith("ed2k://"):
+        parts = u.split("|")
+        if len(parts) >= 5 and parts[4]:
+            return "ed2k:" + parts[4].lower()
+    m = re.search(r"xt=urn:btih:([0-9A-Za-z]+)", u, re.I)
+    if m:
+        return "btih:" + m.group(1).lower()
+    return u.rstrip("/").lower()
 
 
 async def offline_check_loop():
@@ -211,11 +339,11 @@ async def offline_check_loop():
                     continue
                 by_url = {}
                 for t in tasks:
-                    u = t.get("url") or ""
-                    if u:
-                        by_url[u] = t
+                    key = _offline_key(t.get("url") or "")
+                    if key:
+                        by_url[key] = t
                 for job in subs:
-                    t = by_url.get(job["share_url"])
+                    t = by_url.get(_offline_key(job["share_url"]))
                     if t is None:
                         # 列表里找不到：超窗后按失败处理，否则继续等
                         if time.time() - job["created_at"] > OFFLINE_CONFIRM_WINDOW:
@@ -238,7 +366,7 @@ async def offline_check_loop():
                             _finish_offline, job, False, "", "115 下载任务失败（链接无效或无资源）")
                     # 其余状态 = 下载中，继续等待
         except Exception as e:
-            logstream.error("transfer", f"云下载结果核对异常: {e}")
+            logstream.error("transfer", f"云下载结果核对异常: {logstream.exc(e)}")
         await asyncio.sleep(600)
 
 

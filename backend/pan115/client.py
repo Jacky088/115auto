@@ -20,9 +20,11 @@ _client = None  # P115Client 单例（懒加载）
 _cache_lock = threading.Lock()
 _login_cache: tuple[float, dict] | None = None  # (过期时间, 结果)
 _space_cache: tuple[float, dict] | None = None
+_login_call_lock = threading.Lock()  # 缓存未命中时合并并发：同一时刻只放一个真实校验
+_space_call_lock = threading.Lock()
 _LOGIN_OK_TTL = 60      # 登录有效：60 秒内复用
 _LOGIN_BAD_TTL = 30     # 登录失效：30 秒内复用（便于恢复后尽快识别）
-_SPACE_TTL = 300        # 容量信息：5 分钟
+_SPACE_TTL = 300        # 容量信息: 5 分钟
 
 
 class Pan115Error(Exception):
@@ -86,84 +88,220 @@ def qrcode_poll(token: dict) -> dict:
     from p115client import P115Client
     try:
         resp = P115Client.login_qrcode_scan_status(token, timeout=32)
-    except Exception:
+    except Exception as e:
+        logstream.warn("115", f"扫码状态查询异常（视为继续等待）: {e}")
         return {"status": 0}  # 网络抖动视为继续等待
     data = resp.get("data") or {}
     status = data.get("status", 0)
     return {"status": status}
 
 
+_finish_lock = threading.Lock()  # 串行化取 cookie：并发调用会触发 115 风控
+
+# 115 登录风控的已知错误 → 给用户的可操作指引（海外/机房 IP 最常触发）
+_LOGIN_RISK_HINT = {
+    "40101017": "115 风控拦截了本次登录（常见于海外/机房 IP）。可稍后重试或更换网络出口，"
+                "或点「手动导入 Cookie」——在本地电脑浏览器登录 115.com 后复制 Cookie 粘贴进来。",
+}
+
+
+def _login_err_hint(resp: dict) -> str:
+    """把取 cookie 失败的原始返回翻译成带指引的错误信息（已知风控错误不展示原始 JSON）。"""
+    errno = str(resp.get("errno") or resp.get("code") or "")
+    if errno in _LOGIN_RISK_HINT:
+        return _LOGIN_RISK_HINT[errno]
+    raw = json.dumps(resp, ensure_ascii=False)[:300]
+    if "IP登录异常" in raw:
+        return ("115 登录风控（IP 登录异常），一般当日 0 点自动解禁；可更换网络出口重试，"
+                "或点「手动导入 Cookie」。")
+    return f"获取 cookie 失败: {raw}"
+
+
 def qrcode_finish(uid: str, app: str) -> dict:
-    """扫码确认成功后取 cookie 并保存。"""
+    """扫码确认成功后取 cookie 并保存。
+
+    取 cookie 接口对并发/重复调用敏感（易报"IP登录异常"），这里：
+    - 进程内加锁串行化，避免多端同时轮询时并发取 cookie
+    - 失败自动重试 3 次（间隔 1.5s），规避瞬时风控；确定性风控错误（如 40101017）不重试
+    """
     from p115client import P115Client
-    resp = P115Client.login_qrcode_scan_result(uid, app)
-    cookie = resp.get("data", {}).get("cookie", "")
+    last_err: Exception | None = None
+    with _finish_lock:
+        for _ in range(3):
+            try:
+                resp = P115Client.login_qrcode_scan_result(uid, app)
+                cookie = (resp.get("data") or {}).get("cookie", "") or resp.get("cookie", "")
+                if cookie:
+                    config.COOKIE_FILE.write_text(cookie)
+                    reset_client()
+                    db.set_setting("cookie_ok", True)
+                    logstream.info("115", "扫码登录成功")
+                    return {"ok": True}
+                # 确定性风控错误（老乡验证等）：重试无意义且会加重风控，直接给出指引
+                errno = str(resp.get("errno") or resp.get("code") or "")
+                if errno in _LOGIN_RISK_HINT:
+                    raise Pan115Error(_login_err_hint(resp))
+                last_err = Pan115Error(_login_err_hint(resp))
+            except Pan115Error:
+                raise
+            except Exception as e:
+                last_err = e
+            time.sleep(1.5)
+    raise last_err or Pan115Error("获取 cookie 失败")
+
+
+def import_cookie(cookie: str) -> dict:
+    """手动导入 cookie（海外 VPS 扫码被风控时的替代方案）：校验有效后保存。"""
+    from p115client import P115Client
+    cookie = cookie.strip().strip('"').strip("'")
+    if cookie.lower().startswith("cookie:"):
+        cookie = cookie.split(":", 1)[1].strip()
     if not cookie:
-        raise Pan115Error(f"获取 cookie 失败: {json.dumps(resp, ensure_ascii=False)[:300]}")
+        raise Pan115Error("Cookie 为空")
+    if not all(k in cookie for k in ("UID=", "CID=", "SEID=")):
+        raise Pan115Error("Cookie 里缺少 UID/CID/SEID 字段：请复制完整的 115 登录 Cookie"
+                          "（形如 UID=xxx;CID=xxx;SEID=xxx）")
+    try:
+        client = P115Client(cookie)
+        resp = client.user_my_info()
+    except Exception as e:
+        raise Pan115Error(f"Cookie 无法使用: {e}")
+    if not resp.get("state"):
+        raise Pan115Error(f"Cookie 校验失败: {str(resp)[:200]}")
+    data = resp.get("data", {}) or {}
+    name = data.get("user_name", "") or data.get("uname", "")
     config.COOKIE_FILE.write_text(cookie)
     reset_client()
     db.set_setting("cookie_ok", True)
-    logstream.info("115", "扫码登录成功")
-    return {"ok": True}
+    logstream.info("115", f"手动导入 cookie 成功（账号: {name}）")
+    return {"ok": True, "name": name}
 
 
 # ---------- 账号 ----------
 
+def _space_num(v) -> int:
+    """容量字段兼容：可能是数值，也可能是 {"size": N, "size_format": "..."} 对象。"""
+    if isinstance(v, dict):
+        v = v.get("size", 0)
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return 0
+
+
 def space_info(force: bool = False) -> dict:
-    """容量信息 {total, use, free, ratio}（字节）。默认复用 5 分钟缓存。"""
+    """容量信息 {total, use, free, ratio}（字节）。默认复用 5 分钟缓存。
+
+    缓存未命中时用锁合并并发：worker / 仪表盘 / 账号页同时来取也只打一次 115。
+    字段兼容两种响应形态：proapi 返回 all_total/all_use/all_remain（值可能是
+    {"size": N, "size_format": "..."} 对象），旧接口返回 total_size/use_size。
+    """
     global _space_cache
-    now = time.time()
     if not force:
         with _cache_lock:
             cached = _space_cache
-        if cached and now < cached[0]:
+        if cached and time.time() < cached[0]:
             return cached[1]
-    client = _get_client()
-    resp = client.user_space_info()
-    if not resp.get("state"):
-        raise Pan115Error(str(resp)[:200])
-    data = resp.get("data", {}) or {}
-    total = int(data.get("total_size", 0))
-    use = int(data.get("use_size", 0))
-    free = int(data.get("free_size", max(total - use, 0)))
-    ratio = round(use / total * 100, 1) if total else 0
-    result = {"total": total, "use": use, "free": free, "ratio": ratio}
-    with _cache_lock:
-        _space_cache = (now + _SPACE_TTL, result)
-    return result
+    with _space_call_lock:
+        if not force:
+            with _cache_lock:
+                cached = _space_cache
+            if cached and time.time() < cached[0]:
+                return cached[1]
+        client = _get_client()
+        resp = client.user_space_info()
+        if not resp.get("state"):
+            raise Pan115Error(str(resp)[:200])
+        data = resp.get("data", {}) or {}
+        total = _space_num(data.get("total_size") or data.get("all_total"))
+        use = _space_num(data.get("use_size") or data.get("all_use"))
+        free = _space_num(data.get("free_size") or data.get("all_remain")) or max(total - use, 0)
+        ratio = round(use / total * 100, 1) if total else 0
+        result = {"total": total, "use": use, "free": free, "ratio": ratio}
+        now = time.time()
+        with _cache_lock:
+            _space_cache = (now + _SPACE_TTL, result)
+        return result
 
 
 def check_login(force: bool = False) -> dict:
-    """校验 cookie，返回 {ok, name, err}。成功缓存 60s、失败缓存 30s（force 跳过缓存）。"""
+    """校验 cookie，返回 {ok, name, err}。成功缓存 60s、失败缓存 30s（force 跳过缓存）。
+
+    缓存未命中时用锁合并并发：转存 worker / 文件浏览 / 仪表盘同时来校验
+    也只放一个真实请求到 115，其余复用结果（防止并发堆积触发风控）。
+    """
     global _login_cache
-    now = time.time()
     if not force:
         with _cache_lock:
             cached = _login_cache
-        if cached and now < cached[0]:
+        if cached and time.time() < cached[0]:
             return cached[1]
-    try:
-        client = _get_client()
-        resp = client.user_my_info()
-        if resp.get("state"):
-            data = resp.get("data", {})
-            db.set_setting("cookie_ok", True)
-            result = {"ok": True, "name": data.get("user_name", "") or data.get("uname", "")}
-            ttl = _LOGIN_OK_TTL
-        else:
+    with _login_call_lock:
+        now = time.time()
+        if not force:
+            with _cache_lock:
+                cached = _login_cache
+            if cached and now < cached[0]:
+                return cached[1]
+        try:
+            client = _get_client()
+            resp = client.user_my_info()
+            if resp.get("state"):
+                data = resp.get("data", {})
+                db.set_setting("cookie_ok", True)
+                result = {"ok": True, "name": data.get("user_name", "") or data.get("uname", "")}
+                ttl = _LOGIN_OK_TTL
+            else:
+                db.set_setting("cookie_ok", False)
+                result = {"ok": False, "err": str(resp)[:200]}
+                ttl = _LOGIN_BAD_TTL
+        except Exception as e:
             db.set_setting("cookie_ok", False)
-            result = {"ok": False, "err": str(resp)[:200]}
+            result = {"ok": False, "err": str(e)[:200]}
             ttl = _LOGIN_BAD_TTL
-    except Exception as e:
-        db.set_setting("cookie_ok", False)
-        result = {"ok": False, "err": str(e)[:200]}
-        ttl = _LOGIN_BAD_TTL
-    with _cache_lock:
-        _login_cache = (now + ttl, result)
-    return result
+        with _cache_lock:
+            _login_cache = (time.time() + ttl, result)
+        return result
 
 
 # ---------- 文件系统 ----------
+
+def _file_id(f: dict) -> str:
+    """115 各接口的 id 字段兼容：网页接口 file_id / open 接口 fid / 分享或目录 cid。"""
+    for k in ("fid", "file_id", "cid", "id"):
+        v = f.get(k)
+        if v is not None and str(v) not in ("", "0"):
+            return str(v)
+    return str(f.get("pick_code") or f.get("pc") or "")
+
+
+def _file_name(f: dict) -> str:
+    return str(f.get("file_name") or f.get("fn") or f.get("n") or f.get("name") or "")
+
+
+def _is_dir_item(f: dict) -> bool:
+    """目录判定：fc/file_category == 0（网页接口），或 open 接口的 is_dir。
+
+    注意不能写成 ``f.get("fc") or f.get("file_category")``：fc 为整数 0 时是 falsy，
+    会被错误地取到 None，从而把目录当成文件。
+    """
+    for k in ("fc", "file_category"):
+        if f.get(k) is not None:
+            return str(f.get(k)) == "0"
+    raw_is_dir = f.get("is_dir")
+    if raw_is_dir is not None:
+        if isinstance(raw_is_dir, str):
+            return raw_is_dir.strip().lower() in ("1", "true", "yes", "y")
+        return bool(raw_is_dir)
+    return False
+
+
+def _to_int(v, default: int = 0) -> int:
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return default
+
 
 def _list_dir(pid: int = 0) -> dict[str, int]:
     """列出某目录下的子目录 {名字: cid}。"""
@@ -171,16 +309,25 @@ def _list_dir(pid: int = 0) -> dict[str, int]:
     dirs: dict[str, int] = {}
     offset = 0
     while True:
-        resp = client.fs_files({"cid": pid, "fc_mix": 0, "limit": 1150, "offset": offset, "o": "user_ptime", "asc": 0, "show_dir": 1})
+        resp = client.fs_files({"cid": pid, "fc_mix": 0, "limit": 1150, "offset": offset,
+                                "o": "user_ptime", "asc": 0, "show_dir": 1})
         if not resp.get("state"):
             raise Pan115Error(f"fs_files 失败: {str(resp)[:200]}")
-        for f in resp.get("data", []):
-            if str(f.get("fc")) == "0":  # 目录
-                dirs[f["file_name"]] = int(f["fid"])
-        total = int(resp.get("count", 0))
-        offset += 1150
-        if offset >= total or not resp.get("data"):
+        data = resp.get("data") or []
+        for f in data:
+            if not isinstance(f, dict):
+                continue
+            fid, name = _file_id(f), _file_name(f)
+            if not _is_dir_item(f) or not fid or not name:
+                continue
+            cid = _to_int(fid, -1)
+            if cid >= 0:
+                dirs[name] = cid
+        total = _to_int(resp.get("count"), 0)
+        offset += len(data)
+        if not data or offset >= total:
             break
+        time.sleep(0.4)  # 大目录多页翻页间隔，降低请求频率
     return dirs
 
 
@@ -200,7 +347,7 @@ def mkdirs(path: str) -> int:
             if not resp.get("state"):
                 raise Pan115Error(f"创建目录 {name} 失败: {str(resp)[:200]}")
             data = resp.get("data", {}) or {}
-            new_cid = int(data.get("file_id") or data.get("cid") or resp.get("cid") or 0)
+            new_cid = _to_int(data.get("file_id") or data.get("cid") or resp.get("cid"), 0)
             if not new_cid:
                 new_cid = _list_dir(pid).get(name, 0)  # 响应缺 id 时回查上级目录
             pid = new_cid
@@ -212,11 +359,17 @@ def mkdirs(path: str) -> int:
 # ---------- 分享 ----------
 
 def share_snap_all(share_code: str, receive_code: str, max_files: int = 5000) -> dict:
-    """遍历分享的全部文件。返回 {title, files: [{fid, fn, fs}], total_size}。"""
+    """遍历分享的全部文件。返回 {title, files: [{fid, fn, fs}], total_size, top_names}。
+
+    top_names 记录分享顶层（cid=0）的条目名：115 转存后若把分享整体以文件夹形式
+    落到目标目录，顶层文件夹名只存在于这里，反查确认需要它。
+    """
     from p115client import P115Client
     title = ""
     files: list[dict] = []
     total_size = 0
+    top_names: list[str] = []
+    top_ids: list[str] = []  # 分享顶层条目 id（目录为 cid）：整包转存用，保留目录结构
 
     def snap(cid: int, offset: int):
         resp = P115Client.share_snap({
@@ -227,8 +380,27 @@ def share_snap_all(share_code: str, receive_code: str, max_files: int = 5000) ->
             raise Pan115Error(f"读取分享失败: {str(resp)[:300]}")
         return resp
 
+    def _unwrap(resp: dict):
+        """兼容两种响应形态：
+        - 新（实测 web 接口）：列表/标题/计数都包在 data 里 → data.list / data.shareinfo / data.count
+        - 旧（平铺）：resp.data 是 list → resp.shareinfo / resp.count
+        """
+        data = resp.get("data")
+        if isinstance(data, dict):
+            items = data.get("list") or []
+            shareinfo = data.get("shareinfo") or resp.get("shareinfo") or {}
+            count = data.get("count", resp.get("count", 0))
+        elif isinstance(data, list):
+            items = data
+            shareinfo = resp.get("shareinfo") or {}
+            count = resp.get("count", 0)
+        else:
+            items, shareinfo, count = [], {}, 0
+        return items, (shareinfo if isinstance(shareinfo, dict) else {}), count
+
     stack = [0]
     seen_dirs: set[int] = set()
+    seen_files: set[str] = set()  # 文件 fid 去重：服务端异常返回重复页时不重复计数
     while stack and len(files) < max_files:
         cid = stack.pop(0)
         if cid in seen_dirs:
@@ -237,23 +409,38 @@ def share_snap_all(share_code: str, receive_code: str, max_files: int = 5000) ->
         offset = 0
         while True:
             resp = snap(cid, offset)
-            data = resp.get("data", [])
+            items, shareinfo, total = _unwrap(resp)
             if not title:
-                title = resp.get("shareinfo", {}).get("share_title", "") or resp.get("title", "") or ""
-            for f in data:
-                fid = f.get("fid") or f.get("file_id")
-                if str(f.get("fc")) == "0":  # 子目录，继续遍历
-                    stack.append(int(fid))
-                else:
-                    size = int(f.get("fs", 0) or 0)
-                    files.append({"fid": str(fid), "fn": f.get("fn") or f.get("file_name") or "", "fs": size})
-                    total_size += size
-            total = int(resp.get("count", 0) or 0)
-            offset += 1150
-            if offset >= total or not data or len(files) >= max_files:
+                title = shareinfo.get("share_title", "") or resp.get("title", "") or ""
+            for f in items:
+                if not isinstance(f, dict):  # 防御：任何非 dict 元素跳过而不是崩溃
+                    continue
+                fid = _file_id(f)
+                if not fid:  # 防御：缺 id 的条目无法转存，跳过而不是带着 None 提交
+                    continue
+                name = _file_name(f)
+                if cid == 0 and name and name not in top_names:
+                    top_names.append(name)  # 分享顶层条目名（文件或文件夹）
+                if cid == 0 and str(fid) not in top_ids:
+                    top_ids.append(str(fid))  # 顶层条目 id（文件夹为 cid）
+                if _is_dir_item(f):  # 子目录，继续遍历
+                    child = _to_int(fid, -1)
+                    if child >= 0:
+                        stack.append(child)
+                    continue
+                if str(fid) in seen_files:
+                    continue
+                seen_files.add(str(fid))
+                size = _to_int(f.get("fs") or f.get("file_size") or f.get("s"), 0)
+                files.append({"fid": str(fid), "fn": name, "fs": size})
+                total_size += size
+            offset += len(items)  # 按实际返回条数翻页：固定 1150 在服务端少返回时会漏项
+            if offset >= int(total or 0) or not items or len(files) >= max_files:
                 break
             time.sleep(0.5)
-    return {"title": title, "files": files, "total_size": total_size}
+        time.sleep(0.5)  # 目录之间也留间隔：多目录分享逐页轰炸易触发风控
+    return {"title": title, "files": files, "total_size": total_size,
+            "top_names": top_names, "top_ids": top_ids}
 
 
 def receive(share_code: str, receive_code: str, cid: int, file_ids: list[str]) -> dict:
@@ -307,20 +494,34 @@ def task_list_all(max_pages: int = 5) -> list[dict]:
     return out
 
 
-def list_file_names(cid: int, limit: int = 200) -> set[str]:
-    """列出目录内的文件名集合（用于转存后反查确认）。"""
+def list_file_names(cid: int, limit: int = 500) -> set[str]:
+    """列出目录内的条目名集合（文件与目录，用于转存后反查确认）。
+
+    115 网页接口 fs_files 的条目字段是 n/s/fc/pc（而不是 file_name/file_size），
+    因此必须走 _file_name 兼容取值；旧实现只认 file_name，导致反查结果恒为空，
+    转存其实成功却一直被误判为失败并反复重试。
+    接口失败时抛出 Pan115Error，由调用方决定是否按「无法验证」放行，
+    而不是静默返回空集合造成假阴性。
+    """
     client = _get_client()
     names: set[str] = set()
     offset = 0
     while offset < limit:
-        resp = client.fs_files({"cid": cid, "limit": min(200, limit - offset),
-                                "offset": offset, "o": "user_ptime", "asc": 0})
+        resp = client.fs_files({"cid": cid, "limit": min(500, limit - offset),
+                                "offset": offset, "o": "user_ptime", "asc": 0,
+                                "show_dir": 1})
         if not resp.get("state"):
-            break
+            raise Pan115Error(f"列目录失败: {str(resp)[:200]}")
         data = resp.get("data") or []
         for f in data:
-            names.add(f.get("file_name") or f.get("fn") or "")
+            if not isinstance(f, dict):
+                continue
+            name = _file_name(f)
+            if name:
+                names.add(name)
         if not data:
             break
         offset += len(data)
-    return {n for n in names if n}
+        if offset < limit:
+            time.sleep(0.4)  # 多页翻页间隔，降低请求频率
+    return names

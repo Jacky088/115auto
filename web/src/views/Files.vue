@@ -18,37 +18,37 @@
             </template>
             <template v-else>
               <span class="crumb current search-title">搜索「{{ searchTerm }}」</span>
-              <el-button text type="primary" size="small" @click="clearSearch">返回目录</el-button>
+              <el-button text type="primary" @click="clearSearch">返回目录</el-button>
             </template>
           </div>
           <div class="head-actions">
-            <el-input v-model="searchInput" size="small" class="search-input" clearable
+            <el-input v-model="searchInput" class="search-input" clearable
                       placeholder="搜索网盘中的全部文件" @keyup.enter="doSearch" @clear="clearSearch">
               <template #prefix><el-icon><Search /></el-icon></template>
             </el-input>
-            <el-button size="small" @click="doSearch" :loading="loading">搜索</el-button>
-            <el-button size="small" @click="load" :loading="loading">刷新</el-button>
+            <el-button @click="doSearch" :loading="loading">搜索</el-button>
+            <el-button @click="load" :loading="loading">刷新</el-button>
           </div>
         </div>
       </template>
 
-      <div class="files-toolbar">
-        <el-button type="primary" plain size="small" @click="mkdirVisible = true">
+        <div class="files-toolbar">
+        <el-button type="primary" plain @click="mkdirVisible = true">
           <el-icon><FolderAdd /></el-icon>新建文件夹
         </el-button>
         <template v-if="selected.length">
           <el-divider direction="vertical" />
           <span class="selected-count">已选 {{ selected.length }} 项</span>
-          <el-button size="small" @click="copySelected">
+          <el-button @click="copySelected">
             <el-icon><CopyDocument /></el-icon>复制
           </el-button>
-          <el-button size="small" @click="cutSelected">
+          <el-button @click="cutSelected">
             <el-icon><Scissor /></el-icon>剪切
           </el-button>
-          <el-button size="small" :disabled="selected.length !== 1" @click="startRename(selected[0])">
+          <el-button :disabled="selected.length !== 1" @click="startRename(selected[0])">
             <el-icon><EditPen /></el-icon>重命名
           </el-button>
-          <el-button size="small" type="danger" plain @click="deleteSelected">
+          <el-button type="danger" plain @click="deleteSelected">
             <el-icon><Delete /></el-icon>删除
           </el-button>
         </template>
@@ -57,7 +57,7 @@
           <el-tag type="info" effect="plain" closable class="clip-tag" @close="clipboard = null">
             剪贴板：{{ clipboard.mode === 'copy' ? '复制' : '移动' }} {{ clipboard.items.length }} 项
           </el-tag>
-          <el-button type="primary" size="small" :loading="busy"
+          <el-button type="primary" :loading="busy"
                     :disabled="isSearching || !clipboard.items.length" @click="paste">
             <el-icon><DocumentCopy /></el-icon>
             粘贴到「{{ isSearching ? '请先退出搜索' : currentName }}」
@@ -68,9 +68,11 @@
       <el-alert v-if="loadError" :title="loadError" type="error" show-icon :closable="false"
                 class="load-alert">
         <template #default>
-          <el-button text type="primary" size="small" @click="load">重试</el-button>
-          <el-button v-if="needLogin" text type="primary" size="small"
-                     @click="$router.push('/account')">去账号管理 →</el-button>
+          <div class="btn-row">
+            <el-button text type="primary" @click="load">重试</el-button>
+            <el-button v-if="needLogin" text type="primary"
+                       @click="$router.push('/account')">去账号管理 →</el-button>
+          </div>
         </template>
       </el-alert>
 
@@ -98,10 +100,10 @@
         </el-table-column>
         <el-table-column label="操作" width="185" fixed="right">
           <template #default="{ row }">
-            <el-button v-if="row.is_dir" size="small" text type="primary" @click="openDir(row)">打开</el-button>
-            <el-button size="small" text @click="showDetail(row)">详情</el-button>
+            <el-button v-if="row.is_dir" text type="primary" @click="openDir(row)">打开</el-button>
+            <el-button text @click="showDetail(row)">详情</el-button>
             <el-dropdown trigger="click" @command="onRowCommand($event, row)">
-              <el-button size="small" text class="more-btn"><el-icon><MoreFilled /></el-icon></el-button>
+              <el-button text class="more-btn"><el-icon><MoreFilled /></el-icon></el-button>
               <template #dropdown>
                 <el-dropdown-menu>
                   <el-dropdown-item command="copy">复制</el-dropdown-item>
@@ -120,8 +122,10 @@
           {{ isSearching ? `共搜索到 ${total} 项` : `当前目录共 ${total} 项` }}
           <template v-if="clipboard"> · 剪贴板 {{ clipboard.items.length }} 项待{{ clipboard.mode === 'copy' ? '复制' : '移动' }}</template>
         </span>
-        <el-pagination layout="prev, pager, next" :total="total" :page-size="size"
-                       v-model:current-page="page" @current-change="load" />
+        <el-pagination layout="total, sizes, prev, pager, next" :total="total"
+                       :page-size="size" :page-sizes="[20, 50, 100]"
+                       v-model:current-page="page" v-model:page-size="size"
+                       @current-change="load" @size-change="onSizeChange" />
       </div>
     </el-card>
 
@@ -171,7 +175,7 @@
         <el-descriptions :column="1" border size="small">
           <el-descriptions-item label="文件 ID">
             <span class="mono">{{ detailRow.id }}</span>
-            <el-button text type="primary" size="small" @click="copyText(detailRow.id)">复制</el-button>
+            <el-button text type="primary" @click="copyText(detailRow.id)">复制</el-button>
           </el-descriptions-item>
           <el-descriptions-item v-if="detailRow.parent_id" label="上级目录 ID">
             <span class="mono">{{ detailRow.parent_id }}</span>
@@ -180,7 +184,7 @@
           <el-descriptions-item label="修改时间">{{ detailRow.mtime ? fmtTime(detailRow.mtime) : '-' }}</el-descriptions-item>
           <el-descriptions-item v-if="detailRow.pick_code" label="提取码">
             <span class="mono">{{ detailRow.pick_code }}</span>
-            <el-button text type="primary" size="small" @click="copyText(detailRow.pick_code)">复制</el-button>
+            <el-button text type="primary" @click="copyText(detailRow.pick_code)">复制</el-button>
           </el-descriptions-item>
           <el-descriptions-item v-if="detailRow.sha1" label="SHA1">
             <span class="mono break-all">{{ detailRow.sha1 }}</span>
@@ -202,13 +206,16 @@ import { api, errMsg, fmtSize, fmtTime, saveOk } from '../api'
 const items = ref([])
 const total = ref(0)
 const page = ref(1)
-const size = 100
+const size = ref(50)  // 每页条数：默认 50，可在分页器里切换（20/50/100）
 const cid = ref('0')
 const path = ref([{ id: '0', name: '根目录' }])
 const loading = ref(false)
 const busy = ref(false)
 const loadError = ref('')
 const selected = ref([])
+
+// 切换每页条数：回到第 1 页并重新加载
+const onSizeChange = () => { page.value = 1; load() }
 
 const searchInput = ref('')
 const searchTerm = ref('')
@@ -244,7 +251,7 @@ const load = async () => {
   loadError.value = ''
   try {
     const { data } = await api.get('/api/files/list', {
-      params: { cid: cid.value, search: searchTerm.value, page: page.value, size },
+      params: { cid: cid.value, search: searchTerm.value, page: page.value, size: size.value },
     })
     items.value = data.items || []
     total.value = data.total || 0

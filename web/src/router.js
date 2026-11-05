@@ -10,8 +10,10 @@ const routes = [
       { path: 'dashboard', component: () => import('./views/Dashboard.vue') },
       { path: 'files', component: () => import('./views/Files.vue') },
       { path: 'channels', component: () => import('./views/Channels.vue') },
-      { path: 'rules', component: () => import('./views/Rules.vue') },
-      { path: 'blacklist', component: () => import('./views/Blacklist.vue') },
+      { path: 'dirs', component: () => import('./views/Dirs.vue') },
+      { path: 'match', component: () => import('./views/MatchRules.vue') },
+      { path: 'rules', redirect: '/dirs' },       // 旧地址兼容
+      { path: 'blacklist', redirect: '/match' },  // 旧地址兼容
       { path: 'transfers', component: () => import('./views/Transfers.vue') },
       { path: 'history', component: () => import('./views/HistoryLogs.vue') },
       { path: 'account', component: () => import('./views/Account.vue') },

@@ -119,6 +119,6 @@ async def bot_command_loop():
                         await client.post(f"https://api.telegram.org/bot{token}/sendMessage",
                                           json={"chat_id": chat_id, "text": reply})
         except Exception as e:
-            logstream.warn("system", f"TG Bot 指令轮询异常: {e}")
+            logstream.warn("system", f"TG Bot 指令轮询异常: {logstream.exc(e)}")
             await asyncio.sleep(15)
         await asyncio.sleep(1)

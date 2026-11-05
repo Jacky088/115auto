@@ -50,24 +50,26 @@
       <el-table-column label="操作" width="130">
         <template #default="{ row }">
           <el-button v-if="['failed', 'skipped', 'blocked'].includes(row.status)"
-                     size="small" type="primary" text @click="retry(row)">重试</el-button>
+                     type="primary" text @click="retry(row)">重试</el-button>
           <el-popconfirm v-if="['queued', 'submitted', 'failed', 'skipped'].includes(row.status)" title="确认删除该任务记录？"
                          confirm-button-text="删除" cancel-button-text="取消" confirm-button-type="danger"
                          width="220" @confirm="del(row)">
-            <template #reference><el-button size="small" type="danger" text>删除</el-button></template>
+            <template #reference><el-button type="danger" text>删除</el-button></template>
           </el-popconfirm>
         </template>
       </el-table-column>
     </el-table>
 
-    <el-pagination style="margin-top: 14px; justify-content: flex-end" layout="total, prev, pager, next"
-                   :total="total" :page-size="size" v-model:current-page="page" @current-change="load" />
+    <el-pagination style="margin-top: 14px; justify-content: flex-end" layout="total, sizes, prev, pager, next"
+                   :total="total" :page-size="size" :page-sizes="[20, 50, 100]"
+                   v-model:current-page="page" v-model:page-size="size"
+                   @current-change="load" @size-change="onSizeChange" />
   </el-card>
 </template>
 
 <script setup>
 import { onMounted, onUnmounted, reactive, ref } from 'vue'
-import { ElMessage, ElNotification } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import { api, errMsg, fmtSize, fmtTime, saveOk, statusLabel } from '../api'
 
 const isMobile = ref(window.innerWidth <= 768)
@@ -78,7 +80,7 @@ onUnmounted(() => window.removeEventListener('resize', onRz))
 const items = ref([])
 const total = ref(0)
 const page = ref(1)
-const size = 30
+const size = ref(50)  // 每页条数：默认 50，可在分页器里切换（20/50/100）
 const loading = ref(false)
 const retrying = ref(false)
 const filter = reactive({ status: '', search: '' })
@@ -90,7 +92,7 @@ const load = async () => {
   loading.value = true
   try {
     const { data } = await api.get('/api/transfers', {
-      params: { status: filter.status, search: filter.search, page: page.value, size },
+      params: { status: filter.status, search: filter.search, page: page.value, size: size.value },
     })
     items.value = data.items
     total.value = data.total
@@ -98,6 +100,9 @@ const load = async () => {
     loading.value = false
   }
 }
+
+// 切换每页条数：回到第 1 页并重新加载
+const onSizeChange = () => { page.value = 1; load() }
 const retryAll = async () => {
   retrying.value = true
   try {

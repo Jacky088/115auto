@@ -61,8 +61,10 @@
       </el-table-column>
     </el-table>
 
-    <el-pagination style="margin-top: 14px; justify-content: flex-end" layout="total, prev, pager, next, jumper"
-                   :total="total" :page-size="size" v-model:current-page="page" @current-change="load" />
+    <el-pagination style="margin-top: 14px; justify-content: flex-end" layout="total, sizes, prev, pager, next, jumper"
+                   :total="total" :page-size="size" :page-sizes="[20, 50, 100]"
+                   v-model:current-page="page" v-model:page-size="size"
+                   @current-change="load" @size-change="onSizeChange" />
   </el-card>
 </template>
 
@@ -78,9 +80,12 @@ const modules = ref([])
 const items = ref([])
 const total = ref(0)
 const page = ref(1)
-const size = 100
+const size = ref(50)  // 每页条数：默认 50，可在分页器里切换（20/50/100）
 const loading = ref(false)
 const filter = reactive({ level: '', module: '', search: '' })
+
+// 切换每页条数：回到第 1 页并重新加载
+const onSizeChange = () => { page.value = 1; load() }
 
 const levelTag = (lv) => ({ info: 'info', warn: 'warning', error: 'danger' }[lv] || 'info')
 
@@ -118,7 +123,7 @@ const load = async () => {
   try {
     const { data } = await api.get('/api/logs', {
       params: { date: selDate.value, level: filter.level, module: filter.module,
-                search: filter.search, page: page.value, size },
+                search: filter.search, page: page.value, size: size.value },
     })
     items.value = data.items
     total.value = data.total

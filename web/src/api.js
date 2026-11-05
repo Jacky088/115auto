@@ -1,5 +1,5 @@
 import axios from 'axios'
-import { ElNotification } from 'element-plus'
+import { ElMessage } from 'element-plus'
 
 export const api = axios.create({ timeout: 30000 })
 
@@ -46,9 +46,10 @@ export const statusLabel = {
 export const statusTagType = (s) => ({ success: 'success', failed: 'danger', blocked: 'warning',
   queued: 'info', running: 'primary', submitted: 'warning', duplicate: 'info', skipped: 'info' }[s] || 'info')
 
-/** 保存/生效成功统一用右上角通知弹窗（区别于轻量 message 提示） */
-export const saveOk = (title = '保存成功', message = '更改已生效') =>
-  ElNotification({ title, message, type: 'success', duration: 2500 })
+/** 保存/生效成功统一用顶部胶囊消息（多条例自动向下堆叠，grouping 合并重复消息） */
+export const saveOk = (title = '保存成功', message = '') =>
+  ElMessage({ type: 'success', message: message ? `${title}，${message}` : title,
+              duration: 2500, grouping: true })
 
 const _escape = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 
