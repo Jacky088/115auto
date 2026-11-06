@@ -1,9 +1,11 @@
 <template>
   <div class="secret-cfg">
-    <!-- 已配置：隐藏输入框，只显示状态 + 更换按钮 -->
+    <!-- 已配置：隐藏输入框，只显示状态 + 更换按钮（紧凑单行） -->
     <template v-if="configured && !editing">
-      <el-tag type="success" effect="plain" size="small">✓ 已配置</el-tag>
-      <el-button text type="primary" size="small" @click="$emit('open'); editing = true">更换</el-button>
+      <div class="sc-ok">
+        <el-tag type="success" effect="plain" size="small">✓ 已配置</el-tag>
+        <el-button text type="primary" size="small" @click="$emit('open'); editing = true">更换</el-button>
+      </div>
     </template>
     <!-- 未配置 / 更换中：显示输入框 + 独立保存按钮（不联动页面底部保存） -->
     <template v-else>
@@ -46,6 +48,8 @@ const onCancel = () => {
 
 <style scoped>
 .secret-cfg { display: flex; flex-direction: column; gap: 8px; width: 100%; }
+.sc-ok { display: flex; align-items: center; gap: 8px; }
+.sc-ok .el-button { padding: 4px 8px; }
 .sc-fields { display: flex; flex-direction: column; gap: 8px; width: 100%; }
 .sc-btns { display: flex; gap: 8px; }
 .sc-btns .el-button + .el-button { margin-left: 0; }

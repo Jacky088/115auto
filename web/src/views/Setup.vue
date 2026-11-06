@@ -385,7 +385,7 @@ const finish = async () => {
 }
 .ub-wizard-tip { margin: 0 0 10px; font-size: 13px; color: #606266; }
 .ub-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; }
-.ub-warn { margin: 10px 0 0; font-size: 12px; color: #e6a23c; }
+.ub-warn { margin: 10px 0 0; font-size: 12px; color: #b45309; font-weight: 600; }
 .ch-type-box {
   margin-top: 12px; border: 1px solid var(--el-border-color-lighter);
   border-radius: 10px; padding: 12px 14px; max-height: 220px; overflow-y: auto;

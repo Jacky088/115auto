@@ -33,7 +33,8 @@
               <el-radio value="both">两者</el-radio>
             </el-radio-group>
             <div class="tip" style="width: 100%">{{ tgModeTip }}<br />
-              ⚠️ 接入方式的变更保存后需<b>重启程序</b>才会启停对应监听（重启容器：<code>docker restart autosave115</code>）</div>
+              <span class="warn-text">⚠️ 接入方式的变更保存后需重启程序才会启停对应监听（重启容器：<code>docker restart autosave115</code>）</span>
+            </div>
           </el-form-item>
 
           <el-form-item v-if="f.tg_mode !== 'userbot'" label="轮询间隔">
@@ -64,8 +65,9 @@
             </div>
             <div class="tip" style="width: 100%">
               国内部署必填：所有 TG 流量（频道抓取/补漏/按钮解析/通知/Bot 指令）都走此代理，
-              115 直连不受影响。测试失败会提示具体原因。<b>注意</b>：代理变更对网页轮询/Bot 即时生效，
-              但已连接的 Userbot 需重启程序或在「账号管理」重新登录后才会改走新代理。
+              115 直连不受影响。测试失败会提示具体原因。<br />
+              <span class="warn-text">注意：代理变更对网页轮询/Bot 即时生效，但已连接的 Userbot
+              需重启程序或在「账号管理」重新登录后才会改走新代理。</span>
             </div>
           </el-form-item>
           </div>
@@ -118,14 +120,14 @@
 
           </div>
 
-          <div class="section-card"><div class="section-title">通知</div>
+          <div class="section-card"><div class="section-title">TG 通知</div>
           <el-form-item label="转存结果通知">
             <div class="switch-row">
               <el-switch v-model="f.notify_transfer_success" />
               <span class="tip">转存成功/失败、云下载提交/完成/失败都会推送 TG 消息（含具体原因）</span>
             </div>
           </el-form-item>
-          <el-form-item label="TG 通知">
+          <el-form-item label="TG 推送">
             <SecretConfig :configured="!!(f.notify_token && f.notify_chat_id)" :save="saveNotify"
                           @open="openNotify" @cancel="resetNotify">
               <div class="range-row" style="width: 100%">
@@ -134,9 +136,10 @@
               </div>
               <div class="range-row" style="width: 100%">
                 <el-input v-model="nf.chat_id" placeholder="Chat ID（你的用户 ID）" style="width: 220px" />
-                <el-button type="primary" plain :loading="testing" @click="testNotify(nf.token, nf.chat_id)">
-                  发送测试消息
-                </el-button>
+              </div>
+              <div class="range-row" style="width: 100%">
+                <el-button type="primary" plain size="small" :loading="testing"
+                           @click="testNotify(nf.token, nf.chat_id)">发送测试消息</el-button>
               </div>
               <div class="tip" style="width: 100%">
                 填写后无需保存即可直接测试；测试失败会提示具体原因。收不到时检查：① Token 是否完整复制
@@ -168,7 +171,9 @@
               <div class="range-row" style="width: 100%">
                 <el-input v-model="bf.url" type="password" show-password
                           placeholder="https://api.day.app/你的key" />
-                <el-button :loading="chTesting === 'bark'" @click="testChannel('bark')">发送测试</el-button>
+              </div>
+              <div class="range-row" style="width: 100%">
+                <el-button size="small" :loading="chTesting === 'bark'" @click="testChannel('bark')">发送测试</el-button>
               </div>
               <div class="tip" style="width: 100%">
                 iOS Bark 推送：App Store 安装 Bark 后，复制 App 内显示的完整推送 URL
@@ -182,10 +187,12 @@
               <div class="range-row" style="width: 100%">
                 <el-input v-model="pf.token" type="password" show-password
                           placeholder="pushplus.plus 的 Token" />
-                <el-button :loading="chTesting === 'pushplus'" @click="testChannel('pushplus')">发送测试</el-button>
               </div>
               <div class="range-row" style="width: 100%">
                 <el-input v-model="pf.topic" placeholder="群组编码（可选，留空发本人）" />
+              </div>
+              <div class="range-row" style="width: 100%">
+                <el-button size="small" :loading="chTesting === 'pushplus'" @click="testChannel('pushplus')">发送测试</el-button>
               </div>
               <div class="tip" style="width: 100%">
                 微信推送：官网 pushplus.plus 微信扫码登录后复制 Token，默认发给本人微信；
@@ -198,11 +205,13 @@
                           @open="openNtfy" @cancel="resetNtfy">
               <div class="range-row" style="width: 100%">
                 <el-input v-model="tf.url" placeholder="https://ntfy.sh/你的主题" />
-                <el-button :loading="chTesting === 'ntfy'" @click="testChannel('ntfy')">发送测试</el-button>
               </div>
               <div class="range-row" style="width: 100%">
                 <el-input v-model="tf.token" type="password" show-password
                           placeholder="访问令牌（可选，自建 ntfy 开启鉴权时填）" />
+              </div>
+              <div class="range-row" style="width: 100%">
+                <el-button size="small" :loading="chTesting === 'ntfy'" @click="testChannel('ntfy')">发送测试</el-button>
               </div>
               <div class="tip" style="width: 100%">
                 完整的 ntfy 主题 URL，如 <code>https://ntfy.sh/my-115-topic</code>（自建服务器换域名）；
@@ -255,7 +264,7 @@
                          @click="doRestore">恢复数据</el-button>
             </div>
             <div class="tip" style="width: 100%">
-              用备份文件<b>整体覆盖</b>当前的设置/频道/规则/订阅/转存记录（登录密码不变），
+              用备份文件<b class="warn-text">整体覆盖</b>当前的设置/频道/规则/订阅/转存记录（登录密码不变），
               恢复后系统回到停止状态。也可直接把 TG 收到的备份文件转发给 Bot 回复
               <code>/restore confirm</code> 恢复
             </div>
@@ -574,9 +583,14 @@ onMounted(load)
   .range-row { flex-wrap: wrap; }
 }
 .settings-form :deep(.el-form-item__content) { min-width: 0; }
-.settings-flow { max-width: 980px; }
+/* 左右两栏瀑布流布局：各分区卡片按高度自动分配到两列，窄屏回落单列 */
+.settings-flow { column-count: 2; column-gap: 16px; }
+.settings-flow > .section-card { break-inside: avoid; }
+@media (max-width: 1100px) { .settings-flow { column-count: 1; } }
 @media (max-width: 768px) { .section-card { padding: 12px 14px 2px; } }
 .tip { color: #999; font-size: 12px; }
+/* 警示性提示文字：加粗 + 琥珀色，一眼可见（全局样式 .warn-text 的本地兜底） */
+.warn-text { font-weight: 600; color: #b45309; }
 .switch-row { display: flex; align-items: center; gap: 10px; }
 .ub-inline { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .switch-row .tip { flex: 1; min-width: 0; }

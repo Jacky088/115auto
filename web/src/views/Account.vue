@@ -182,7 +182,7 @@ onUnmounted(stopQrPoll)
 </script>
 
 <style scoped>
-.account-grid { display: grid; grid-template-columns: 1fr 1fr; align-items: stretch; }
+.account-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: stretch; }
 @media (max-width: 1100px) { .account-grid { grid-template-columns: 1fr; } }
 /* 两张卡片撑满等高，视觉对齐 */
 .account-grid > .el-card { height: 100%; }
