@@ -36,12 +36,13 @@
               ⚠️ 接入方式的变更保存后需<b>重启程序</b>才会启停对应监听（重启容器：<code>docker restart autosave115</code>）</div>
           </el-form-item>
 
-          <el-form-item v-if="f.tg_mode !== 'userbot'" label="轮询间隔（秒）">
+          <el-form-item v-if="f.tg_mode !== 'userbot'" label="轮询间隔">
             <div class="range-row">
-              <el-input-number v-model="f.poll_interval_min" :min="15" :max="3600" controls-position="right" />
-              <span class="sep">~</span>
-              <el-input-number v-model="f.poll_interval_max" :min="15" :max="3600" controls-position="right" />
-              <span class="tip">15~3600；区间内随机，降低被识别风险；仅作用于网页轮询频道</span>
+              <el-select v-model="pollPreset" style="width: 220px">
+                <el-option v-for="p in POLL_PRESETS" :key="p.label"
+                           :label="p.label" :value="p.label" />
+              </el-select>
+              <span class="tip">每轮轮询在区间内随机等待，降低被识别风险；仅作用于网页轮询频道</span>
             </div>
           </el-form-item>
 
@@ -70,12 +71,13 @@
           </div>
 
           <div class="section-card"><div class="section-title">转存控制</div>
-          <el-form-item label="转存间隔（秒）">
+          <el-form-item label="转存间隔">
             <div class="range-row">
-              <el-input-number v-model="f.transfer_interval_min" :min="30" :max="1800" controls-position="right" />
-              <span class="sep">~</span>
-              <el-input-number v-model="f.transfer_interval_max" :min="30" :max="1800" controls-position="right" />
-              <span class="tip">30~1800；按 115 风控要求下限 30 秒，过快会触发风控</span>
+              <el-select v-model="transferPreset" style="width: 220px">
+                <el-option v-for="p in TRANSFER_PRESETS" :key="p.label"
+                           :label="p.label" :value="p.label" />
+              </el-select>
+              <span class="tip">每笔转存在区间内随机等待；频繁触发风控请选「稳健」</span>
             </div>
           </el-form-item>
           <el-form-item label="每日转存上限">
@@ -272,6 +274,19 @@ const RETRY_PRESETS = [
   { label: '稳健（5分/30分/2小时）', sec: [300, 1800, 7200] },
 ]
 const retryPreset = ref('标准（1分/5分/30分）')
+// 轮询/转存间隔同样只提供档位：区间随档位固定，防止自定义过密触发风控
+const POLL_PRESETS = [
+  { label: '快速（15~45秒）', min: 15, max: 45 },
+  { label: '标准（30秒~2分）', min: 30, max: 120 },
+  { label: '稳健（3~10分）', min: 180, max: 600 },
+]
+const pollPreset = ref('标准（30秒~2分）')
+const TRANSFER_PRESETS = [
+  { label: '快速（30秒~1分）', min: 30, max: 60 },
+  { label: '标准（1~3分）', min: 60, max: 180 },
+  { label: '稳健（3~10分）', min: 180, max: 600 },
+]
+const transferPreset = ref('标准（1~3分）')
 const testing = ref(false)
 const chTesting = ref('') // 正在测试的通知渠道（bark/pushplus/ntfy）
 const dirty = ref(false)
@@ -295,17 +310,23 @@ const tgModeTip = computed(() => ({
   both: '当前模式：两者——按每个频道自身的接入方式分流处理，互不影响',
 }[f.value.tg_mode] || ''))
 
-watch([f, retryPreset], () => {
+watch([f, retryPreset, pollPreset, transferPreset], () => {
   if (!suppressWatch) dirty.value = true
 }, { deep: true })
 
 const load = async () => {
   suppressWatch = true
   f.value = (await api.get('/api/settings')).data
-  // 回填重试预设：与已存间隔数组一致的档位；对不上时回落到标准档（保存时生效）
-  const cur = f.value.retry_backoff || []
-  const hit = RETRY_PRESETS.find((p) => p.sec.length === cur.length && p.sec.every((n, i) => n === cur[i]))
-  retryPreset.value = (hit || RETRY_PRESETS[1]).label
+  // 回填三组预设：与已存值完全一致的档位；对不上时回落到标准档（保存时生效）
+  const hit = (arr, cur, pick) => {
+    const m = arr.find((p) => pick(p).every((n, i) => n === cur[i]))
+    return (m || arr[1]).label
+  }
+  retryPreset.value = hit(RETRY_PRESETS, f.value.retry_backoff || [], (p) => p.sec)
+  pollPreset.value = hit(POLL_PRESETS, [f.value.poll_interval_min, f.value.poll_interval_max],
+                         (p) => [p.min, p.max])
+  transferPreset.value = hit(TRANSFER_PRESETS, [f.value.transfer_interval_min, f.value.transfer_interval_max],
+                             (p) => [p.min, p.max])
   if (f.value.tg_mode && f.value.tg_mode !== 'polling') loadUb()
   loaded.value = true
   await nextTick()
@@ -314,8 +335,15 @@ const load = async () => {
 }
 const save = async () => {
   const backoff = (RETRY_PRESETS.find((p) => p.label === retryPreset.value) || RETRY_PRESETS[1]).sec
+  const poll = (POLL_PRESETS.find((p) => p.label === pollPreset.value) || POLL_PRESETS[1])
+  const trans = (TRANSFER_PRESETS.find((p) => p.label === transferPreset.value) || TRANSFER_PRESETS[1])
   try {
-    await api.put('/api/settings', { ...f.value, retry_backoff: backoff })
+    await api.put('/api/settings', {
+      ...f.value,
+      retry_backoff: backoff,
+      poll_interval_min: poll.min, poll_interval_max: poll.max,
+      transfer_interval_min: trans.min, transfer_interval_max: trans.max,
+    })
     dirty.value = false
     saveOk('设置已保存', '转存间隔、限额、开关等已即时生效')
   } catch (e) { ElMessage.error(errMsg(e)) }
