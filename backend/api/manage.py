@@ -441,6 +441,64 @@ def _tmdb_get(path: str, params: dict, timeout: float = 10):
                      params=params, proxy=proxy, timeout=timeout)
 
 
+def _tmdb_item(it: dict, kind: str) -> dict | None:
+    """把 TMDB 的 tv/movie 条目统一成订阅页卡片数据。"""
+    name = it.get("name") or it.get("title") or ""
+    if not name:
+        return None
+    date = it.get("first_air_date") or it.get("release_date") or ""
+    poster_path = it.get("poster_path") or ""
+    return {
+        "id": it.get("id"), "kind": kind, "name": name,
+        "original": it.get("original_name") or it.get("original_title") or "",
+        "year": date[:4] if re.match(r"^(19|20)\d{2}", date) else "",
+        "date": date,
+        "overview": (it.get("overview") or "").strip()[:200],
+        "rating": round(float(it.get("vote_average") or 0), 1),
+        "poster": f"{_TMDB_IMG_BASE}/w200{poster_path}" if poster_path else "",
+        "poster_path": poster_path,
+        "popularity": float(it.get("popularity") or 0),
+    }
+
+
+@router.get("/tmdb/discover")
+def tmdb_discover(kind: str = "tv", genre: str = "", page: int = 1, _=Depends(require_user)):
+    """按分类拉取 TMDB 热门影视（订阅页默认浏览，无需搜索）。
+
+    kind: hot（电视剧+电影合并）/ tv / movie；genre: TMDB 类型 id
+    （如 16=动画、99=纪录片），空为全部。
+    """
+    api_key = str(db.get_setting("tmdb_api_key", "") or "").strip()
+    if not api_key:
+        raise HTTPException(400, "请先填写并保存 TMDB API Key")
+    if kind not in ("hot", "tv", "movie"):
+        kind = "tv"
+    page = min(max(page, 1), 500)
+    kinds = ("tv", "movie") if kind == "hot" else (kind,)
+
+    items: list[dict] = []
+    total_pages = 1
+    for k in kinds:
+        params = {"api_key": api_key, "language": _tmdb_lang(), "page": page,
+                  "sort_by": "popularity.desc", "include_adult": "false"}
+        if genre.strip():
+            params["with_genres"] = genre.strip()
+        try:
+            resp = _tmdb_get(f"/discover/{k}", params)
+            if resp.status_code != 200:
+                continue  # 单一类型失败不影响另一个
+            data = resp.json()
+            total_pages = max(total_pages, min(int(data.get("total_pages") or 1), 500))
+            items += [x for x in (_tmdb_item(it, k) for it in (data.get("results") or [])) if x]
+        except Exception:
+            continue
+    if not items:
+        raise HTTPException(502, "TMDB 拉取失败，请检查 API Key 或网络/代理设置")
+    items.sort(key=lambda x: -x["popularity"])
+    # hot 合并了两类，截断到单页数量，保证分页节奏一致
+    return {"items": items[:20], "page": page, "total_pages": total_pages}
+
+
 @router.get("/tmdb/search")
 def tmdb_search(query: str = "", kind: str = "all", page: int = 1, _=Depends(require_user)):
     """按名称搜索 TMDB 影视（tv/movie），返回海报、年份、简介等供订阅选剧。"""
@@ -459,23 +517,7 @@ def tmdb_search(query: str = "", kind: str = "all", page: int = 1, _=Depends(req
                                               "language": _tmdb_lang(), "page": page})
             if resp.status_code != 200:
                 continue
-            for it in (resp.json().get("results") or []):
-                name = it.get("name") or it.get("title") or ""
-                if not name:
-                    continue
-                date = it.get("first_air_date") or it.get("release_date") or ""
-                poster_path = it.get("poster_path") or ""
-                items.append({
-                    "id": it.get("id"), "kind": k, "name": name,
-                    "original": it.get("original_name") or it.get("original_title") or "",
-                    "year": date[:4] if re.match(r"^(19|20)\d{2}", date) else "",
-                    "date": date,
-                    "overview": (it.get("overview") or "").strip()[:200],
-                    "rating": round(float(it.get("vote_average") or 0), 1),
-                    "poster": f"{_TMDB_IMG_BASE}/w200{poster_path}" if poster_path else "",
-                    "poster_path": poster_path,
-                    "popularity": float(it.get("popularity") or 0),
-                })
+            items += [x for x in (_tmdb_item(it, k) for it in (resp.json().get("results") or [])) if x]
         except Exception:
             continue  # 网络异常时跳过该类型，另一个类型可能仍可用
     items.sort(key=lambda x: -x["popularity"])

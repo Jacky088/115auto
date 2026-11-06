@@ -10,7 +10,7 @@
       </div>
     </template>
 
-    <!-- 从 TMDB 选剧订阅：填 API Key → 搜片名 → 出海报/播出信息 → 一键订阅 -->
+    <!-- 从 TMDB 选剧订阅：默认按分类浏览热门影视，点卡片订阅；精确查找时再搜索 -->
     <div class="tmdb-section">
       <div class="tmdb-title">
         🔍 从 TMDB 选剧订阅
@@ -23,50 +23,72 @@
                   placeholder="TMDB API Key (v3)" style="width: 280px" clearable />
         <el-button :loading="savingKey" @click="saveTmdbKey">保存 Key</el-button>
       </div>
-      <div class="toolbar">
-        <el-input v-model="searchWord" maxlength="80" placeholder="输入电影 / 剧集名称搜索，如：庆余年"
-                  style="width: 320px" clearable @keyup.enter="doSearch" @clear="clearResults">
-          <template #prefix><el-icon><Search /></el-icon></template>
-        </el-input>
-        <el-select v-model="searchKind" style="width: 110px">
-          <el-option label="全部类型" value="all" />
-          <el-option label="电视剧" value="tv" />
-          <el-option label="电影" value="movie" />
-        </el-select>
-        <el-button type="primary" :loading="searching" @click="doSearch">搜索</el-button>
-      </div>
 
-      <div v-if="searched && !results.length && !searching" class="tmdb-empty">
-        没有找到相关内容，试试换个名称或切换类型
-      </div>
-      <div v-if="results.length" class="tmdb-grid">
-        <div v-for="it in results" :key="it.kind + it.id" class="tmdb-card">
-          <div class="tmdb-poster">
-            <el-image v-if="it.poster_path" :src="posterUrl(it.poster_path)"
-                      fit="cover" lazy class="poster-img">
-              <template #error><div class="poster-err">海报加载失败</div></template>
-            </el-image>
-            <div v-else class="poster-none">无海报</div>
-          </div>
-          <div class="tmdb-info">
-            <div class="tmdb-name" :title="it.name">{{ it.name }}</div>
-            <div v-if="it.original && it.original !== it.name" class="tmdb-orig" :title="it.original">
-              {{ it.original }}
+      <template v-if="tmdbKey">
+        <!-- 分类浏览（默认） -->
+        <div class="tmdb-cats">
+          <span v-for="c in CATS" :key="c.key" class="cat-chip"
+                :class="{ active: mode === 'browse' && activeCat === c.key }"
+                @click="switchCat(c.key)">{{ c.label }}</span>
+          <template v-if="mode === 'search'">
+            <span class="cat-chip active search-chip">
+              搜索「{{ searchTerm }}」
+              <el-icon class="clear-search" @click="exitSearch"><Close /></el-icon>
+            </span>
+          </template>
+        </div>
+        <div class="toolbar" style="margin-bottom: 10px">
+          <el-input v-model="searchWord" maxlength="80"
+                    placeholder="搜索片名精确查找，如：庆余年"
+                    style="width: 320px" clearable @keyup.enter="doSearch" @clear="exitSearch">
+            <template #prefix><el-icon><Search /></el-icon></template>
+          </el-input>
+          <el-select v-model="searchKind" style="width: 110px">
+            <el-option label="全部类型" value="all" />
+            <el-option label="电视剧" value="tv" />
+            <el-option label="电影" value="movie" />
+          </el-select>
+          <el-button type="primary" :loading="searching" @click="doSearch">搜索</el-button>
+        </div>
+
+        <div v-if="gridLoading && !gridItems.length" class="tmdb-empty">加载中…</div>
+        <div v-else-if="!gridItems.length" class="tmdb-empty">
+          {{ mode === 'search' ? '没有找到相关内容，试试换个名称或切换类型' : '该分类暂时没有内容' }}
+        </div>
+        <div v-if="gridItems.length" class="tmdb-grid">
+          <div v-for="it in gridItems" :key="it.kind + it.id" class="tmdb-card">
+            <div class="tmdb-poster">
+              <el-image v-if="it.poster_path" :src="posterUrl(it.poster_path)"
+                        fit="cover" lazy class="poster-img">
+                <template #error><div class="poster-err">海报加载失败</div></template>
+              </el-image>
+              <div v-else class="poster-none">无海报</div>
             </div>
-            <div class="tmdb-meta">
-              <el-tag size="small" :type="it.kind === 'tv' ? 'warning' : 'primary'"
-                      effect="plain">{{ it.kind === 'tv' ? '电视剧' : '电影' }}</el-tag>
-              <span v-if="it.date" class="tmdb-date">📺 {{ it.date }} 开播</span>
-              <span v-if="it.rating" class="tmdb-rating">⭐ {{ it.rating }}</span>
+            <div class="tmdb-info">
+              <div class="tmdb-name" :title="it.name">{{ it.name }}</div>
+              <div v-if="it.original && it.original !== it.name" class="tmdb-orig" :title="it.original">
+                {{ it.original }}
+              </div>
+              <div class="tmdb-meta">
+                <el-tag size="small" :type="it.kind === 'tv' ? 'warning' : 'primary'"
+                        effect="plain">{{ it.kind === 'tv' ? '电视剧' : '电影' }}</el-tag>
+                <span v-if="it.date" class="tmdb-date">📺 {{ it.date }} 开播</span>
+                <span v-if="it.rating" class="tmdb-rating">⭐ {{ it.rating }}</span>
+              </div>
+              <div v-if="it.overview" class="tmdb-overview" :title="it.overview">{{ it.overview }}</div>
+              <el-button size="small" type="primary" class="tmdb-sub-btn"
+                         :disabled="isSubscribed(it.name)" @click="subFromTmdb(it)">
+                {{ isSubscribed(it.name) ? '已订阅' : '订阅' }}
+              </el-button>
             </div>
-            <div v-if="it.overview" class="tmdb-overview" :title="it.overview">{{ it.overview }}</div>
-            <el-button size="small" type="primary" class="tmdb-sub-btn"
-                       :disabled="isSubscribed(it.name)" @click="subFromTmdb(it)">
-              {{ isSubscribed(it.name) ? '已订阅' : '订阅' }}
-            </el-button>
           </div>
         </div>
-      </div>
+        <div v-if="gridItems.length && mode === 'browse' && browsePage < browseTotalPages"
+             class="tmdb-more">
+          <el-button :loading="gridLoading" @click="loadMore">加载更多</el-button>
+        </div>
+      </template>
+      <div v-else class="tmdb-empty">填写并保存 API Key 后，这里会自动展示热门电影 / 剧集供点选订阅</div>
     </div>
 
     <el-divider />
@@ -125,9 +147,9 @@
 </template>
 
 <script setup>
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Search } from '@element-plus/icons-vue'
+import { Search, Close } from '@element-plus/icons-vue'
 import { api, errMsg, fmtTime, saveOk } from '../api'
 
 const items = ref([])
@@ -136,15 +158,81 @@ const loading = ref(false)
 const adding = ref(false)
 const addForm = ref({ keyword: '', note: '' })
 
-// ---- TMDB 选剧订阅 ----
+// ---- TMDB 选剧订阅：默认按分类浏览，搜索用于精确查找 ----
 const tmdbKey = ref('')
 const tmdbKeyInput = ref('')
 const savingKey = ref(false)
 const searchWord = ref('')
 const searchKind = ref('all')
 const searching = ref(false)
-const searched = ref(false)
+const searchTerm = ref('') // 当前搜索词（进入搜索模式时记录）
+
+// 分类 → TMDB discover 参数（16=动画/动漫，99=纪录片）
+const CATS = [
+  { key: 'hot', label: '🔥 热门', kind: 'hot', genre: '' },
+  { key: 'tv', label: '📺 电视剧', kind: 'tv', genre: '' },
+  { key: 'movie', label: '🎬 电影', kind: 'movie', genre: '' },
+  { key: 'anime', label: '🎌 动漫', kind: 'tv', genre: '16' },
+  { key: 'doc', label: '🌍 纪录片', kind: 'tv', genre: '99' },
+]
+
+const mode = ref('browse') // browse: 分类浏览 | search: 搜索结果
+const activeCat = ref('hot')
+const browseItems = ref([])
+const browsePage = ref(1)
+const browseTotalPages = ref(1)
+const gridLoading = ref(false)
+
+// 网格统一展示：浏览模式展示分类数据，搜索模式展示搜索结果
 const results = ref([])
+const gridItems = computed(() => (mode.value === 'search' ? results.value : browseItems.value))
+
+const switchCat = (key) => {
+  activeCat.value = key
+  mode.value = 'browse'
+  loadBrowse(true)
+}
+
+const loadBrowse = async (reset = true) => {
+  if (gridLoading.value) return
+  const cat = CATS.find((c) => c.key === activeCat.value) || CATS[0]
+  const page = reset ? 1 : browsePage.value + 1
+  gridLoading.value = true
+  try {
+    const { data } = await api.get('/api/tmdb/discover',
+      { params: { kind: cat.kind, genre: cat.genre, page } })
+    browseItems.value = reset ? (data.items || []) : [...browseItems.value, ...(data.items || [])]
+    browsePage.value = data.page || page
+    browseTotalPages.value = data.total_pages || 1
+  } catch (e) {
+    if (reset) browseItems.value = []
+    ElMessage.error(errMsg(e))
+  } finally {
+    gridLoading.value = false
+  }
+}
+
+const loadMore = () => loadBrowse(false)
+
+const doSearch = async () => {
+  const q = searchWord.value.trim()
+  if (q.length < 2) { ElMessage.warning('请输入至少 2 个字符的片名'); return }
+  if (searching.value) return
+  searching.value = true
+  try {
+    const { data } = await api.get('/api/tmdb/search', { params: { query: q, kind: searchKind.value } })
+    results.value = data.items || []
+    searchTerm.value = q
+    mode.value = 'search'
+  } catch (e) { ElMessage.error(errMsg(e)) } finally { searching.value = false }
+}
+
+const exitSearch = () => {
+  searchWord.value = ''
+  searchTerm.value = ''
+  results.value = []
+  mode.value = 'browse'
+}
 
 const posterUrl = (path) => {
   const token = encodeURIComponent(localStorage.getItem('token') || '')
@@ -163,24 +251,10 @@ const saveTmdbKey = async () => {
     await api.put('/api/settings', { tmdb_api_key: key })
     tmdbKey.value = key
     tmdbKeyInput.value = ''
-    saveOk('TMDB API Key 已保存', '现在可以搜索电影 / 剧集并一键订阅了')
+    saveOk('TMDB API Key 已保存', '已为你拉取热门影视，点卡片即可订阅')
+    loadBrowse(true)
   } catch (e) { ElMessage.error(errMsg(e)) } finally { savingKey.value = false }
 }
-
-const doSearch = async () => {
-  const q = searchWord.value.trim()
-  if (q.length < 2) { ElMessage.warning('请输入至少 2 个字符的片名'); return }
-  if (!tmdbKey.value) { ElMessage.warning('请先填写并保存 TMDB API Key'); return }
-  if (searching.value) return
-  searching.value = true
-  try {
-    const { data } = await api.get('/api/tmdb/search', { params: { query: q, kind: searchKind.value } })
-    results.value = data.items || []
-    searched.value = true
-  } catch (e) { ElMessage.error(errMsg(e)) } finally { searching.value = false }
-}
-
-const clearResults = () => { results.value = []; searched.value = false }
 
 const subFromTmdb = async (it) => {
   try {
@@ -206,6 +280,8 @@ const load = async () => {
       tmdbKey.value = String(st.data.tmdb_api_key || '')
     }
   } catch (e) { ElMessage.error(errMsg(e)) } finally { loading.value = false }
+  // 已配置 Key：进页面就按分类拉取热门影视（无需搜索）
+  if (tmdbKey.value) loadBrowse(true)
 }
 
 // 订阅模式开关：后端 PUT /api/settings 为按键合并，可单独提交
@@ -275,6 +351,20 @@ onMounted(load)
 .tmdb-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-weight: 600; margin-bottom: 10px; }
 .tmdb-title .tip { font-weight: 400; }
 .tmdb-empty { color: #999; font-size: 13px; padding: 12px 0 4px; }
+.tmdb-cats { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+.cat-chip {
+  padding: 5px 14px; border-radius: 16px; font-size: 13px; cursor: pointer; user-select: none;
+  background: var(--saas-hover, #f4f7fe); color: var(--saas-text-main, #1f2d3d);
+  border: 1px solid transparent; transition: all .15s;
+}
+.cat-chip:hover { border-color: var(--el-color-primary-light-5, #a0cfff); }
+.cat-chip.active {
+  background: var(--el-color-primary, #2f6bff); color: #fff; font-weight: 600;
+}
+.search-chip { display: inline-flex; align-items: center; gap: 6px; }
+.clear-search { cursor: pointer; }
+.clear-search:hover { opacity: .75; }
+.tmdb-more { text-align: center; margin-top: 14px; }
 .tmdb-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 12px; margin-top: 12px; }
 .tmdb-card {
   display: flex; gap: 12px; padding: 12px; border-radius: 10px;
