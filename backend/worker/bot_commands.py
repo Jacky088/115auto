@@ -4,6 +4,7 @@
 只有配置的 Chat ID 发来的指令会被执行（防止陌生人控制）。
 """
 import asyncio
+import json
 import time
 
 import httpx
@@ -13,6 +14,10 @@ from ..core import logstream
 from . import jobs
 
 _last_update_id = 0
+
+# /sub 搜索结果缓存：chat_id -> 候选列表（subpick 按钮回调时取回对应条目）
+_SUB_SEARCH_CACHE: dict[str, list] = {}
+_SUB_NUMS = ["①", "②", "③", "④", "⑤", "⑥"]
 
 
 def _tg_proxy() -> str | None:
@@ -27,7 +32,7 @@ HELP = (
     "/menu — 快捷操作菜单（按钮面板）\n"
     "/add <频道> — 添加监控频道\n"
     "/quota <数量> — 设置每日转存限额\n"
-    "/sub [关键词] — 查看/添加追剧订阅，/sub del <关键词> 删除\n"
+    "/sub — 查看订阅；/sub <片名> 搜索 TMDB 点选订阅；/sub del <关键词> 删除\n"
     "/pause — 暂停转存（停止消费队列）\n"
     "/resume — 恢复转存\n"
     "/retry — 重试全部失败任务\n"
@@ -228,7 +233,7 @@ async def add_channel_flow(name: str) -> str:
 
 
 def _handle_sub(args: list[str]) -> str:
-    """/sub 查看订阅；/sub <关键词> 添加；/sub del <关键词> 删除。"""
+    """/sub 查看订阅；/sub <片名> 走搜索订阅流程（见 sub_search_flow）；/sub del <关键词> 删除。"""
     from ..core import subscribe as _sub
     if args and args[0].lower() == "del":
         kw = " ".join(args[1:]).strip()
@@ -240,18 +245,10 @@ def _handle_sub(args: list[str]) -> str:
             return f"🗑 已删除订阅「{kw}」"
         return f"未找到订阅「{kw}」"
     if args:
-        kw = " ".join(args).strip()[:100]
-        exists = db.query("SELECT 1 FROM subscriptions WHERE keyword=?", (kw,), one=True)
-        if exists:
-            return f"订阅「{kw}」已存在"
-        db.execute("INSERT INTO subscriptions(keyword,created_at) VALUES(?,?)", (kw, time.time()))
-        logstream.info("subscribe", f"已通过 TG 指令添加订阅: {kw}")
-        return f"🎬 已添加订阅「{kw}」" + ("（订阅模式已开启，命中才会转存）"
-                                       if _sub.subscription_only() else
-                                       "（命中后会推送追更通知）")
+        return "添加订阅请发送 /sub <片名>，我会搜索 TMDB 返回海报供你点选订阅"
     rows = db.query("SELECT keyword, enabled, last_ep, last_title FROM subscriptions ORDER BY id")
     if not rows:
-        return "暂无订阅。用法：/sub <关键词> 添加追剧订阅"
+        return "暂无订阅。发送 /sub <片名> 搜索并点选订阅"
     lines = ["🎬 追剧订阅", ""]
     for r in rows:
         ep = f"（{r['last_ep']}）" if r["last_ep"] else ""
@@ -261,6 +258,116 @@ def _handle_sub(args: list[str]) -> str:
     mode = "订阅模式（仅转存命中项）" if _sub.subscription_only() else "全量模式（命中项额外追更通知）"
     lines.append(f"当前：{mode}")
     return "\n".join(lines)
+
+
+async def _bot_send_text(client: "httpx.AsyncClient", token: str, chat_id: str,
+                         text: str, reply_markup: dict | None = None) -> None:
+    payload = {"chat_id": chat_id, "text": text}
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    try:
+        await client.post(f"https://api.telegram.org/bot{token}/sendMessage", json=payload)
+    except Exception:
+        pass
+
+
+def _sub_add(name: str, note: str) -> str:
+    """添加订阅（去重），返回给用户的回复文案。"""
+    from ..core import subscribe as _sub
+    exists = db.query("SELECT 1 FROM subscriptions WHERE keyword=?", (name,), one=True)
+    if exists:
+        return f"订阅「{name}」已存在"
+    db.execute("INSERT INTO subscriptions(keyword,note,created_at) VALUES(?,?,?)",
+               (name, note, time.time()))
+    logstream.info("subscribe", f"已通过 TG Bot 搜索订阅: {name}（{note}）")
+    return (f"✅ 已订阅「{name}」" +
+            ("，订阅模式下仅转存命中它的内容" if _sub.subscription_only() else
+             "，命中后会推送追更通知"))
+
+
+async def sub_search_flow(client: "httpx.AsyncClient", token: str,
+                          chat_id: str, query: str) -> None:
+    """/sub <片名>：搜索 TMDB → 相册发海报（带编号说明）→ 编号按钮点选订阅。"""
+    from ..api.manage import _tmdb_get, _tmdb_item
+    api_key = str(db.get_setting("tmdb_api_key", "") or "").strip()
+    if not api_key:
+        await _bot_send_text(client, token, chat_id,
+                             "请先在网页「订阅追剧」页填写并保存 TMDB API Key，再使用搜索订阅")
+        return
+    cands = []
+    for k in ("tv", "movie"):
+        try:
+            resp = _tmdb_get(f"/search/{k}", {"api_key": api_key, "query": query,
+                                              "language": "zh-CN"})
+            if resp.status_code == 200:
+                cands += [x for x in (_tmdb_item(it, k)
+                                      for it in (resp.json().get("results") or [])) if x]
+        except Exception:
+            continue
+    cands.sort(key=lambda x: -x["popularity"])
+    cands = [c for c in cands if c["poster_path"]][:6]
+    if not cands:
+        await _bot_send_text(client, token, chat_id,
+                             f"没有找到与「{query}」相关的影视，试试换个名称")
+        return
+
+    proxy = _tg_proxy()
+    media, files, kept = [], {}, []  # files 必须是 dict（httpx multipart 字段名 → 内容）
+    for it in cands:
+        try:  # 海报经代理下载后以上传方式发给 TG（服务端通常也连不上 image.tmdb.org）
+            img = await asyncio.to_thread(
+                lambda p=it["poster_path"]: httpx.get(
+                    f"https://image.tmdb.org/t/p/w200{p}", proxy=proxy, timeout=15).content)
+        except Exception:
+            continue
+        i = len(kept)
+        cap = f"{_SUB_NUMS[i]} {it['name']} · {'电视剧' if it['kind'] == 'tv' else '电影'}"
+        if it["year"]:
+            cap += f" · {it['year']} 开播"
+        if it["rating"]:
+            cap += f" · ⭐{it['rating']}"
+        files[f"f{i}"] = ("poster.jpg", img, "image/jpeg")
+        media.append({"type": "photo", "media": f"attach://f{i}", "caption": cap})
+        kept.append(it)
+    if not kept:
+        await _bot_send_text(client, token, chat_id, "海报获取失败，请检查网络/代理设置后重试")
+        return
+    _SUB_SEARCH_CACHE[str(chat_id)] = kept
+
+    try:  # 相册消息：一次发齐全部海报
+        await client.post(
+            f"https://api.telegram.org/bot{token}/sendMediaGroup",
+            data={"chat_id": chat_id, "media": json.dumps(media, ensure_ascii=False)},
+            files=files, timeout=60)
+    except Exception:  # 相册失败退化为纯文本列表，按钮选择不受影响
+        lines = [f"{_SUB_NUMS[i]} {it['name']}（{'电视剧' if it['kind'] == 'tv' else '电影'}"
+                 f"{('·' + it['year']) if it['year'] else ''}）" for i, it in enumerate(kept)]
+        await _bot_send_text(client, token, chat_id, "搜索结果：\n" + "\n".join(lines))
+
+    kb = {"inline_keyboard": [
+        [{"text": f"{_SUB_NUMS[i]} {kept[i]['name'][:24]}", "callback_data": f"subpick:{i}"}]
+        for i in range(len(kept))] + [[{"text": "❌ 取消", "callback_data": "subpick:x"}]]}
+    await _bot_send_text(client, token, chat_id,
+                         f"「{query}」的搜索结果（按人气排序），点按钮完成订阅：", kb)
+
+
+async def _handle_subpick(client: "httpx.AsyncClient", token: str,
+                          chat_id: str, data: str) -> None:
+    """处理 subpick 按钮回调：完成订阅/取消，回复新消息（不动搜索结果）。"""
+    idx = data.split(":", 1)[1].strip() if ":" in data else "x"
+    cands = _SUB_SEARCH_CACHE.get(str(chat_id), [])
+    if idx == "x" or not cands:
+        reply = "已取消"
+    else:
+        try:
+            it = cands[int(idx)]
+        except (ValueError, IndexError):
+            reply = "选项已过期，请重新发送 /sub <片名> 搜索"
+        else:
+            note = f"TMDB {'电视剧' if it['kind'] == 'tv' else '电影'}" + \
+                   (f" · {it['year']}" if it["year"] else "")
+            reply = _sub_add(it["name"], note)
+    await _bot_send_text(client, token, chat_id, reply)
 
 
 async def bot_command_loop():
@@ -325,17 +432,21 @@ async def bot_command_loop():
                         if cq:
                             if str(cq.get("message", {}).get("chat", {}).get("id", "")) != chat_id:
                                 continue
-                            try:
-                                reply, kb = await asyncio.to_thread(
-                                    _handle_callback, cq.get("data") or "")
-                            except Exception as e:
-                                reply, kb = f"操作失败: {e}", {}
                             try:  # 先应答回调，去掉按钮上的加载动画
                                 await client.post(
                                     f"https://api.telegram.org/bot{token}/answerCallbackQuery",
                                     json={"callback_query_id": cq.get("id")})
                             except Exception:
                                 pass
+                            # 订阅搜索点选：独立流程，回复新消息
+                            if (cq.get("data") or "").startswith("subpick:"):
+                                await _handle_subpick(client, token, chat_id, cq["data"])
+                                continue
+                            try:
+                                reply, kb = await asyncio.to_thread(
+                                    _handle_callback, cq.get("data") or "")
+                            except Exception as e:
+                                reply, kb = f"操作失败: {e}", {}
                             try:  # 原位编辑菜单消息（结果 + 刷新后的按钮）
                                 payload = {"chat_id": chat_id,
                                            "message_id": cq.get("message", {}).get("message_id"),
@@ -379,6 +490,14 @@ async def bot_command_loop():
                                 # /add 需要异步做频道可访问性校验，单独处理
                                 reply = await add_channel_flow(text.split(None, 1)[1]) \
                                     if len(text.split(None, 1)) > 1 else "用法：/add <频道名或链接>"
+                            elif text.lower().startswith("/sub"):
+                                # /sub <片名>（非 del）：搜索订阅流程（异步 + 海报上传）
+                                parts = text.split()
+                                if len(parts) > 1 and parts[1].lower() != "del":
+                                    await sub_search_flow(client, token, chat_id,
+                                                          " ".join(parts[1:])[:100])
+                                    continue
+                                reply = await asyncio.to_thread(_handle_command, text, chat_id)
                             else:
                                 reply = await asyncio.to_thread(_handle_command, text, chat_id)
                         except Exception as e:

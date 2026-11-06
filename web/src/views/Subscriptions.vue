@@ -100,16 +100,7 @@
 
     <el-divider />
 
-    <div class="toolbar">
-      <el-input v-model="addForm.keyword" maxlength="100" show-word-limit
-                placeholder="关键词，如剧集名（必填，≤100 字）" style="width: 280px"
-                @keyup.enter="add" />
-      <el-input v-model="addForm.note" maxlength="200" placeholder="备注（可选）" style="width: 200px"
-                @keyup.enter="add" />
-      <el-button type="primary" :loading="adding" @click="add">添加订阅</el-button>
-    </div>
-
-    <el-table :data="items" empty-text="还没有订阅，在上方输入关键词后点「添加订阅」">
+    <el-table :data="items" empty-text="还没有订阅，在上方浏览/搜索点「订阅」即可添加">
       <el-table-column prop="keyword" label="关键词" min-width="150" show-overflow-tooltip>
         <template #default="{ row }"><span class="mono">{{ row.keyword }}</span></template>
       </el-table-column>
@@ -162,8 +153,6 @@ import { api, errMsg, fmtTime, saveOk } from '../api'
 const items = ref([])
 const subOnly = ref(false)
 const loading = ref(false)
-const adding = ref(false)
-const addForm = ref({ keyword: '', note: '' })
 
 // ---- TMDB 选剧订阅：默认按分类浏览，搜索用于精确查找 ----
 const tmdbKey = ref('')
@@ -300,20 +289,6 @@ const toggleSubOnly = async (v) => {
     subOnly.value = !v  // 保存失败时恢复开关显示
     ElMessage.error(errMsg(e))
   }
-}
-
-const add = async () => {
-  const kw = addForm.value.keyword.trim()
-  if (!kw) { ElMessage.warning('请输入订阅关键词'); return }
-  if (adding.value) return
-  adding.value = true
-  try {
-    await api.post('/api/subscriptions', { keyword: kw, note: addForm.value.note.trim() })
-    ElMessage.success(`已添加订阅「${kw}」`)
-    addForm.value.keyword = ''
-    addForm.value.note = ''
-    load()
-  } catch (e) { ElMessage.error(errMsg(e)) } finally { adding.value = false }
 }
 
 const toggle = async (row, v) => {
