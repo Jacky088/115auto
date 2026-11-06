@@ -1,11 +1,13 @@
 """日志流：写 SQLite + 内存缓冲 + asyncio 广播给 WebSocket 客户端。"""
 import asyncio
+import itertools
 import time
 from collections import deque
 
 from .. import database as db
 
 _buf: deque = deque(maxlen=500)
+_seq = itertools.count(1)  # 全局递增序号：前端据此对「重连补发」去重，避免日志重复显示
 _subscribers: set[asyncio.Queue] = set()
 _loop: asyncio.AbstractEventLoop | None = None  # WebSocket 所在事件循环（日志可能来自工作线程）
 
@@ -20,7 +22,8 @@ def _push(q: asyncio.Queue, entry: dict):
 
 
 def log(level: str, module: str, message: str):
-    entry = {"level": level, "module": module, "message": message, "ts": time.time()}
+    entry = {"seq": next(_seq), "level": level, "module": module,
+             "message": message, "ts": time.time()}
     _buf.append(entry)
     try:
         db.add_log(level, module, message)

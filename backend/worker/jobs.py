@@ -233,8 +233,11 @@ async def health_check_loop():
                 logstream.warn("115", f"115 Cookie 检查失败（连续 {fail_streak['115']} 次）: "
                                       f"{st.get('err', '')[:200]}")
                 if fail_streak["115"] >= 2:
-                    stop_system(f"115 Cookie 失效（{st.get('err', '')[:120]}），"
-                                "转存已无法进行。请到「账号管理」重新扫码登录或导入 Cookie。")
+                    # stop_system 内含同步 TG 通知（httpx 最长 15s）：放线程池，避免阻塞事件循环
+                    await asyncio.to_thread(
+                        stop_system,
+                        f"115 Cookie 失效（{st.get('err', '')[:120]}），"
+                        "转存已无法进行。请到「账号管理」重新扫码登录或导入 Cookie。")
                     fail_streak = {"115": 0, "tg": 0}
                     continue
 
@@ -252,14 +255,12 @@ async def health_check_loop():
                     rows = db.query("SELECT id, type, enabled FROM channels")
                     enabled = [dict(r) for r in rows if r["enabled"]]
                     polling = [r for r in enabled if r["type"] == "polling"]
-                    if polling and _polling_all_failed(polling):
-                        reason = ("TG 频道抓取持续失败（频道可能已被删除/转为私有，"
-                                  "或服务器无法访问 t.me）。请到「频道管理」用「消息预览」核对频道，"
-                                  "或检查设置页的 TG 代理。")
-                    else:
-                        reason = ("TG Userbot 已断开，监控的私有频道消息无法接收。"
-                                  "请到「账号管理」重新登录 Userbot。")
-                    stop_system(reason)
+                    stop_reason = ("TG 频道抓取持续失败（频道可能已被删除/转为私有，"
+                                   "或服务器无法访问 t.me）。请到「频道管理」用「消息预览」核对频道，"
+                                   "或检查设置页的 TG 代理。") if polling and _polling_all_failed(polling) \
+                        else ("TG Userbot 已断开，监控的私有频道消息无法接收。"
+                              "请到「账号管理」重新登录 Userbot。")
+                    await asyncio.to_thread(stop_system, stop_reason)
                     fail_streak = {"115": 0, "tg": 0}
         except Exception as e:
             logstream.error("system", f"健康监控异常（本轮跳过）: {logstream.exc(e)}")

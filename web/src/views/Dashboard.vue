@@ -135,13 +135,27 @@ const ts = (t) => {
 let ws = null
 let wsTimer = null
 let disposed = false
+let lastSeq = null        // 已显示的最大日志序号：后端重连补发时据此去重
+let replayWithoutSeq = false
 const connectWs = () => {
   if (disposed) return
   const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-  ws = new WebSocket(`${proto}://${location.host}/ws/logs?token=${localStorage.getItem('token')}`)
-  ws.onopen = () => { wsOk.value = true }
+  const token = localStorage.getItem('token')
+  // token 经 Sec-WebSocket-Protocol 头传递（浏览器 WebSocket 无法自定义请求头），
+  // 避免 JWT 出现在 URL 里被访问日志/代理记录
+  ws = new WebSocket(`${proto}://${location.host}/ws/logs`, ['bearer', token])
+  ws.onopen = () => { wsOk.value = true; replayWithoutSeq = true }
   ws.onmessage = (ev) => {
-    lines.value.push(JSON.parse(ev.data))
+    const l = JSON.parse(ev.data)
+    if (typeof l.seq === 'number') {
+      // 后端重连时会补发最近 100 条：seq <= lastSeq 的都是已显示过的，直接丢弃
+      if (lastSeq !== null && l.seq <= lastSeq) return
+      lastSeq = l.seq
+    } else if (replayWithoutSeq) {
+      lines.value = [] // 旧后端无 seq：重连补发前先清屏，避免重复累积
+    }
+    replayWithoutSeq = false
+    lines.value.push(l)
     if (lines.value.length > 400) lines.value.splice(0, lines.value.length - 400)
     if (autoScroll.value) nextTick(() => { if (logBox.value) logBox.value.scrollTop = logBox.value.scrollHeight })
   }

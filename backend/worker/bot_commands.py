@@ -82,32 +82,55 @@ async def bot_command_loop():
 
     每轮 long polling 前重新读取 Token/Chat ID/代理：网页改了配置后，
     当前客户端会被主动关闭并按新配置重建（配置热更新）。
+
+    可靠性：
+    - TG long polling 服务端最长挂起 timeout 秒才返回，读超时（ReadTimeout）是
+      正常现象（代理抖动/网络慢时尤其常见）：静默重试即可，不当异常刷屏，
+      也不会重建客户端（连接复用，避免每 40 秒重启一轮）。
+    - 「已启动」只在配置变化后的第一次连接时提示一次，异常恢复重连不重复刷屏。
+    - 指令处理（含查 115 空间等同步网络调用）放线程池执行，不阻塞事件循环。
     """
     global _last_update_id
+    announced = None  # 已提示「已启动」的配置指纹 (token, chat_id, proxy)
     while True:
         token = str(db.get_setting("notify_token", "") or "").strip()
         chat_id = str(db.get_setting("notify_chat_id", "") or "").strip()
         proxy = _tg_proxy()
         if not token or not chat_id:
+            announced = None
             await asyncio.sleep(30)
             continue
         try:
-            async with httpx.AsyncClient(proxy=proxy, timeout=40) as client:
-                logstream.info("system", "TG Bot 远程指令已启动（/help 查看指令）")
+            # 读超时必须明显大于 TG 服务端挂起时长，正常 long polling 轮次不会触顶；
+            # 剩余的偶发超时由下方 TimeoutException 分支静默处理
+            timeout = httpx.Timeout(45.0, connect=15.0)
+            async with httpx.AsyncClient(proxy=proxy, timeout=timeout) as client:
+                fingerprint = (token, chat_id, proxy)
+                if announced != fingerprint:
+                    logstream.info("system", "TG Bot 远程指令已启动（/help 查看指令）")
+                    announced = fingerprint
                 while True:
                     # 配置变化 → 退出内层循环，用新配置重建客户端
                     cur_token = str(db.get_setting("notify_token", "") or "").strip()
                     cur_chat = str(db.get_setting("notify_chat_id", "") or "").strip()
                     if cur_token != token or cur_chat != chat_id or _tg_proxy() != proxy:
                         break
-                    params = {"timeout": 30, "offset": _last_update_id + 1,
+                    params = {"timeout": 25, "offset": _last_update_id + 1,
                               "allowed_updates": '["message"]'}
-                    resp = await client.get(f"https://api.telegram.org/bot{token}/getUpdates",
-                                            params=params)
+                    try:
+                        resp = await client.get(
+                            f"https://api.telegram.org/bot{token}/getUpdates", params=params)
+                    except httpx.TimeoutException:
+                        continue  # long polling 超时/网络抖动：正常现象，立即发起下一轮
                     if resp.status_code != 200:
                         await asyncio.sleep(10)
                         continue
-                    for upd in resp.json().get("result", []):
+                    try:
+                        updates = resp.json().get("result", [])
+                    except Exception:
+                        await asyncio.sleep(5)
+                        continue
+                    for upd in updates:
                         _last_update_id = max(_last_update_id, upd["update_id"])
                         msg = upd.get("message") or {}
                         if str(msg.get("chat", {}).get("id", "")) != chat_id:
@@ -115,10 +138,17 @@ async def bot_command_loop():
                         text = (msg.get("text") or "").strip()
                         if not text.startswith("/"):
                             continue
-                        reply = _handle_command(text, chat_id)
-                        await client.post(f"https://api.telegram.org/bot{token}/sendMessage",
-                                          json={"chat_id": chat_id, "text": reply})
+                        try:
+                            reply = await asyncio.to_thread(_handle_command, text, chat_id)
+                        except Exception as e:
+                            reply = f"指令执行失败: {e}"
+                        try:
+                            await client.post(f"https://api.telegram.org/bot{token}/sendMessage",
+                                              json={"chat_id": chat_id, "text": reply})
+                        except Exception:
+                            pass  # 回复发送失败不影响指令已执行，下轮继续
         except Exception as e:
+            announced = None  # 连接层异常（代理断开等）：恢复后重新提示一次「已启动」
             logstream.warn("system", f"TG Bot 指令轮询异常: {logstream.exc(e)}")
             await asyncio.sleep(15)
         await asyncio.sleep(1)

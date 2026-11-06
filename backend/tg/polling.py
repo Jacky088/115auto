@@ -170,6 +170,7 @@ async def polling_loop():
                         hi = max(1, int(db.get_setting("poll_interval_max", 120)))
                     except (TypeError, ValueError):
                         lo, hi = 30, 120
-                    await asyncio.sleep(random.uniform(lo, min(hi, lo + 5)) if hi > lo else lo)
+                    # 按设置页承诺的「区间内随机」取值；旧实现把上限截到 lo+5，导致 max 基本不生效
+                    await asyncio.sleep(random.uniform(lo, hi) if hi > lo else lo)
         else:
             await asyncio.sleep(15)

@@ -40,8 +40,17 @@ async def lifespan(app: FastAPI):
     _background.append(asyncio.create_task(jobs.offline_check_loop()))
     _background.append(asyncio.create_task(bot_commands.bot_command_loop()))
     yield
+    # 优雅停机：先取消后台任务并等待退出，再断开 Userbot —— 保证 Telethon session
+    # 与 SQLite（WAL）完整落盘，避免强杀后 session 文件损坏需要重新登录
     for t in _background:
         t.cancel()
+    if _background:
+        await asyncio.gather(*_background, return_exceptions=True)
+    try:
+        if userbot.client is not None:
+            await userbot.client.disconnect()
+    except Exception:
+        pass
 
 
 app = FastAPI(title="115 自动转存助手", lifespan=lifespan)

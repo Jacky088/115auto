@@ -32,7 +32,8 @@
               <el-radio value="userbot">Userbot</el-radio>
               <el-radio value="both">两者</el-radio>
             </el-radio-group>
-            <div class="tip" style="width: 100%">{{ tgModeTip }}</div>
+            <div class="tip" style="width: 100%">{{ tgModeTip }}<br />
+              ⚠️ 接入方式的变更保存后需<b>重启程序</b>才会启停对应监听（重启容器：<code>docker restart autosave115</code>）</div>
           </el-form-item>
 
           <el-form-item v-if="f.tg_mode !== 'userbot'" label="轮询间隔（秒）">
@@ -62,7 +63,8 @@
             </div>
             <div class="tip" style="width: 100%">
               国内部署必填：所有 TG 流量（频道抓取/补漏/按钮解析/通知/Bot 指令）都走此代理，
-              115 直连不受影响。测试失败会提示具体原因。
+              115 直连不受影响。测试失败会提示具体原因。<b>注意</b>：代理变更对网页轮询/Bot 即时生效，
+              但已连接的 Userbot 需重启程序或在「账号管理」重新登录后才会改走新代理。
             </div>
           </el-form-item>
           </div>

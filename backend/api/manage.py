@@ -824,7 +824,9 @@ def backup_export(_=Depends(require_user)):
 
     payload = {
         "_meta": {"version": 1, "exported_at": time.strftime("%Y-%m-%d %H:%M:%S")},
-        "settings": {r["key"]: r["value"] for r in dump("SELECT * FROM settings")},
+        # 剔除登录密码哈希：备份文件可能被转发/共享，不应携带可用于离线爆破的凭据
+        "settings": {r["key"]: r["value"] for r in dump("SELECT * FROM settings")
+                     if r["key"] != "web_password_hash"},
         "channels": dump("SELECT * FROM channels"),
         "rules": dump("SELECT * FROM rules"),
         "routes": dump("SELECT * FROM routes"),
