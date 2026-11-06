@@ -12,6 +12,17 @@
       <div class="tmdb-title">
         🔍 从 TMDB 选剧订阅
         <span class="tip">API Key 在 themoviedb.org 免费申请（项目设置 → TMDB 刮削 共用此 Key）</span>
+        <!-- 搜索框固定在右上角：未配置 Key 时置灰 -->
+        <el-tooltip :disabled="!!tmdbKey" content="先填写并保存 TMDB API Key" placement="top">
+          <el-input v-model="searchWord" maxlength="80" :disabled="!tmdbKey"
+                    :placeholder="tmdbKey ? '搜索片名精确查找，如：庆余年' : '配置 API Key 后可搜索'"
+                    class="title-search" clearable @keyup.enter="doSearch" @clear="exitSearch">
+            <template #prefix><el-icon><Search /></el-icon></template>
+          </el-input>
+        </el-tooltip>
+        <el-button type="primary" :disabled="!tmdbKey" :loading="searching" @click="doSearch">
+          搜索
+        </el-button>
       </div>
       <!-- Key 输入：未配置或点「更换」时显示；已配置态只读展示 -->
       <div class="toolbar">
@@ -40,29 +51,24 @@
               <el-icon class="clear-search" @click="exitSearch"><Close /></el-icon>
             </span>
           </template>
+          <!-- 类型筛选：仅在数据混合了电影/剧集的分类下显示 -->
+          <template v-if="showKindFilter">
+            <span class="k-chips">
+              <span v-for="k in KINDS" :key="k.value" class="cat-chip k-chip"
+                    :class="{ active: kindFilter === k.value }"
+                    @click="kindFilter = k.value">{{ k.label }}</span>
+            </span>
+          </template>
         </div>
       </template>
-      <!-- 搜索框始终显示：未配置 Key 时置灰，提示先配 Key -->
-      <div class="toolbar" style="margin-bottom: 10px">
-        <el-tooltip :disabled="!!tmdbKey" content="先在上方填写并保存 TMDB API Key" placement="top">
-          <el-input v-model="searchWord" maxlength="80" :disabled="!tmdbKey"
-                    :placeholder="tmdbKey ? '搜索片名精确查找，如：庆余年' : '配置 API Key 后可搜索片名'"
-                    style="width: 320px" clearable @keyup.enter="doSearch" @clear="exitSearch">
-            <template #prefix><el-icon><Search /></el-icon></template>
-          </el-input>
-        </el-tooltip>
-        <el-button type="primary" :disabled="!tmdbKey" :loading="searching" @click="doSearch">
-          搜索
-        </el-button>
-      </div>
 
       <template v-if="tmdbKey">
-        <div v-if="gridLoading && !gridItems.length" class="tmdb-empty">加载中…</div>
-        <div v-else-if="!gridItems.length" class="tmdb-empty">
-          {{ mode === 'search' ? '没有找到相关内容，试试换个名称或切换类型' : '该分类暂时没有内容' }}
+        <div v-if="gridLoading && !filteredItems.length" class="tmdb-empty">加载中…</div>
+        <div v-else-if="!filteredItems.length" class="tmdb-empty">
+          {{ mode === 'search' ? '没有找到相关内容，试试换个名称' : (kindFilter ? '该筛选条件下暂时没有内容' : '该分类暂时没有内容') }}
         </div>
-        <div v-if="gridItems.length" class="tmdb-grid">
-          <div v-for="it in gridItems" :key="it.kind + it.id" class="tmdb-card">
+        <div v-if="filteredItems.length" class="tmdb-grid">
+          <div v-for="it in filteredItems" :key="it.kind + it.id" class="tmdb-card">
             <div class="tmdb-poster">
               <el-image v-if="it.poster_path" :src="posterUrl(it.poster_path)"
                         fit="cover" lazy class="poster-img">
@@ -78,7 +84,9 @@
               <div class="tmdb-meta">
                 <el-tag size="small" :type="it.kind === 'tv' ? 'warning' : 'primary'"
                         effect="plain">{{ it.kind === 'tv' ? '电视剧' : '电影' }}</el-tag>
-                <span v-if="it.date" class="tmdb-date">📺 {{ it.date }} 开播</span>
+                <el-tag v-if="it.season" size="small" type="danger" effect="plain"
+                        :title="`最新一季：${it.season}（${it.date} 开播）`">{{ it.season }}</el-tag>
+                <span v-if="it.date" class="tmdb-date">📺 {{ it.date }} {{ it.season ? '最新季' : '开播' }}</span>
                 <span v-if="it.rating" class="tmdb-rating">⭐ {{ it.rating }}</span>
               </div>
               <div v-if="it.overview" class="tmdb-overview" :title="it.overview">{{ it.overview }}</div>
@@ -89,7 +97,7 @@
             </div>
           </div>
         </div>
-        <div v-if="gridItems.length && mode === 'browse' && browsePage < browseTotalPages"
+        <div v-if="filteredItems.length && mode === 'browse' && browsePage < browseTotalPages"
              class="tmdb-more">
           <el-button :loading="gridLoading" @click="loadMore">加载更多</el-button>
         </div>
@@ -177,9 +185,23 @@ const browsePage = ref(1)
 const browseTotalPages = ref(1)
 const gridLoading = ref(false)
 
-// 网格统一展示：浏览模式展示分类数据，搜索模式展示搜索结果
+// 类型筛选（仅「正在播出/即将上线」等混合分类显示）：''=全部 / tv / movie
+const KINDS = [
+  { value: '', label: '全部' },
+  { value: 'tv', label: '电视剧' },
+  { value: 'movie', label: '电影' },
+]
+const kindFilter = ref('')
+const showKindFilter = computed(() =>
+  mode.value === 'browse' && ['on_air', 'upcoming'].includes(activeCat.value))
+
+// 网格统一展示：浏览模式展示分类数据，搜索模式展示搜索结果；叠加类型筛选
 const results = ref([])
 const gridItems = computed(() => (mode.value === 'search' ? results.value : browseItems.value))
+const filteredItems = computed(() =>
+  kindFilter.value && mode.value === 'browse'
+    ? gridItems.value.filter((it) => it.kind === kindFilter.value)
+    : gridItems.value)
 
 const startEditKey = () => {
   tmdbKeyInput.value = ''
@@ -189,6 +211,7 @@ const startEditKey = () => {
 const switchCat = (key) => {
   activeCat.value = key
   mode.value = 'browse'
+  kindFilter.value = '' // 切分类时重置类型筛选
   loadBrowse(true)
 }
 
@@ -261,7 +284,9 @@ const subFromTmdb = async (it) => {
   try {
     await api.post('/api/subscriptions', {
       keyword: it.name,
-      note: `TMDB ${it.kind === 'tv' ? '电视剧' : '电影'}${it.year ? ' · ' + it.year : ''}`,
+      note: `TMDB ${it.kind === 'tv' ? '电视剧' : '电影'}`
+        + (it.season ? ` · 最新季 ${it.season}` : '')
+        + (it.year ? ` · ${it.year}` : ''),
     })
     ElMessage.success(`已添加订阅「${it.name}」${it.kind === 'tv' ? '，命中后会推送追更通知' : ''}`)
     load()
@@ -324,6 +349,9 @@ onMounted(load)
 .tmdb-section { margin-bottom: 4px; }
 .tmdb-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-weight: 600; margin-bottom: 10px; }
 .tmdb-title .tip { font-weight: 400; }
+.title-search { margin-left: auto; width: 240px; }
+.k-chips { display: inline-flex; gap: 6px; margin-left: auto; }
+.k-chip { font-size: 12px; padding: 1px 10px; }
 .tmdb-empty { color: #999; font-size: 13px; padding: 12px 0 4px; }
 .tmdb-cats { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
 .cat-chip {

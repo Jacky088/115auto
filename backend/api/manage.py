@@ -472,6 +472,56 @@ def _tmdb_item(it: dict, kind: str) -> dict | None:
     }
 
 
+# TV 详情（季列表）缓存：季播剧的最新季基本不变，进程内缓存即可
+_TV_SEASON_CACHE: dict[int, tuple[int, str] | None] = {}
+
+
+def _latest_season_of(tv_id, api_key: str, lang: str) -> tuple[int, str] | None:
+    """取剧集「最新一季」的季号与播出日期（季号≥1 且有 air_date 的最大季）。
+
+    季播剧（如已经出到 S04 的长寿剧）在列表接口里只有 1999 年的首播日期，
+    对追剧没有参考意义；这里用详情接口的 seasons 覆盖为最新季的数据。
+    """
+    try:
+        tv_id = int(tv_id)
+    except (TypeError, ValueError):
+        return None
+    if tv_id in _TV_SEASON_CACHE:
+        return _TV_SEASON_CACHE[tv_id]
+    best = None
+    try:
+        resp = _tmdb_get(f"/tv/{tv_id}", {"api_key": api_key, "language": lang})
+        if resp.status_code == 200:
+            for s in (resp.json().get("seasons") or []):
+                try:
+                    sn = int(s.get("season_number") or 0)
+                except (TypeError, ValueError):
+                    continue
+                ad = str(s.get("air_date") or "").strip()
+                if sn >= 1 and ad and (best is None or sn > best[0]):
+                    best = (sn, ad)
+    except Exception:
+        pass
+    _TV_SEASON_CACHE[tv_id] = best
+    return best
+
+
+def _enrich_tv_latest_season(items: list[dict], api_key: str, lang: str) -> list[dict]:
+    """把 TV 条目的播出时间替换为最新季的，并附上季号标签（S04）。"""
+    tv_items = [it for it in items if it.get("kind") == "tv"]
+    if not tv_items:
+        return items
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        infos = list(ex.map(lambda it: _latest_season_of(it.get("id"), api_key, lang),
+                            tv_items))
+    for it, info in zip(tv_items, infos):
+        if info:
+            it["date"] = info[1]
+            it["season"] = f"S{info[0]:02d}"
+    return items
+
+
 @router.get("/tmdb/discover")
 def tmdb_discover(kind: str = "on_air", page: int = 1, _=Depends(require_user)):
     """追剧选剧分类浏览：只拉「正在播出 / 即将上线」等近期内容，不做全量老片浏览。
@@ -535,6 +585,8 @@ def tmdb_discover(kind: str = "on_air", page: int = 1, _=Depends(require_user)):
     if not items:
         raise HTTPException(502, "TMDB 拉取失败，请检查 API Key 或网络/代理设置")
     items.sort(key=lambda x: -x["popularity"])
+    # TV 条目改用最新季的播出时间 + 季号标签（季播剧首播日期没有参考意义）
+    items = _enrich_tv_latest_season(items, api_key, lang)
     # upcoming 合并了电影+剧集两个来源，截断到单页数量，保证分页节奏一致
     return {"items": items[:20], "page": page, "total_pages": total_pages}
 
@@ -561,6 +613,8 @@ def tmdb_search(query: str = "", kind: str = "all", page: int = 1, _=Depends(req
         except Exception:
             continue  # 网络异常时跳过该类型，另一个类型可能仍可用
     items.sort(key=lambda x: -x["popularity"])
+    # TV 条目同样标注最新季（季号 + 最新季播出时间），与分类浏览口径一致
+    items = _enrich_tv_latest_season(items, api_key, _tmdb_lang())
     return {"items": items[:24]}
 
 
