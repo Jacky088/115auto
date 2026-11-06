@@ -473,40 +473,69 @@ def _tmdb_item(it: dict, kind: str) -> dict | None:
 
 
 @router.get("/tmdb/discover")
-def tmdb_discover(kind: str = "tv", genre: str = "", page: int = 1, _=Depends(require_user)):
-    """按分类拉取 TMDB 热门影视（订阅页默认浏览，无需搜索）。
+def tmdb_discover(kind: str = "on_air", page: int = 1, _=Depends(require_user)):
+    """追剧选剧分类浏览：只拉「正在播出 / 即将上线」等近期内容，不做全量老片浏览。
 
-    kind: hot（电视剧+电影合并）/ tv / movie；genre: TMDB 类型 id
-    （如 16=动画、99=纪录片），空为全部。
+    kind:
+      on_air  — 📺 正在播出（TMDB 官方 /tv/on_the_air，近两周内有更新且在播的剧）
+      upcoming— 📅 即将上线（电影 /movie/upcoming + TV discover 首播日期≥今天，合并）
+      anime   — 🎌 动漫新番（动画类目 + 最近 45 天内开播/更新的剧）
+      doc     — 🌍 纪录片（纪录片类目 + 最近 90 天内开播/更新的剧）
     """
+    import datetime
+
     api_key = str(db.get_setting("tmdb_api_key", "") or "").strip()
     if not api_key:
         raise HTTPException(400, "请先填写并保存 TMDB API Key")
-    if kind not in ("hot", "tv", "movie"):
-        kind = "tv"
     page = min(max(page, 1), 500)
-    kinds = ("tv", "movie") if kind == "hot" else (kind,)
+    today = datetime.date.today()
+    lang = _tmdb_lang()
 
     items: list[dict] = []
     total_pages = 1
-    for k in kinds:
-        params = {"api_key": api_key, "language": _tmdb_lang(), "page": page,
-                  "sort_by": "popularity.desc", "include_adult": "false"}
-        if genre.strip():
-            params["with_genres"] = genre.strip()
-        try:
-            resp = _tmdb_get(f"/discover/{k}", params)
-            if resp.status_code != 200:
-                continue  # 单一类型失败不影响另一个
-            data = resp.json()
-            total_pages = max(total_pages, min(int(data.get("total_pages") or 1), 500))
-            items += [x for x in (_tmdb_item(it, k) for it in (data.get("results") or [])) if x]
-        except Exception:
-            continue
+
+    def _collect(path: str, params: dict, k: str) -> None:
+        nonlocal total_pages
+        resp = _tmdb_get(path, params)
+        if resp.status_code != 200:
+            return
+        data = resp.json()
+        total_pages = max(total_pages, min(int(data.get("total_pages") or 1), 500))
+        items.extend(x for x in (_tmdb_item(it, k)
+                                 for it in (data.get("results") or [])) if x)
+
+    try:
+        if kind == "on_air":
+            _collect("/tv/on_the_air", {"api_key": api_key, "language": lang,
+                                        "page": page}, "tv")
+        elif kind == "upcoming":
+            _collect("/movie/upcoming", {"api_key": api_key, "language": lang,
+                                         "page": page}, "movie")
+            _collect("/discover/tv", {"api_key": api_key, "language": lang, "page": page,
+                                      "sort_by": "popularity.desc", "include_adult": "false",
+                                      "first_air_date.gte": today.isoformat()}, "tv")
+        elif kind == "anime":
+            _collect("/discover/tv", {"api_key": api_key, "language": lang, "page": page,
+                                      "sort_by": "popularity.desc", "include_adult": "false",
+                                      "with_genres": "16",
+                                      "air_date.gte": (today - datetime.timedelta(days=45)).isoformat()},
+                     "tv")
+        elif kind == "doc":
+            _collect("/discover/tv", {"api_key": api_key, "language": lang, "page": page,
+                                      "sort_by": "popularity.desc", "include_adult": "false",
+                                      "with_genres": "99",
+                                      "air_date.gte": (today - datetime.timedelta(days=90)).isoformat()},
+                     "tv")
+        else:
+            raise HTTPException(400, f"未知分类: {kind}")
+    except HTTPException:
+        raise
+    except Exception:
+        pass  # 单一来源失败不影响其它来源；下面统一判空
     if not items:
         raise HTTPException(502, "TMDB 拉取失败，请检查 API Key 或网络/代理设置")
     items.sort(key=lambda x: -x["popularity"])
-    # hot 合并了两类，截断到单页数量，保证分页节奏一致
+    # upcoming 合并了电影+剧集两个来源，截断到单页数量，保证分页节奏一致
     return {"items": items[:20], "page": page, "total_pages": total_pages}
 
 

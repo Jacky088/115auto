@@ -11,18 +11,25 @@
     <div class="tmdb-section">
       <div class="tmdb-title">
         🔍 从 TMDB 选剧订阅
-        <el-tag v-if="tmdbKey" type="success" size="small" effect="plain">API Key 已配置</el-tag>
-        <el-tag v-else type="info" size="small" effect="plain">未配置 API Key</el-tag>
-        <span class="tip">在 themoviedb.org 免费申请（项目设置 → TMDB 刮削 共用此 Key）</span>
+        <span class="tip">API Key 在 themoviedb.org 免费申请（项目设置 → TMDB 刮削 共用此 Key）</span>
       </div>
+      <!-- Key 输入：未配置或点「更换」时显示；已配置态只读展示 -->
       <div class="toolbar">
-        <el-input v-model="tmdbKeyInput" type="password" show-password
-                  placeholder="TMDB API Key (v3)" style="width: 280px" clearable />
-        <el-button :loading="savingKey" @click="saveTmdbKey">保存 Key</el-button>
+        <template v-if="tmdbKey && !editingKey">
+          <el-tag type="success" effect="plain">API Key 已配置</el-tag>
+          <el-button text type="primary" @click="startEditKey">更换 Key</el-button>
+        </template>
+        <template v-else>
+          <el-input v-model="tmdbKeyInput" type="password" show-password
+                    :placeholder="tmdbKey ? '输入新 Key 后点保存' : 'TMDB API Key (v3)'"
+                    style="width: 280px" clearable />
+          <el-button :loading="savingKey" @click="saveTmdbKey">保存 Key</el-button>
+          <el-button v-if="tmdbKey" text @click="editingKey = false">取消</el-button>
+        </template>
       </div>
 
       <template v-if="tmdbKey">
-        <!-- 分类浏览（默认） -->
+        <!-- 分类浏览（默认）：只展示正在播出/即将上线等近期内容 -->
         <div class="tmdb-cats">
           <span v-for="c in CATS" :key="c.key" class="cat-chip"
                 :class="{ active: mode === 'browse' && activeCat === c.key }"
@@ -44,11 +51,6 @@
             <template #prefix><el-icon><Search /></el-icon></template>
           </el-input>
         </el-tooltip>
-        <el-select v-model="searchKind" :disabled="!tmdbKey" style="width: 110px">
-          <el-option label="全部类型" value="all" />
-          <el-option label="电视剧" value="tv" />
-          <el-option label="电影" value="movie" />
-        </el-select>
         <el-button type="primary" :disabled="!tmdbKey" :loading="searching" @click="doSearch">
           搜索
         </el-button>
@@ -92,7 +94,7 @@
           <el-button :loading="gridLoading" @click="loadMore">加载更多</el-button>
         </div>
       </template>
-      <div v-else class="tmdb-empty">填写并保存 API Key 后，这里会自动展示热门电影 / 剧集供点选订阅</div>
+      <div v-else class="tmdb-empty">填写并保存 API Key 后，这里会自动展示正在播出 / 即将上线的剧集和电影供点选订阅</div>
     </div>
 
     <el-divider />
@@ -154,22 +156,22 @@ const loading = ref(false)
 const tmdbKey = ref('')
 const tmdbKeyInput = ref('')
 const savingKey = ref(false)
+const editingKey = ref(false) // 已配置态默认隐藏输入框，点「更换 Key」展开
 const searchWord = ref('')
-const searchKind = ref('all')
 const searching = ref(false)
 const searchTerm = ref('') // 当前搜索词（进入搜索模式时记录）
 
-// 分类 → TMDB discover 参数（16=动画/动漫，99=纪录片）
+// 分类 → 后端 discover kind。全部只拉近期内容（追剧导向）：
+// on_air 正在播出 / upcoming 即将上线(电影+剧集) / anime 动漫新番(45天) / doc 纪录片(90天)
 const CATS = [
-  { key: 'hot', label: '🔥 热门', kind: 'hot', genre: '' },
-  { key: 'tv', label: '📺 电视剧', kind: 'tv', genre: '' },
-  { key: 'movie', label: '🎬 电影', kind: 'movie', genre: '' },
-  { key: 'anime', label: '🎌 动漫', kind: 'tv', genre: '16' },
-  { key: 'doc', label: '🌍 纪录片', kind: 'tv', genre: '99' },
+  { key: 'on_air', label: '📺 正在播出', kind: 'on_air' },
+  { key: 'upcoming', label: '📅 即将上线', kind: 'upcoming' },
+  { key: 'anime', label: '🎌 动漫新番', kind: 'anime' },
+  { key: 'doc', label: '🌍 纪录片', kind: 'doc' },
 ]
 
 const mode = ref('browse') // browse: 分类浏览 | search: 搜索结果
-const activeCat = ref('hot')
+const activeCat = ref('on_air')
 const browseItems = ref([])
 const browsePage = ref(1)
 const browseTotalPages = ref(1)
@@ -178,6 +180,11 @@ const gridLoading = ref(false)
 // 网格统一展示：浏览模式展示分类数据，搜索模式展示搜索结果
 const results = ref([])
 const gridItems = computed(() => (mode.value === 'search' ? results.value : browseItems.value))
+
+const startEditKey = () => {
+  tmdbKeyInput.value = ''
+  editingKey.value = true
+}
 
 const switchCat = (key) => {
   activeCat.value = key
@@ -192,7 +199,7 @@ const loadBrowse = async (reset = true) => {
   gridLoading.value = true
   try {
     const { data } = await api.get('/api/tmdb/discover',
-      { params: { kind: cat.kind, genre: cat.genre, page } })
+      { params: { kind: cat.kind, page } })
     browseItems.value = reset ? (data.items || []) : [...browseItems.value, ...(data.items || [])]
     browsePage.value = data.page || page
     browseTotalPages.value = data.total_pages || 1
@@ -212,7 +219,8 @@ const doSearch = async () => {
   if (searching.value) return
   searching.value = true
   try {
-    const { data } = await api.get('/api/tmdb/search', { params: { query: q, kind: searchKind.value } })
+    // 搜索不区分类型：电视剧+电影一起返回（后端 kind=all）
+    const { data } = await api.get('/api/tmdb/search', { params: { query: q, kind: 'all' } })
     results.value = data.items || []
     searchTerm.value = q
     mode.value = 'search'
@@ -243,7 +251,8 @@ const saveTmdbKey = async () => {
     await api.put('/api/settings', { tmdb_api_key: key })
     tmdbKey.value = key
     tmdbKeyInput.value = ''
-    saveOk('TMDB API Key 已保存', '已为你拉取热门影视，点卡片即可订阅')
+    editingKey.value = false // 保存成功回到已配置态（输入框收起）
+    saveOk('TMDB API Key 已保存', '已为你拉取正在播出 / 即将上线的影视，点卡片即可订阅')
     loadBrowse(true)
   } catch (e) { ElMessage.error(errMsg(e)) } finally { savingKey.value = false }
 }
