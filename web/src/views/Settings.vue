@@ -125,19 +125,24 @@
               <span class="tip">转存成功/失败、云下载提交/完成/失败都会推送 TG 消息（含具体原因）</span>
             </div>
           </el-form-item>
-          <el-form-item label="TG Bot Token">
-            <el-input v-model="f.notify_token" type="password" show-password
-                      placeholder="从 @BotFather 获取" />
-          </el-form-item>
-          <el-form-item label="Chat ID">
-            <div class="range-row">
-              <el-input v-model="f.notify_chat_id" placeholder="你的用户 ID" style="width: 220px" />
-              <el-button type="primary" plain :loading="testing" @click="testNotify">发送测试消息</el-button>
-            </div>
-            <div class="tip" style="width: 100%">
-              填写后无需保存即可直接测试；测试失败会提示具体原因。收不到时检查：① Token 是否完整复制
-              ② 是否先给 Bot 发送过 /start ③ 大陆服务器需在上方配置 TG 代理
-            </div>
+          <el-form-item label="TG 通知">
+            <SecretConfig :configured="!!(f.notify_token && f.notify_chat_id)" :save="saveNotify"
+                          @open="openNotify" @cancel="resetNotify">
+              <div class="range-row" style="width: 100%">
+                <el-input v-model="nf.token" type="password" show-password
+                          placeholder="TG Bot Token（@BotFather 获取）" />
+              </div>
+              <div class="range-row" style="width: 100%">
+                <el-input v-model="nf.chat_id" placeholder="Chat ID（你的用户 ID）" style="width: 220px" />
+                <el-button type="primary" plain :loading="testing" @click="testNotify(nf.token, nf.chat_id)">
+                  发送测试消息
+                </el-button>
+              </div>
+              <div class="tip" style="width: 100%">
+                填写后无需保存即可直接测试；测试失败会提示具体原因。收不到时检查：① Token 是否完整复制
+                ② 是否先给 Bot 发送过 /start ③ 大陆服务器需在上方配置 TG 代理
+              </div>
+            </SecretConfig>
           </el-form-item>
           </div>
 
@@ -158,51 +163,53 @@
 
           <div class="section-card"><div class="section-title">通知渠道扩展</div>
           <el-form-item label="Bark（iOS）">
-            <div class="range-row" style="width: 100%">
-              <el-input v-model="f.bark_url" type="password" show-password
-                        placeholder="https://api.day.app/你的key" />
-              <el-button :loading="chTesting === 'bark'" @click="testChannel('bark')">发送测试</el-button>
-            </div>
-            <div class="tip" style="width: 100%">
-              iOS Bark 推送：App Store 安装 Bark 后，复制 App 内显示的完整推送 URL
-              （形如 <code>https://api.day.app/你的key</code>，自建服务器换域名即可）
-            </div>
+            <SecretConfig :configured="!!f.bark_url" :save="saveBark"
+                          @open="openBark" @cancel="resetBark">
+              <div class="range-row" style="width: 100%">
+                <el-input v-model="bf.url" type="password" show-password
+                          placeholder="https://api.day.app/你的key" />
+                <el-button :loading="chTesting === 'bark'" @click="testChannel('bark')">发送测试</el-button>
+              </div>
+              <div class="tip" style="width: 100%">
+                iOS Bark 推送：App Store 安装 Bark 后，复制 App 内显示的完整推送 URL
+                （形如 <code>https://api.day.app/你的key</code>，自建服务器换域名即可）
+              </div>
+            </SecretConfig>
           </el-form-item>
           <el-form-item label="PushPlus">
-            <div class="range-row" style="width: 100%">
-              <el-input v-model="f.pushplus_token" type="password" show-password
-                        placeholder="pushplus.plus 的 Token" />
-              <el-button :loading="chTesting === 'pushplus'" @click="testChannel('pushplus')">发送测试</el-button>
-            </div>
-            <div class="tip" style="width: 100%">
-              微信推送：官网 pushplus.plus 微信扫码登录后复制 Token。默认发给本人微信；
-              需一对多群发时在下方填群组编码（可选）
-            </div>
-          </el-form-item>
-          <el-form-item v-if="f.pushplus_token || f.pushplus_topic" label="PushPlus 群组">
-            <el-input v-model="f.pushplus_topic" placeholder="群组编码（可选，留空发本人）" />
-            <div class="tip" style="width: 100%">
-              一对多推送：在 pushplus.plus「一对一推送 → 群组管理」创建群组后填其编码；
-              关注该群的用户都会收到
-            </div>
+            <SecretConfig :configured="!!f.pushplus_token" :save="savePushPlus"
+                          @open="openPushPlus" @cancel="resetPushPlus">
+              <div class="range-row" style="width: 100%">
+                <el-input v-model="pf.token" type="password" show-password
+                          placeholder="pushplus.plus 的 Token" />
+                <el-button :loading="chTesting === 'pushplus'" @click="testChannel('pushplus')">发送测试</el-button>
+              </div>
+              <div class="range-row" style="width: 100%">
+                <el-input v-model="pf.topic" placeholder="群组编码（可选，留空发本人）" />
+              </div>
+              <div class="tip" style="width: 100%">
+                微信推送：官网 pushplus.plus 微信扫码登录后复制 Token，默认发给本人微信；
+                需一对多群发时填「一对一推送 → 群组管理」里创建的群组编码
+              </div>
+            </SecretConfig>
           </el-form-item>
           <el-form-item label="ntfy">
-            <div class="range-row" style="width: 100%">
-              <el-input v-model="f.ntfy_url" placeholder="https://ntfy.sh/你的主题" />
-              <el-button :loading="chTesting === 'ntfy'" @click="testChannel('ntfy')">发送测试</el-button>
-            </div>
-            <div class="tip" style="width: 100%">
-              完整的 ntfy 主题 URL，如 <code>https://ntfy.sh/my-115-topic</code>（自建服务器换域名）；
-              手机装 ntfy App 订阅同一主题即可收推送。主题名建议加随机后缀防止被他人订阅
-            </div>
-          </el-form-item>
-          <el-form-item v-if="f.ntfy_url" label="ntfy 访问令牌">
-            <el-input v-model="f.ntfy_token" type="password" show-password
-                      placeholder="可选：自建 ntfy 开启访问控制时填" />
-            <div class="tip" style="width: 100%">
-              仅自建 ntfy 且开启鉴权时需要（ntfy 后台创建的 Token 或账号密码）；
-              官方 ntfy.sh 公开主题留空即可
-            </div>
+            <SecretConfig :configured="!!f.ntfy_url" :save="saveNtfy"
+                          @open="openNtfy" @cancel="resetNtfy">
+              <div class="range-row" style="width: 100%">
+                <el-input v-model="tf.url" placeholder="https://ntfy.sh/你的主题" />
+                <el-button :loading="chTesting === 'ntfy'" @click="testChannel('ntfy')">发送测试</el-button>
+              </div>
+              <div class="range-row" style="width: 100%">
+                <el-input v-model="tf.token" type="password" show-password
+                          placeholder="访问令牌（可选，自建 ntfy 开启鉴权时填）" />
+              </div>
+              <div class="tip" style="width: 100%">
+                完整的 ntfy 主题 URL，如 <code>https://ntfy.sh/my-115-topic</code>（自建服务器换域名）；
+                手机装 ntfy App 订阅同一主题即可收推送。主题名建议加随机后缀防止被他人订阅。
+                官方 ntfy.sh 公开主题令牌留空即可
+              </div>
+            </SecretConfig>
           </el-form-item>
           </div>
 
@@ -290,6 +297,64 @@ const transferPreset = ref('标准（1~3分）')
 const testing = ref(false)
 const chTesting = ref('') // 正在测试的通知渠道（bark/pushplus/ntfy）
 const dirty = ref(false)
+
+// ---- 密钥类配置的独立编辑/保存（参考 TMDB API Key 的「已配置 + 更换」模式）----
+// 每块用独立 draft，编辑时不联动底部表单，保存成功后同步回 f（避免底部保存把旧值覆盖回去）
+import SecretConfig from '../components/SecretConfig.vue'
+const nf = reactive({ token: '', chat_id: '' })   // TG 通知
+const bf = reactive({ url: '' })                  // Bark
+const pf = reactive({ token: '', topic: '' })     // PushPlus
+const tf = reactive({ url: '', token: '' })       // ntfy
+
+const syncF = (patch) => {
+  suppressWatch = true
+  Object.assign(f.value, patch)
+  nextTick(() => { suppressWatch = false })
+}
+
+const openNotify = () => { nf.token = ''; nf.chat_id = f.value.notify_chat_id || '' }
+const resetNotify = () => { nf.token = ''; nf.chat_id = f.value.notify_chat_id || '' }
+const saveNotify = async () => {
+  if (!nf.token.trim() || !nf.chat_id.trim()) { ElMessage.error('请完整填写 Bot Token 和 Chat ID'); throw new Error('invalid') }
+  try {
+    await api.put('/api/settings', { notify_token: nf.token.trim(), notify_chat_id: nf.chat_id.trim() })
+    syncF({ notify_token: nf.token.trim(), notify_chat_id: nf.chat_id.trim() })
+    ElMessage.success('TG 通知配置已保存')
+  } catch (e) { ElMessage.error(errMsg(e)); throw e }
+}
+
+const openBark = () => { bf.url = '' }
+const resetBark = () => { bf.url = '' }
+const saveBark = async () => {
+  if (!bf.url.trim()) { ElMessage.error('请填写 Bark 推送 URL'); throw new Error('invalid') }
+  try {
+    await api.put('/api/settings', { bark_url: bf.url.trim() })
+    syncF({ bark_url: bf.url.trim() })
+    ElMessage.success('Bark 配置已保存')
+  } catch (e) { ElMessage.error(errMsg(e)); throw e }
+}
+
+const openPushPlus = () => { pf.token = ''; pf.topic = f.value.pushplus_topic || '' }
+const resetPushPlus = () => { pf.token = ''; pf.topic = f.value.pushplus_topic || '' }
+const savePushPlus = async () => {
+  if (!pf.token.trim()) { ElMessage.error('请填写 PushPlus Token'); throw new Error('invalid') }
+  try {
+    await api.put('/api/settings', { pushplus_token: pf.token.trim(), pushplus_topic: pf.topic.trim() })
+    syncF({ pushplus_token: pf.token.trim(), pushplus_topic: pf.topic.trim() })
+    ElMessage.success('PushPlus 配置已保存')
+  } catch (e) { ElMessage.error(errMsg(e)); throw e }
+}
+
+const openNtfy = () => { tf.url = ''; tf.token = '' }
+const resetNtfy = () => { tf.url = ''; tf.token = '' }
+const saveNtfy = async () => {
+  if (!tf.url.trim()) { ElMessage.error('请填写 ntfy 主题 URL'); throw new Error('invalid') }
+  try {
+    await api.put('/api/settings', { ntfy_url: tf.url.trim(), ntfy_token: tf.token.trim() })
+    syncF({ ntfy_url: tf.url.trim(), ntfy_token: tf.token.trim() })
+    ElMessage.success('ntfy 配置已保存')
+  } catch (e) { ElMessage.error(errMsg(e)); throw e }
+}
 const isMobile = ref(window.innerWidth <= 768)
 const onRz = () => { isMobile.value = window.innerWidth <= 768 }
 useUnsavedGuard(dirty)  // 有未保存更改时，离开页面弹窗确认
@@ -370,12 +435,12 @@ const testProxy = async () => {
     saveOk('代理可用', data.detail)
   } catch (e) { ElMessage.error(errMsg(e)) } finally { proxyTesting.value = false }
 }
-const testNotify = async () => {
+const testNotify = async (token, chatId) => {
   testing.value = true
   try {
     await api.post('/api/settings/notify/test', {
-      token: f.value.notify_token,
-      chat_id: f.value.notify_chat_id,
+      token: token ?? f.value.notify_token,
+      chat_id: chatId ?? f.value.notify_chat_id,
     })
     ElMessage.success('✅ 测试消息已发送，请查看 Telegram')
   } catch (e) {

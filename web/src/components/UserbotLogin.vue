@@ -6,8 +6,8 @@
         {{ st.connected ? '已连接' : '未连接' }}
       </el-tag>
       <el-tag v-if="st.connected && who" type="success" effect="plain" size="small">账号：{{ who }}</el-tag>
-      <el-button v-if="st.connected" text type="primary" size="small" @click="resetFlow">
-        重新登录
+      <el-button v-if="st.connected" text type="primary" size="small" @click="openEdit">
+        更换凭证
       </el-button>
     </div>
 
@@ -101,6 +101,17 @@ const loadStatus = async () => {
 }
 
 const resetFlow = () => { flowStep.value = 0; flowErr.value = ''; form.code = ''; form.password = '' }
+
+// 更换凭证：展开凭证表单（独立流程，不联动页面其他保存按钮），
+// 预填 API ID 与手机号（已保存的非敏感信息），API Hash 需重新填写
+const openEdit = async () => {
+  resetFlow()
+  try {
+    const s = (await api.get('/api/settings')).data
+    if (s.tg_api_id) form.api_id = String(s.tg_api_id)
+    if (s.tg_phone) form.phone = s.tg_phone
+  } catch { /* 预填失败不阻塞 */ }
+}
 
 const startLogin = async () => {
   if (!form.api_id.trim() || !form.api_hash.trim() || !form.phone.trim()) {
