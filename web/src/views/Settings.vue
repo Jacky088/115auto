@@ -239,6 +239,23 @@
               <span class="tip">1-365 天</span>
             </div>
           </el-form-item>
+          <el-form-item label="从备份恢复">
+            <div class="range-row" style="width: 100%">
+              <input type="file" ref="restoreInput" accept=".json,application/json"
+                     style="display: none" @change="onRestoreFile" />
+              <el-button @click="$refs.restoreInput.click()">选择备份 JSON 文件</el-button>
+              <span v-if="restoreFile" class="selected-count">
+                {{ restoreFile.name }}（{{ Math.max(1, Math.round(restoreFile.size / 1024)) }} KB）
+              </span>
+              <el-button type="danger" plain :loading="restoring" :disabled="!restoreFile"
+                         @click="doRestore">恢复数据</el-button>
+            </div>
+            <div class="tip" style="width: 100%">
+              用备份文件<b>整体覆盖</b>当前的设置/频道/规则/订阅/转存记录（登录密码不变），
+              恢复后系统回到停止状态。也可直接把 TG 收到的备份文件转发给 Bot 回复
+              <code>/restore confirm</code> 恢复
+            </div>
+          </el-form-item>
           </div>
 
           <div class="section-card"><div class="section-title">对外 API</div>
@@ -354,6 +371,47 @@ const saveNtfy = async () => {
     syncF({ ntfy_url: tf.url.trim(), ntfy_token: tf.token.trim() })
     ElMessage.success('ntfy 配置已保存')
   } catch (e) { ElMessage.error(errMsg(e)); throw e }
+}
+
+// ---- 从备份恢复（网页上传）----
+const restoreInput = ref(null)
+const restoreFile = ref(null)
+const restoring = ref(false)
+const onRestoreFile = (ev) => {
+  const file = ev.target.files?.[0]
+  restoreFile.value = null
+  if (!file) return
+  if (file.size > 20 * 1024 * 1024) { ElMessage.error('文件超过 20MB，不是有效的备份文件'); return }
+  restoreFile.value = file
+  ev.target.value = '' // 允许重复选择同一文件
+}
+const doRestore = async () => {
+  const file = restoreFile.value
+  if (!file) return
+  restoring.value = true
+  try {
+    const text = await file.text()
+    let data
+    try { data = JSON.parse(text) } catch { throw new Error('文件不是合法 JSON') }
+    if (!data?._meta || !data.settings) throw new Error('不是本程序的备份文件（缺少备份标记）')
+    const kb = Math.max(1, Math.round(file.size / 1024))
+    await ElMessageBox.confirm(
+      `备份导出于 ${data._meta.exported_at || '未知时间'}（${kb} KB），包含：` +
+      `频道 ${(data.channels || []).length}、规则 ${(data.rules || []).length}、` +
+      `订阅 ${(data.subscriptions || []).length}、转存记录 ${(data.transfers || []).length}。` +
+      `恢复将覆盖当前全部业务数据（登录密码不变），且系统回到停止状态。确定继续？`,
+      '确认恢复备份', { confirmButtonText: '确认恢复', cancelButtonText: '取消', type: 'warning' })
+    const { data: resp } = await api.post('/api/settings/backup/restore', data)
+    await ElMessageBox.alert(
+      `恢复完成：设置 ${resp.stats.settings} 项、频道 ${resp.stats.channels}、` +
+      `规则 ${resp.stats.rules}、订阅 ${resp.stats.subscriptions}、转存记录 ${resp.stats.transfers}。` +
+      `页面即将刷新以加载恢复后的数据`, '恢复成功', { confirmButtonText: '刷新页面' })
+    location.reload()
+  } catch (e) {
+    if (e !== 'cancel' && e?.message !== 'cancel') ElMessage.error(errMsg(e))
+  } finally {
+    restoring.value = false
+  }
 }
 const isMobile = ref(window.innerWidth <= 768)
 const onRz = () => { isMobile.value = window.innerWidth <= 768 }

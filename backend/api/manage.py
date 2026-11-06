@@ -1170,6 +1170,19 @@ def export_logs(date: str = "", _=Depends(require_user)):
 
 
 # ---------- 备份 ----------
+@router.post("/backup/restore")
+def backup_restore(body: dict, _=Depends(require_user)):
+    """从备份 JSON 恢复数据（整体覆盖）。
+
+    body 即备份文件内容（_meta/settings/channels/...）；恢复在事务内完成，
+    失败自动回滚；恢复后系统回到停止状态，需手动点「开始运行」。
+    """
+    stats = db.restore_payload(body)
+    logstream.info("system", f"已从备份恢复数据：设置 {stats['settings']} 项、频道 {stats['channels']}、"
+                             f"规则 {stats['rules']}、订阅 {stats['subscriptions']}、转存记录 {stats['transfers']}")
+    return {"ok": True, "stats": stats}
+
+
 @router.get("/backup/export")
 def backup_export(_=Depends(require_user)):
     """导出全部数据（设置/频道/规则/黑名单/订阅/转存记录）为 JSON 备份文件。

@@ -302,6 +302,54 @@ def add_log(level: str, module: str, message: str):
 BACKUP_EXCLUDE_SETTINGS = {"web_password_hash"}
 
 
+def restore_payload(data: dict) -> dict:
+    """从备份字典恢复全部业务数据（整体覆盖，事务内完成）。
+
+    校验通过后按备份内容重建 7 张表；恢复完成后强制 running=0（停止状态），
+    避免带着旧快照里的运行标记直接启动。返回各表恢复条数。
+    """
+    if not isinstance(data, dict) or not isinstance(data.get("_meta"), dict):
+        raise ValueError("不是有效的备份文件（缺少 _meta 段）")
+    tables = ("channels", "rules", "routes", "blacklist", "subscriptions", "transfers")
+    if "settings" not in data:
+        raise ValueError("备份缺少 settings 段")
+    for t in tables:
+        if t not in data:
+            raise ValueError(f"备份缺少 {t} 段")
+
+    with _lock:
+        try:
+            cur = _conn.cursor()
+            cur.execute("BEGIN")
+            for t in tables:
+                rows = data[t] or []
+                cur.execute(f"DELETE FROM {t}")
+                for r in rows:
+                    cols = ",".join(r.keys())
+                    qs = ",".join("?" * len(r))
+                    cur.execute(f"INSERT INTO {t}({cols}) VALUES({qs})", tuple(r.values()))
+                # 自增序列对齐到恢复后的最大 id，防止后续新记录与恢复记录撞 id
+                try:
+                    cur.execute("UPDATE sqlite_sequence SET seq=(SELECT MAX(id) FROM "
+                                f"{t}) WHERE name='{t}'")
+                    if cur.execute("SELECT changes()").fetchone()[0] == 0 and rows:
+                        cur.execute(f"INSERT INTO sqlite_sequence(name,seq) VALUES('{t}',"
+                                    f"(SELECT MAX(id) FROM {t}))")
+                except sqlite3.OperationalError:
+                    pass  # 表无 AUTOINCREMENT 时没有 sqlite_sequence 行，忽略
+            cur.execute("DELETE FROM settings")
+            for k, v in (data["settings"] or {}).items():
+                cur.execute("INSERT INTO settings VALUES(?,?)", (k, str(v)))
+            cur.execute("INSERT OR REPLACE INTO settings VALUES('running','0')")
+            _conn.commit()
+            stats = {"settings": len(data["settings"] or {})}
+            stats.update({t: len(data[t] or []) for t in tables})
+            return stats
+        except Exception:
+            _conn.rollback()
+            raise
+
+
 def backup_payload() -> dict:
     """全部业务数据 → JSON 备份字典（网页导出与 TG 定时备份共用）。"""
     def dump(sql):

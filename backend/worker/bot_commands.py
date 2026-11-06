@@ -19,6 +19,63 @@ _last_update_id = 0
 _SUB_SEARCH_CACHE: dict[str, list] = {}
 _SUB_NUMS = ["①", "②", "③", "④", "⑤", "⑥"]
 
+# 备份文件恢复待确认区：chat_id -> (payload, 缓存时间)。
+# 转发备份 JSON 给 Bot 后先暂存，回复 /restore confirm 才真正写库（防误触）。
+_RESTORE_PENDING: dict[str, tuple[dict, float]] = {}
+_RESTORE_TTL = 600  # 10 分钟内有效
+
+
+def _backup_summary(data: dict) -> str:
+    """备份 payload 的一行人量摘要（用于确认提示）。"""
+    meta = data.get("_meta") or {}
+    n = lambda t: len(data.get(t) or [])  # noqa: E731
+    return (f"导出于 {meta.get('exported_at', '?')}｜设置 {len(data.get('settings') or {})} 项｜"
+            f"频道 {n('channels')}｜规则 {n('rules')}｜订阅 {n('subscriptions')}｜"
+            f"转存记录 {n('transfers')}")
+
+
+async def restore_upload_flow(client: "httpx.AsyncClient", token: str, chat_id: str,
+                              doc: dict) -> str:
+    """用户转发备份 JSON 文件给 Bot：下载 → 校验 → 暂存待确认。"""
+    size = int(doc.get("file_size") or 0)
+    if size > 10 * 1024 * 1024:
+        return f"文件过大（{size // 1024 // 1024}MB），备份文件不应超过 10MB"
+    # 下载文件：getFile 拿路径，再从 file 接口取内容（都走 TG 代理）
+    r = await client.post(f"https://api.telegram.org/bot{token}/getFile",
+                          json={"file_id": doc.get("file_id")},
+                          proxy=_tg_proxy(), timeout=30)
+    fp = (r.json().get("result") or {}).get("file_path") if r.status_code == 200 else None
+    if not fp:
+        return "无法读取该文件（Telegram getFile 失败），请重新发送"
+    f = await client.get(f"https://api.telegram.org/file/bot{token}/{fp}",
+                         proxy=_tg_proxy(), timeout=60)
+    try:
+        data = json.loads(f.content)
+    except Exception:
+        return "文件不是合法 JSON，已忽略（确认发送的是自动备份/网页导出的 .json 文件）"
+    if not isinstance(data, dict) or not isinstance(data.get("_meta"), dict) or "settings" not in data:
+        return "不是本程序的备份文件（缺少备份标记），已忽略"
+    _RESTORE_PENDING[chat_id] = (data, time.time())
+    return ("⚠️ 检测到备份文件\n" + _backup_summary(data) +
+            "\n\n恢复将【整体覆盖】当前的设置/频道/规则/订阅/转存记录（登录密码不变）。\n"
+            "确认恢复请回复：/restore confirm（10 分钟内有效，或直接忽略即取消）")
+
+
+def _do_restore(chat_id: str) -> str:
+    """执行恢复：校验待确认区 → 写库 → 返回统计。"""
+    pending = _RESTORE_PENDING.pop(chat_id, None)
+    if not pending:
+        return "没有待恢复的备份文件。请先把备份 JSON 文件直接发送给本 Bot，再回复 /restore confirm"
+    data, ts = pending
+    if time.time() - ts > _RESTORE_TTL:
+        return "待确认的备份已超时（10 分钟），请重新发送备份文件"
+    try:
+        stats = db.restore_payload(data)
+    except ValueError as e:
+        return f"恢复失败：{e}"
+    return ("✅ 已从备份恢复\n" + _backup_summary(data) +
+            "\n\n系统已回到停止状态，确认无误后到网页顶栏点「开始运行」。")
+
 
 def _tg_proxy() -> str | None:
     return str(db.get_setting("proxy", "") or "") or None
@@ -35,6 +92,7 @@ HELP = (
     "/pause — 暂停转存（停止消费队列）\n"
     "/resume — 恢复转存\n"
     "/retry — 重试全部失败任务\n"
+    "/restore — 发送备份 JSON 文件后确认恢复数据\n"
     "/help — 显示本帮助"
 )
 
@@ -49,6 +107,7 @@ BOT_MENU_COMMANDS = [
     {"command": "pause", "description": "暂停转存"},
     {"command": "resume", "description": "恢复转存"},
     {"command": "retry", "description": "重试全部失败任务"},
+    {"command": "restore", "description": "从备份文件恢复数据"},
     {"command": "help", "description": "显示帮助"},
 ]
 
@@ -485,14 +544,39 @@ async def bot_command_loop():
                             continue
 
                         # ---- 文本指令 ----
-                        msg = upd.get("message") or {}
+                        msg = (upd.get("message")
+                               or upd.get("channel_post")
+                               or upd.get("edited_message") or {})
                         if str(msg.get("chat", {}).get("id", "")) != chat_id:
                             continue  # 非授权用户
+                        # ---- 备份文件恢复：直接发送/转发备份 JSON 给 Bot ----
+                        doc = msg.get("document")
+                        if doc and (str(doc.get("mime_type") or "").endswith("json")
+                                    or str(doc.get("file_name") or "").lower().endswith(".json")):
+                            try:
+                                reply = await restore_upload_flow(client, token, chat_id, doc)
+                            except Exception as e:
+                                reply = f"备份文件处理失败: {e}"
+                            try:
+                                await client.post(
+                                    f"https://api.telegram.org/bot{token}/sendMessage",
+                                    json={"chat_id": chat_id, "text": reply})
+                            except Exception:
+                                pass
+                            continue
                         text = (msg.get("text") or "").strip()
                         if not text.startswith("/"):
                             continue
                         try:
-                            if text.lower().startswith("/menu"):
+                            if text.lower().startswith("/restore"):
+                                arg = text.split(None, 1)[1].strip().lower() \
+                                    if len(text.split(None, 1)) > 1 else ""
+                                if arg == "confirm":
+                                    reply = await asyncio.to_thread(_do_restore, chat_id)
+                                else:
+                                    reply = ("把自动备份/网页导出的 JSON 文件直接发送给本 Bot，"
+                                             "然后回复 /restore confirm 确认恢复")
+                            elif text.lower().startswith("/menu"):
                                 reply = "🛠 快捷操作（点按钮执行，执行后菜单原位刷新）"
                                 try:
                                     await client.post(
@@ -502,7 +586,7 @@ async def bot_command_loop():
                                 except Exception:
                                     pass
                                 continue
-                            if text.lower().startswith("/add"):
+                            elif text.lower().startswith("/add"):
                                 # /add 需要异步做频道可访问性校验，单独处理
                                 reply = await add_channel_flow(text.split(None, 1)[1]) \
                                     if len(text.split(None, 1)) > 1 \
