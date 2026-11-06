@@ -37,20 +37,27 @@
             </span>
           </template>
         </div>
-        <div class="toolbar" style="margin-bottom: 10px">
-          <el-input v-model="searchWord" maxlength="80"
-                    placeholder="搜索片名精确查找，如：庆余年"
+      </template>
+      <!-- 搜索框始终显示：未配置 Key 时置灰，提示先配 Key -->
+      <div class="toolbar" style="margin-bottom: 10px">
+        <el-tooltip :disabled="!!tmdbKey" content="先在上方填写并保存 TMDB API Key" placement="top">
+          <el-input v-model="searchWord" maxlength="80" :disabled="!tmdbKey"
+                    :placeholder="tmdbKey ? '搜索片名精确查找，如：庆余年' : '配置 API Key 后可搜索片名'"
                     style="width: 320px" clearable @keyup.enter="doSearch" @clear="exitSearch">
             <template #prefix><el-icon><Search /></el-icon></template>
           </el-input>
-          <el-select v-model="searchKind" style="width: 110px">
-            <el-option label="全部类型" value="all" />
-            <el-option label="电视剧" value="tv" />
-            <el-option label="电影" value="movie" />
-          </el-select>
-          <el-button type="primary" :loading="searching" @click="doSearch">搜索</el-button>
-        </div>
+        </el-tooltip>
+        <el-select v-model="searchKind" :disabled="!tmdbKey" style="width: 110px">
+          <el-option label="全部类型" value="all" />
+          <el-option label="电视剧" value="tv" />
+          <el-option label="电影" value="movie" />
+        </el-select>
+        <el-button type="primary" :disabled="!tmdbKey" :loading="searching" @click="doSearch">
+          搜索
+        </el-button>
+      </div>
 
+      <template v-if="tmdbKey">
         <div v-if="gridLoading && !gridItems.length" class="tmdb-empty">加载中…</div>
         <div v-else-if="!gridItems.length" class="tmdb-empty">
           {{ mode === 'search' ? '没有找到相关内容，试试换个名称或切换类型' : '该分类暂时没有内容' }}
