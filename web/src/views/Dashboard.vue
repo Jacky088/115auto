@@ -201,9 +201,21 @@ const load = async (withSpace = false) => {
   }
 }
 
+// ---- 图表渲染公共逻辑 ----
+// 空白修复：容器处于 0 尺寸时（首屏布局未完成/卡片被隐藏/切回标签页等）echarts.init
+// 会得到 0×0 空白画布且不会自愈。这里改为：① 尺寸未就绪时不渲染，由 ResizeObserver
+// 在尺寸可用/变化时触发重画；② 主题切换（html.dark 变化）时用深色配色重画。
+const chartSizeOk = (el) => !!(el && el.clientWidth > 0 && el.clientHeight > 0)
+const chartIsDark = () => document.documentElement.classList.contains('dark')
+const chartTextColor = () => (chartIsDark() ? '#8a97b3' : '#44506b')
+const chartEmptyColor = () => (chartIsDark() ? '#5d6b85' : '#999')
+const chartCardBorder = () => (chartIsDark() ? '#26303f' : '#fff')
+const chartTrackColor = () => (chartIsDark() ? '#26303f' : '#e9eefb')
+
 const renderPie = () => {
-  if (!pieRef.value) return
-  if (!pieChart) pieChart = echarts.init(pieRef.value)
+  const el = pieRef.value
+  if (!el || !chartSizeOk(el)) return // 尺寸未就绪：等 ResizeObserver 触发
+  if (!pieChart) pieChart = echarts.init(el)
   const agg = {}
   for (const t of recent.value) {
     const k = t.category || '未分类'
@@ -213,20 +225,21 @@ const renderPie = () => {
   if (!data.length) {
     pieChart.clear()
     pieChart.setOption({ title: { text: '暂无数据', left: 'center', top: 'middle',
-      textStyle: { color: '#999', fontSize: 13, fontWeight: 400 } } })
+      textStyle: { color: chartEmptyColor(), fontSize: 13, fontWeight: 400 } } })
     return
   }
   pieChart.setOption({
     tooltip: { trigger: 'item', formatter: '{b}: {c} 条 ({d}%)' },
-    legend: { bottom: 0, icon: 'circle', itemWidth: 8, itemHeight: 8, textStyle: { fontSize: 12 } },
+    legend: { bottom: 0, icon: 'circle', itemWidth: 8, itemHeight: 8,
+              textStyle: { fontSize: 12, color: chartTextColor() } },
     series: [{
       type: 'pie', radius: ['48%', '70%'], center: ['50%', '44%'],
-      itemStyle: { borderRadius: 6, borderColor: '#fff', borderWidth: 2 },
+      itemStyle: { borderRadius: 6, borderColor: chartCardBorder(), borderWidth: 2 },
       label: { show: false },
       data,
       color: ['#2f6bff', '#5d8bff', '#22c1dc', '#f59e0b', '#ef4444', '#8b5cf6', '#10b981'],
     }],
-  })
+  }, true)
 }
 
 // 115 空间环形图（与分类占比同款圆环风格；颜色按占用率：<70 蓝 / 70~90 黄 / ≥90 红）
@@ -237,8 +250,9 @@ const spaceRatioLabel = computed(() => {
   return r >= 90 ? '空间告急' : r >= 70 ? '空间较满' : '空间充足'
 })
 const renderSpace = () => {
-  if (!spaceRef.value || !space.value.total) return
-  if (!spaceChart) spaceChart = echarts.init(spaceRef.value)
+  const el = spaceRef.value
+  if (!el || !chartSizeOk(el) || !space.value.total) return // 尺寸未就绪或无数据：等 ResizeObserver
+  if (!spaceChart) spaceChart = echarts.init(el)
   const used = space.value.ratio || 0
   spaceChart.setOption({
     tooltip: { trigger: 'item', formatter: `{d}% 已使用（${fmtSize(space.value.use)} / ${fmtSize(space.value.total)}）` },
@@ -246,22 +260,25 @@ const renderSpace = () => {
       text: `${used}%`, subtext: '已使用',
       left: 'center', top: '36%',
       textStyle: { fontSize: 24, fontWeight: 700, color: spaceColor.value },
-      subtextStyle: { fontSize: 12, color: '#999' },
+      subtextStyle: { fontSize: 12, color: chartEmptyColor() },
     },
     series: [{
       type: 'pie', radius: ['62%', '80%'], center: ['50%', '48%'],
       startAngle: 90, silent: false, label: { show: false },
-      itemStyle: { borderRadius: 8, borderColor: '#fff', borderWidth: 2 },
+      itemStyle: { borderRadius: 8, borderColor: chartCardBorder(), borderWidth: 2 },
       data: [
         { value: used, itemStyle: { color: spaceColor.value } },
-        { value: Math.max(100 - used, 0), itemStyle: { color: '#e9eefb' } },
+        { value: Math.max(100 - used, 0), itemStyle: { color: chartTrackColor() } },
       ],
     }],
-  })
+  }, true)
 }
 
 let timer = null
 let tick = 0
+let ro = null
+let roTimer = null
+let themeObs = null
 onMounted(() => {
   load(true)
   connectWs()
@@ -271,12 +288,25 @@ onMounted(() => {
     load(tick % 6 === 0)
   }, 10000)
   window.addEventListener('resize', onResize)
+  // ResizeObserver：容器尺寸从 0 变为可用（或任何尺寸变化）时自动重画 —— 空白修复的关键
+  ro = new ResizeObserver(() => {
+    clearTimeout(roTimer)
+    roTimer = setTimeout(() => { renderPie(); renderSpace() }, 100) // 防抖，避免拖拽窗口时频繁重画
+  })
+  if (pieRef.value) ro.observe(pieRef.value)
+  if (spaceRef.value) ro.observe(spaceRef.value)
+  // 主题切换（html.dark 类变化）时用新配色重画图表
+  themeObs = new MutationObserver(() => { renderPie(); renderSpace() })
+  themeObs.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] })
 })
 onUnmounted(() => {
   disposed = true
   clearInterval(timer)
   clearTimeout(wsTimer)
+  clearTimeout(roTimer)
   window.removeEventListener('resize', onResize)
+  if (ro) ro.disconnect()
+  if (themeObs) themeObs.disconnect()
   if (ws) ws.onclose = null
   if (ws) ws.close()
   if (pieChart) pieChart.dispose()

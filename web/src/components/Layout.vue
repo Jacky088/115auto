@@ -54,27 +54,30 @@
         <el-button class="menu-btn" text @click="menuOpen = true">
           <el-icon :size="20"><Fold /></el-icon>
         </el-button>
-        <div class="header-title">
-          {{ title }}
-          <el-tag v-if="sysRunning" type="success" size="small" effect="dark" class="run-tag">运行中</el-tag>
-          <el-tag v-else-if="sysReady" type="warning" size="small" effect="dark" class="run-tag">待启动</el-tag>
-          <el-tag v-else type="info" size="small" effect="dark" class="run-tag">未就绪</el-tag>
+        <div class="header-left">
+          <div class="header-title">
+            {{ title }}
+            <el-tag v-if="sysRunning" type="success" size="small" effect="dark" class="run-tag">运行中</el-tag>
+            <el-tag v-else-if="sysReady" type="warning" size="small" effect="dark" class="run-tag">待启动</el-tag>
+            <el-tag v-else type="info" size="small" effect="dark" class="run-tag">未就绪</el-tag>
+          </div>
+          <el-tooltip :disabled="sysRunning || sysReady" placement="bottom"
+                      :content="sysReasons.length ? '无法开始运行：' + sysReasons.join('；') : ''">
+            <span class="start-wrap">
+              <el-button v-if="!sysRunning" type="primary" class="start-btn"
+                         :disabled="!sysReady" :loading="toggling" @click="startSystem">开始运行</el-button>
+              <el-button v-else type="danger" plain class="start-btn"
+                         :loading="toggling" @click="stopSystem">停止</el-button>
+            </span>
+          </el-tooltip>
         </div>
-        <el-tooltip :disabled="sysRunning || sysReady" placement="bottom"
-                    :content="sysReasons.length ? '无法开始运行：' + sysReasons.join('；') : ''">
-          <span class="start-wrap">
-            <el-button v-if="!sysRunning" type="primary" class="start-btn"
-                       :disabled="!sysReady" :loading="toggling" @click="startSystem">开始运行</el-button>
-            <el-button v-else type="danger" plain class="start-btn"
-                       :loading="toggling" @click="stopSystem">停止</el-button>
-          </span>
-        </el-tooltip>
-        <el-tooltip :content="isDark ? '切换到浅色模式' : '切换到深色模式'" placement="bottom">
-          <el-button text class="theme-btn" @click="toggleTheme">
-            <el-icon :size="17"><Sunny v-if="isDark" /><Moon v-else /></el-icon>
-          </el-button>
-        </el-tooltip>
-        <el-dropdown @command="onCommand">
+        <div class="header-right">
+          <el-tooltip :content="isDark ? '切换到浅色模式' : '切换到深色模式'" placement="bottom">
+            <el-button text class="theme-btn" @click="toggleTheme">
+              <el-icon :size="17"><Sunny v-if="isDark" /><Moon v-else /></el-icon>
+            </el-button>
+          </el-tooltip>
+          <el-dropdown @command="onCommand">
           <div class="user-chip">
             <div class="avatar">{{ (username || 'A').slice(0, 1).toUpperCase() }}</div>
             <span class="user-name">{{ username || 'admin' }}</span>
@@ -86,7 +89,8 @@
               <el-dropdown-item command="logout" divided>退出登录</el-dropdown-item>
             </el-dropdown-menu>
           </template>
-        </el-dropdown>
+          </el-dropdown>
+        </div>
       </el-header>
       <el-alert v-if="cookieExpired" type="error" :closable="false" show-icon
                 title="115 Cookie 已失效，转存已暂停 —— 请前往「账号管理」重新扫码登录"
@@ -321,21 +325,23 @@ const changePwd = async () => {
   color: rgba(174, 189, 223, .45); font-size: 11px; text-align: center; padding: 14px 0;
 }
 .aside-ver { margin-top: 3px; letter-spacing: .5px; }
-.theme-btn { padding: 8px; color: #44506b; }
+.theme-btn { padding: 8px; color: var(--saas-text-main); }
 .header {
-  display: flex; align-items: center; justify-content: space-between; gap: 8px;
-  background: #fff; border-bottom: 1px solid var(--saas-line); padding: 0 12px;
+  display: flex; align-items: center; gap: 8px;
+  background: var(--saas-card); border-bottom: 1px solid var(--saas-line); padding: 0 12px;
 }
-.header-title { font-weight: 600; font-size: 15px; color: var(--saas-text-main); flex: 1; }
+.header-left { flex: 1; display: flex; align-items: center; gap: 10px; min-width: 0; }
+.header-right { display: flex; align-items: center; gap: 6px; flex: none; }
+.header-title { font-weight: 600; font-size: 15px; color: var(--saas-text-main); flex: none; }
 .user-chip { display: flex; align-items: center; gap: 8px; cursor: pointer; padding: 4px 6px; border-radius: 8px; }
-.user-chip:hover { background: #f4f7fe; }
+.user-chip:hover { background: var(--saas-hover, #f4f7fe); }
 .avatar {
   width: 30px; height: 30px; border-radius: 50%;
   background: linear-gradient(135deg, #2f6bff, #5d8bff);
   color: #fff; display: flex; align-items: center; justify-content: center;
   font-size: 13px; font-weight: 600;
 }
-.user-name { color: #44506b; font-size: 13px; }
+.user-name { color: var(--saas-text-main); font-size: 13px; }
 .menu-btn { display: none; padding: 6px; }
 .run-tag { margin-left: 8px; vertical-align: 1px; }
 .start-wrap { display: inline-flex; flex: none; }

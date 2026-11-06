@@ -321,6 +321,10 @@ html.dark {
   --el-fill-color: #182338;
   --el-fill-color-light: #1c2740;
   --el-fill-color-lighter: #182338;
+  /* 补齐剩余中性变量：输入框/分页底色、文字按钮悬停走深蓝系而非中性灰黑 */
+  --el-fill-color-blank: #131b2e;
+  --el-fill-color-dark: #243154;
+  --el-fill-color-darker: #2a3757;
 }
 html.dark body { background: var(--saas-bg); }
 html.dark .el-card__header { border-bottom-color: var(--saas-line); }
@@ -353,6 +357,46 @@ html.dark .dp-row:hover { background: #1c2740; }
 html.dark .dp-row.active { background: var(--el-color-primary-light-9); }
 html.dark ::-webkit-scrollbar-thumb { background: #2a3757; }
 html.dark ::-webkit-scrollbar-thumb:hover { background: #3b4c75; }
+
+/* 灰色辅助文字（各页 scoped 的 .tip/.sep 等，浅色下为 #999/#909399）：深色下统一为偏蓝灰 */
+html.dark .tip, html.dark .sep, html.dark .page-tip, html.dark .hit-title,
+html.dark .dp-sep, html.dark .dp-empty, html.dark .dp-picked,
+html.dark .ci-tip, html.dark .ub-hint, html.dark .ch-type-tip,
+html.dark .tg-ch-sub, html.dark .ub-ch-title { color: #8a97b3; }
+
+/* 历史日志：日期徽标浅色底改为半透明语义色底 + 提亮文字 */
+html.dark .d-badge.err { background: rgba(248, 113, 113, .16); color: #ff9b8f; }
+html.dark .d-badge.warn { background: rgba(251, 191, 36, .16); color: #fbbf24; }
+html.dark .d-badge.okdot { background: #3b5aa0; }
+html.dark .d-warn-text { color: #fbbf24; }
+html.dark .d-err-text { color: #ff9b8f; }
+
+/* 频道健康状态文字：深色下提亮保证可读 */
+html.dark .health-ok { color: #4ade80; }
+html.dark .health-bad { color: #ff9b8f; }
+
+/* 文件管理：面包屑分隔符/文件名/已选计数（浅色下写死深色文字，深色下不可读） */
+html.dark .crumb-sep { color: #4a5c85; }
+html.dark .file-text { color: #b7c4de; }
+html.dark .selected-count { color: #8a97b3; }
+
+/* 规则测试器：命中摘要正文色 */
+html.dark .hit-summary { color: #b7c4de; }
+
+/* 初始化向导：步骤说明/提示/就绪清单文字 */
+html.dark .step-desc, html.dark .ub-wizard-tip { color: #8a97b3; }
+html.dark .ready-item { color: #b7c4de; }
+
+/* Cookie 导入弹窗：步骤说明与代码高亮底 */
+html.dark .ci-steps { color: #b7c4de; }
+html.dark .ci-steps code { background: #1c2740; color: #b7c4de; }
+
+/* 目录选择器弹窗：面包屑条/边框/行分隔线/单选圈 */
+html.dark .dp-crumbs { background: #1c2740; }
+html.dark .dp-crumb.current { color: #e6ebf7; }
+html.dark .dp-list { border-color: #222c44; }
+html.dark .dp-row { border-bottom-color: #1c2740; }
+html.dark .dp-radio { border-color: #4c5b7d; }
 
 /* 超窄屏（<=480px）：进一步压缩 */
 @media (max-width: 480px) {
