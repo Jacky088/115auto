@@ -1085,8 +1085,8 @@ finally:
 print("\n=== 29. TG Bot 新指令（/quota /sub /ls /space）===")
 from backend.worker import bot_commands as bc  # noqa: E402
 
-check("/quota 设置限额", "20" in bc._handle_command("/quota 20", "x"))
-check("限额已落库", db.get_setting("daily_limit") == 20, str(db.get_setting("daily_limit")))
+check("/quota 已移除", "不再支持" in bc._handle_command("/quota 20", "x"))
+check("限额保持默认", db.get_setting("daily_limit") == 50, str(db.get_setting("daily_limit")))
 check("/sub 搜索提示", "搜索" in bc._handle_command("/sub 权力的游戏", "x")
       and "点选" in bc._handle_command("/sub 权力的游戏", "x"))
 _sub_list_out = bc._handle_command("/sub", "x")

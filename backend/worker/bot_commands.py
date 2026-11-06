@@ -30,8 +30,7 @@ HELP = (
     "/space — 查看 115 剩余空间\n"
     "/ls — 最近 5 条转存记录\n"
     "/menu — 快捷操作菜单（按钮面板）\n"
-    "/add <频道> — 添加监控频道\n"
-    "/quota <数量> — 设置每日转存限额\n"
+    "/add <频道> on|off — 添加监控频道（on=开启仅订阅，off=全盘转存，必填）\n"
     "/sub — 查看订阅；/sub <片名> 搜索 TMDB 点选订阅；/sub del <关键词> 删除\n"
     "/pause — 暂停转存（停止消费队列）\n"
     "/resume — 恢复转存\n"
@@ -45,8 +44,7 @@ BOT_MENU_COMMANDS = [
     {"command": "space", "description": "115 剩余空间"},
     {"command": "ls", "description": "最近 5 条转存记录"},
     {"command": "menu", "description": "快捷操作菜单（按钮面板）"},
-    {"command": "add", "description": "添加监控频道：/add @频道"},
-    {"command": "quota", "description": "设置每日限额：/quota 30"},
+    {"command": "add", "description": "添加频道：/add @频道 on|off"},
     {"command": "sub", "description": "追剧订阅：查看/添加/删除"},
     {"command": "pause", "description": "暂停转存"},
     {"command": "resume", "description": "恢复转存"},
@@ -125,14 +123,12 @@ def _handle_command(text: str, chat_id: str) -> str:
     if cmd == "/add":
         # 真正的添加流程由 bot_command_loop 的异步分支执行（需 await 频道校验），
         # 同步路径仅做用法提示兜底
-        return "用法：/add <频道名或链接>\n例如：/add @somechannel"
+        return ("用法：/add <频道名或链接> on|off\n"
+                "· on  = 开启「仅订阅」（只转存命中订阅关键词的内容）\n"
+                "· off = 关闭（全盘转存）\n"
+                "例如：/add @somechannel on")
     if cmd == "/quota":
-        if not args or not args[0].lstrip("-").isdigit():
-            return "用法：/quota <数量>（0 = 不限制，每日转存限额）"
-        n = max(0, min(int(args[0]), 10000))
-        db.set_setting("daily_limit", n)
-        logstream.info("transfer", f"已通过 TG 指令设置每日限额 {n}（/quota）")
-        return f"📈 每日限额已设为 {n}" + ("（不限制）" if n == 0 else "")
+        return ("每日限额请在网页「系统设置」中调整（默认 50），Bot 不再支持 /quota 设置")
     if cmd == "/sub":
         return _handle_sub(args)
     if cmd in ("/pause", "/resume"):
@@ -211,17 +207,29 @@ def _handle_callback(data: str) -> tuple[str, dict]:
     return "未知操作", _menu_keyboard()
 
 
-async def add_channel_flow(name: str) -> str:
-    """/add 指令的完整流程：解析名称 → 可访问性校验 → 入库。与网页添加同一套校验。"""
+async def add_channel_flow(raw: str) -> str:
+    """/add 指令完整流程：语法 /add <频道名或链接> on|off（on=开启仅订阅，off=全盘转存）。
+
+    语法必须完整：缺 on/off 或写别的值都添加失败，并返回正确用法。
+    """
     import re as _re
+    tokens = str(raw or "").split()
+    if len(tokens) != 2 or tokens[1].lower() not in ("on", "off"):
+        return ("用法：/add <频道名或链接> on|off\n"
+                "· on  = 开启「仅订阅」（只转存命中订阅关键词的内容）\n"
+                "· off = 关闭（全盘转存）\n"
+                "例如：/add @somechannel on")
+    name, mode = tokens[0], tokens[1].lower()
     m = _re.search(r"t\.me/(?:s/)?@?([0-9A-Za-z_]+)", name)
     name = (m.group(1) if m else name).lstrip("@").strip()
     if not name:
-        return "频道名不能为空。用法：/add <频道名或链接>"
+        return ("用法：/add <频道名或链接> on|off\n"
+                "· on  = 开启「仅订阅」（只转存命中订阅关键词的内容）\n"
+                "· off = 关闭（全盘转存）")
     if len(name) > 64:
         return "频道名过长（最多 64 字符）"
     if db.query("SELECT 1 FROM channels WHERE type='polling' AND name=?", (name,), one=True):
-        return f"频道 @{name} 已存在"
+        return f"频道 @{name} 已存在。订阅模式可在网页「频道管理」按频道开关"
     n = db.query("SELECT count(*) c FROM channels", one=True)["c"]
     if n >= 50:
         return "监控频道已达上限 50 个，请先清理不需要的频道"
@@ -230,12 +238,15 @@ async def add_channel_flow(name: str) -> str:
     if not res.get("ok"):
         return f"无法添加 @{name}：{res.get('err') or '频道不可访问，请核对后重试'}"
     title = str(res.get("title") or "")
-    from ..core import subscribe as _submod  # 新频道继承全局订阅模式，之后可在网页按频道调整
+    sub_only = 1 if mode == "on" else 0
     db.execute("INSERT INTO channels(type,name,sub_only,created_at) VALUES('polling',?,?,?)",
-               (name, 1 if _submod.subscription_only() else 0, time.time()))
+               (name, sub_only, time.time()))
+    mode_txt = "仅订阅（只转存命中订阅的内容）" if sub_only else "全盘转存"
     logstream.info("channels",
-                   f"已通过 TG 指令添加监控频道 @{name}（{title}，已通过访问校验）")
-    return f"✅ 已添加频道 @{name}（{title}），下一轮轮询开始抓取"
+                   f"已通过 TG 指令添加监控频道 @{name}（{title}，订阅模式：{'开' if sub_only else '关'}，已通过访问校验）")
+    return (f"✅ 已添加频道 @{name}（{title}）\n"
+            f"🛎 订阅模式：{'🟢 ' + mode_txt if sub_only else mode_txt}\n"
+            "下一轮轮询开始抓取；之后可在网页「频道管理」调整该开关")
 
 
 def _handle_sub(args: list[str]) -> str:
@@ -494,7 +505,8 @@ async def bot_command_loop():
                             if text.lower().startswith("/add"):
                                 # /add 需要异步做频道可访问性校验，单独处理
                                 reply = await add_channel_flow(text.split(None, 1)[1]) \
-                                    if len(text.split(None, 1)) > 1 else "用法：/add <频道名或链接>"
+                                    if len(text.split(None, 1)) > 1 \
+                                    else "用法：/add <频道名或链接> on|off（on=开启仅订阅，off=全盘转存）"
                             elif text.lower().startswith("/sub"):
                                 # /sub <片名>（非 del）：搜索订阅流程（异步 + 海报上传）
                                 parts = text.split()
