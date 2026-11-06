@@ -375,7 +375,8 @@ async def queue_worker():
                 continue
             schedule_logged = False
 
-            limit = int(_num_setting("daily_limit", 50))
+            # 旧库可能存过 0（旧的「不限制」语义）：现约定限额最小 1，兜底夹紧
+            limit = max(1, int(_num_setting("daily_limit", 50)))
             if limit > 0 and db.quota_today() >= limit:
                 waiting = db.query("SELECT count(*) c FROM transfers WHERE status='queued'", one=True)["c"]
                 logstream.warn("transfer",

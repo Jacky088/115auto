@@ -36,40 +36,61 @@ def _notify_tg(message: str) -> bool:
 
 
 def _notify_bark(message: str) -> bool:
-    """Bark（iOS）推送。bark_url 形如 https://api.day.app/你的key。失败静默。"""
+    """Bark（iOS）推送。bark_url 形如 https://api.day.app/你的key（支持自建域名）。
+
+    GET {base}/{content}?group=115：group 参数让通知在 Bark App 里归入「115」分组，
+    便于与其他 App 推送区分。失败静默。
+    """
     base = str(db.get_setting("bark_url", "") or "").strip().rstrip("/")
     if not base:
         return False
     try:
         from urllib.parse import quote
-        resp = httpx.get(f"{base}/{quote(message[:400])}", timeout=10)
+        resp = httpx.get(f"{base}/{quote(message[:400])}",
+                         params={"group": "115"}, timeout=10)
         return resp.status_code == 200
     except Exception:
         return False
 
 
 def _notify_pushplus(message: str) -> bool:
-    """PushPlus（微信推送）。失败静默。"""
+    """PushPlus（微信推送）。pushplus_token 必填；pushplus_topic 可选（一对多群发）。
+
+    留空 topic 时发给扫码关注的本人；填写群组编码后发给该群全部关注者。
+    失败静默。
+    """
     token = str(db.get_setting("pushplus_token", "") or "").strip()
     if not token:
         return False
+    payload = {"token": token, "title": message.splitlines()[0][:60],
+               "content": message, "template": "txt"}
+    topic = str(db.get_setting("pushplus_topic", "") or "").strip()
+    if topic:
+        payload["topic"] = topic
     try:
-        resp = httpx.post("https://www.pushplus.plus/send",
-                          json={"token": token, "title": message.splitlines()[0][:60],
-                                "content": message, "template": "txt"}, timeout=10)
+        resp = httpx.post("https://www.pushplus.plus/send", json=payload, timeout=10)
         return resp.status_code == 200
     except Exception:
         return False
 
 
 def _notify_ntfy(message: str) -> bool:
-    """ntfy.sh Webhook 推送。ntfy_url 为完整主题 URL。失败静默。"""
+    """ntfy Webhook 推送。ntfy_url 为完整主题 URL（官方或自建均可）。
+
+    ntfy_token 可选：自建 ntfy 开启访问控制时填「密码/token」，
+    经 Authorization: Bearer 传递（官方 ntfy.sh 若主题带 -token 后缀也可）。
+    失败静默。
+    """
     url = str(db.get_setting("ntfy_url", "") or "").strip()
     if not url:
         return False
+    headers = {"Title": "115 自动转存", "Tags": "floppy_disk"}
+    tok = str(db.get_setting("ntfy_token", "") or "").strip()
+    if tok:
+        headers["Authorization"] = f"Bearer {tok}"
     try:
         resp = httpx.post(url, content=message.encode()[:4000],
-                          headers={"Title": "115 自动转存", "Tags": "floppy_disk"}, timeout=10)
+                          headers=headers, timeout=10)
         return resp.status_code in (200, 202)
     except Exception:
         return False
@@ -77,13 +98,49 @@ def _notify_ntfy(message: str) -> bool:
 
 def notify(message: str) -> bool:
     """向所有已配置的通知渠道推送，任一成功即返回 True。失败静默，不影响主流程。"""
-    ok = False
-    for fn in (_notify_tg, _notify_bark, _notify_pushplus, _notify_ntfy):
+    return any(notify_detail(message).values())
+
+
+# 各渠道单发函数：test_channel 与 notify_detail 共用
+CHANNEL_FNS = {
+    "tg": _notify_tg,
+    "bark": _notify_bark,
+    "pushplus": _notify_pushplus,
+    "ntfy": _notify_ntfy,
+}
+
+# 渠道未配置时的提示文案（前端测试按钮直接展示，帮助用户补配置）
+CHANNEL_EMPTY_HINT = {
+    "tg": "未配置 TG Bot Token / Chat ID（「通知」区）",
+    "bark": "未填写 Bark 推送 URL（形如 https://api.day.app/你的key）",
+    "pushplus": "未填写 PushPlus Token",
+    "ntfy": "未填写 ntfy 主题 URL（形如 https://ntfy.sh/你的主题）",
+}
+
+
+def notify_detail(message: str) -> dict[str, bool]:
+    """向所有已配置渠道推送，返回每个渠道的成功情况（用于日志与摘要重试判断）。"""
+    out: dict[str, bool] = {}
+    for ch, fn in CHANNEL_FNS.items():
         try:
-            ok = fn(message) or ok
+            out[ch] = bool(fn(message))
         except Exception:
-            pass
-    return ok
+            out[ch] = False
+    return out
+
+
+def test_channel(channel: str) -> tuple[bool, str]:
+    """向指定渠道发送一条测试消息，返回 (是否成功, 说明)。供设置页「测试」按钮调用。"""
+    fn = CHANNEL_FNS.get(channel)
+    if fn is None:
+        return False, f"未知通知渠道: {channel}"
+    try:
+        if fn("🔔 115 自动转存测试通知\n收到这条消息说明该通知渠道配置正确。"):
+            return True, "测试消息已发送，请到对应 App 查看"
+        # 失败：区分「未配置」和「配置了但发送失败」
+        return False, CHANNEL_EMPTY_HINT.get(channel, "发送失败：请检查该渠道配置（URL/Token 是否完整、服务器网络是否可达）")
+    except Exception as e:
+        return False, f"发送异常：{e}"
 
 
 def test_proxy(proxy: str) -> tuple[bool, str]:
@@ -477,20 +534,31 @@ def _digest_text() -> str:
 
 
 async def digest_loop():
-    """每日摘要：每天在设定时间推送一次运行汇总（默认 21:00，可关）。"""
+    """每日摘要：每天在设定时间推送一次运行汇总（默认 21:00，可关）。
+
+    只有至少一个渠道发送成功才标记 digest_last_sent，失败时下轮（10 分钟后）
+    自动重试，避免一次网络抖动导致当天摘要永久丢失。
+    """
     while True:
         try:
-            if db.get_setting("digest_enabled", True) and notify:
+            if db.get_setting("digest_enabled", True):
                 today = time.strftime("%Y-%m-%d")
                 target = str(db.get_setting("digest_time", "21:00") or "21:00")
                 now_hm = time.strftime("%H:%M")
                 last = str(db.get_setting("digest_last_sent", "") or "")
                 if last != today and now_hm >= target:
-                    # 当天到点后第一次轮询触发；跨天由 digest_last_sent 去重
                     text = _digest_text()
-                    await asyncio.to_thread(notify, text)
-                    db.set_setting("digest_last_sent", today)
-                    logstream.info("system", "已推送每日摘要通知")
+                    detail = await asyncio.to_thread(notify_detail, text)
+                    if any(detail.values()):
+                        db.set_setting("digest_last_sent", today)
+                        logstream.info("system", "已推送每日摘要通知")
+                    else:
+                        # 全部渠道失败：记 warn 便于排查（未配置 Token/网络不通等），
+                        # 不标记已发送，10 分钟后自动重试
+                        logstream.warn("system",
+                                       "每日摘要推送失败：所有通知渠道都未成功。"
+                                       "请检查「通知」区是否已配置 TG Bot Token / Chat ID，"
+                                       "或其他渠道配置是否正确（10 分钟后自动重试）")
         except Exception as e:
             logstream.error("system", f"每日摘要推送失败: {logstream.exc(e)}")
         await asyncio.sleep(600)

@@ -138,14 +138,13 @@ DEFAULT_SETTINGS = {
     "dedup_by_name": True,            # 转存前检查目标目录已有同名内容，命中判重跳过
     "organize_enabled": False,        # 转存后把剧集文件归入 Season N 子目录
     # ---- TMDB 刮削 ----
-    "tmdb_enabled": False,
-    "tmdb_api_key": "",
-    "tmdb_language": "zh-CN",
-    "tmdb_subdir": True,              # 刮削成功后在分类目录下建「名称 (年份)」子目录
+    "tmdb_api_key": "",               # TMDB API Key（订阅页搜索/分类浏览用，刮削功能已移除）
     # ---- 通知渠道 ----
     "bark_url": "",                   # Bark 推送（https://api.day.app/你的key）
     "pushplus_token": "",             # PushPlus token
+    "pushplus_topic": "",             # PushPlus 群组编码（可选，一对多群发用，留空发本人）
     "ntfy_url": "",                   # ntfy 主题完整 URL（https://ntfy.sh/你的主题）
+    "ntfy_token": "",                 # ntfy 访问令牌（可选，自建开启访问控制时填）
     # ---- 定时任务 ----
     "digest_enabled": True,           # 每日摘要通知
     "digest_time": "21:00",

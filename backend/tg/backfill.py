@@ -46,7 +46,7 @@ async def _fetch_before(client: httpx.AsyncClient, name: str, before: int) -> li
 def _daily_backfill_budget() -> int:
     """每轮补漏的消息处理上限：与每日转存限额挂钩（限额的 2 倍，最低 40）。"""
     try:
-        limit = int(db.get_setting("daily_limit", 50))
+        limit = max(1, int(db.get_setting("daily_limit", 50)))
     except Exception:
         limit = 50
     return max(40, limit * 2)

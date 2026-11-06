@@ -38,10 +38,10 @@
 
           <el-form-item v-if="f.tg_mode !== 'userbot'" label="轮询间隔（秒）">
             <div class="range-row">
-              <el-input-number v-model="f.poll_interval_min" :min="10" controls-position="right" />
+              <el-input-number v-model="f.poll_interval_min" :min="15" :max="3600" controls-position="right" />
               <span class="sep">~</span>
-              <el-input-number v-model="f.poll_interval_max" :min="15" controls-position="right" />
-              <span class="tip">区间内随机，降低被识别风险；仅作用于网页轮询频道</span>
+              <el-input-number v-model="f.poll_interval_max" :min="15" :max="3600" controls-position="right" />
+              <span class="tip">15~3600；区间内随机，降低被识别风险；仅作用于网页轮询频道</span>
             </div>
           </el-form-item>
 
@@ -72,15 +72,16 @@
           <div class="section-card"><div class="section-title">转存控制</div>
           <el-form-item label="转存间隔（秒）">
             <div class="range-row">
-              <el-input-number v-model="f.transfer_interval_min" :min="5" controls-position="right" />
+              <el-input-number v-model="f.transfer_interval_min" :min="30" :max="1800" controls-position="right" />
               <span class="sep">~</span>
-              <el-input-number v-model="f.transfer_interval_max" :min="10" controls-position="right" />
+              <el-input-number v-model="f.transfer_interval_max" :min="30" :max="1800" controls-position="right" />
+              <span class="tip">30~1800；按 115 风控要求下限 30 秒，过快会触发风控</span>
             </div>
           </el-form-item>
           <el-form-item label="每日转存上限">
             <div class="range-row">
-              <el-input-number v-model="f.daily_limit" :min="0" controls-position="right" />
-              <span class="tip">0 表示不限制</span>
+              <el-input-number v-model="f.daily_limit" :min="1" :max="50" controls-position="right" />
+              <span class="tip">1~50；115 单账号每日转存安全上限，不建议拉满</span>
             </div>
           </el-form-item>
           <el-form-item label="分享体积下限">
@@ -89,10 +90,13 @@
               <span class="tip">GB，低于此值的分享视为广告自动跳过；0 表示关闭</span>
             </div>
           </el-form-item>
-          <el-form-item label="重试退避（秒）">
+          <el-form-item label="失败重试">
             <div class="range-row">
-              <el-input v-model="retryText" placeholder="60, 300, 1800" style="width: 220px" />
-              <span class="tip">逗号分隔，失败后逐级延长重试间隔</span>
+              <el-select v-model="retryPreset" style="width: 220px">
+                <el-option v-for="p in RETRY_PRESETS" :key="p.label"
+                           :label="p.label" :value="p.label" />
+              </el-select>
+              <span class="tip">失败后按预设间隔逐级重试（共 3 次）</span>
             </div>
           </el-form-item>
           <el-form-item label="定时计划">
@@ -120,7 +124,8 @@
             </div>
           </el-form-item>
           <el-form-item label="TG Bot Token">
-            <el-input v-model="f.notify_token" placeholder="从 @BotFather 获取" />
+            <el-input v-model="f.notify_token" type="password" show-password
+                      placeholder="从 @BotFather 获取" />
           </el-form-item>
           <el-form-item label="Chat ID">
             <div class="range-row">
@@ -149,39 +154,53 @@
           </el-form-item>
           </div>
 
-          <div class="section-card"><div class="section-title">TMDB 刮削</div>
-          <el-form-item label="TMDB 刮削">
-            <div class="switch-row">
-              <el-switch v-model="f.tmdb_enabled" />
-              <span class="tip">开启后自动从 TMDB 获取剧集/电影元数据与海报，配合「自动整理」使用</span>
-            </div>
-          </el-form-item>
-          <el-form-item label="TMDB API Key">
-            <el-input v-model="f.tmdb_api_key" placeholder="在 themoviedb.org 免费申请的 API Key（v3）" />
-            <div class="tip" style="width: 100%">国内直连可能不稳定；已配置「TG 代理」时刮削流量同样走代理</div>
-          </el-form-item>
-          <el-form-item label="刮削语言">
-            <el-input v-model="f.tmdb_language" placeholder="zh-CN" style="width: 180px" />
-          </el-form-item>
-          <el-form-item label="元数据子目录">
-            <div class="switch-row">
-              <el-switch v-model="f.tmdb_subdir" />
-              <span class="tip">开启后将海报/NFO 等刮削产物放入媒体目录内的独立子目录</span>
-            </div>
-          </el-form-item>
-          </div>
-
           <div class="section-card"><div class="section-title">通知渠道扩展</div>
-          <el-form-item label="Bark">
-            <el-input v-model="f.bark_url" placeholder="https://api.day.app/你的key" />
-            <div class="tip" style="width: 100%">iOS Bark 推送，形如 <code>https://api.day.app/你的key</code></div>
+          <el-form-item label="Bark（iOS）">
+            <div class="range-row" style="width: 100%">
+              <el-input v-model="f.bark_url" type="password" show-password
+                        placeholder="https://api.day.app/你的key" />
+              <el-button :loading="chTesting === 'bark'" @click="testChannel('bark')">发送测试</el-button>
+            </div>
+            <div class="tip" style="width: 100%">
+              iOS Bark 推送：App Store 安装 Bark 后，复制 App 内显示的完整推送 URL
+              （形如 <code>https://api.day.app/你的key</code>，自建服务器换域名即可）
+            </div>
           </el-form-item>
           <el-form-item label="PushPlus">
-            <el-input v-model="f.pushplus_token" placeholder="pushplus.plus 的 Token" />
+            <div class="range-row" style="width: 100%">
+              <el-input v-model="f.pushplus_token" type="password" show-password
+                        placeholder="pushplus.plus 的 Token" />
+              <el-button :loading="chTesting === 'pushplus'" @click="testChannel('pushplus')">发送测试</el-button>
+            </div>
+            <div class="tip" style="width: 100%">
+              微信推送：官网 pushplus.plus 微信扫码登录后复制 Token。默认发给本人微信；
+              需一对多群发时在下方填群组编码（可选）
+            </div>
+          </el-form-item>
+          <el-form-item v-if="f.pushplus_token || f.pushplus_topic" label="PushPlus 群组">
+            <el-input v-model="f.pushplus_topic" placeholder="群组编码（可选，留空发本人）" />
+            <div class="tip" style="width: 100%">
+              一对多推送：在 pushplus.plus「一对一推送 → 群组管理」创建群组后填其编码；
+              关注该群的用户都会收到
+            </div>
           </el-form-item>
           <el-form-item label="ntfy">
-            <el-input v-model="f.ntfy_url" placeholder="https://ntfy.sh/你的主题" />
-            <div class="tip" style="width: 100%">完整的 ntfy 主题 URL，如 <code>https://ntfy.sh/my-115-topic</code></div>
+            <div class="range-row" style="width: 100%">
+              <el-input v-model="f.ntfy_url" placeholder="https://ntfy.sh/你的主题" />
+              <el-button :loading="chTesting === 'ntfy'" @click="testChannel('ntfy')">发送测试</el-button>
+            </div>
+            <div class="tip" style="width: 100%">
+              完整的 ntfy 主题 URL，如 <code>https://ntfy.sh/my-115-topic</code>（自建服务器换域名）；
+              手机装 ntfy App 订阅同一主题即可收推送。主题名建议加随机后缀防止被他人订阅
+            </div>
+          </el-form-item>
+          <el-form-item v-if="f.ntfy_url" label="ntfy 访问令牌">
+            <el-input v-model="f.ntfy_token" type="password" show-password
+                      placeholder="可选：自建 ntfy 开启访问控制时填" />
+            <div class="tip" style="width: 100%">
+              仅自建 ntfy 且开启鉴权时需要（ntfy 后台创建的 Token 或账号密码）；
+              官方 ntfy.sh 公开主题留空即可
+            </div>
           </el-form-item>
           </div>
 
@@ -216,7 +235,8 @@
           <div class="section-card"><div class="section-title">对外 API</div>
           <el-form-item label="API Token">
             <div class="range-row" style="width: 100%">
-              <el-input v-model="f.api_token" placeholder="留空关闭对外 API" clearable />
+              <el-input v-model="f.api_token" type="password" show-password
+                        placeholder="留空关闭对外 API" clearable />
               <el-button @click="genToken">生成随机 Token</el-button>
             </div>
             <div class="tip" style="width: 100%">
@@ -245,8 +265,15 @@ import { useUnsavedGuard } from '../composables/unsavedGuard'
 
 const f = ref({})
 const loaded = ref(false)
-const retryText = ref('')
+// 失败重试只提供预设档位（不开放自定义秒数，避免误配过密触发风控）
+const RETRY_PRESETS = [
+  { label: '快速（30秒/2分/10分）', sec: [30, 120, 600] },
+  { label: '标准（1分/5分/30分）', sec: [60, 300, 1800] },
+  { label: '稳健（5分/30分/2小时）', sec: [300, 1800, 7200] },
+]
+const retryPreset = ref('标准（1分/5分/30分）')
 const testing = ref(false)
+const chTesting = ref('') // 正在测试的通知渠道（bark/pushplus/ntfy）
 const dirty = ref(false)
 const isMobile = ref(window.innerWidth <= 768)
 const onRz = () => { isMobile.value = window.innerWidth <= 768 }
@@ -268,14 +295,17 @@ const tgModeTip = computed(() => ({
   both: '当前模式：两者——按每个频道自身的接入方式分流处理，互不影响',
 }[f.value.tg_mode] || ''))
 
-watch([f, retryText], () => {
+watch([f, retryPreset], () => {
   if (!suppressWatch) dirty.value = true
 }, { deep: true })
 
 const load = async () => {
   suppressWatch = true
   f.value = (await api.get('/api/settings')).data
-  retryText.value = (f.value.retry_backoff || []).join(', ')
+  // 回填重试预设：与已存间隔数组一致的档位；对不上时回落到标准档（保存时生效）
+  const cur = f.value.retry_backoff || []
+  const hit = RETRY_PRESETS.find((p) => p.sec.length === cur.length && p.sec.every((n, i) => n === cur[i]))
+  retryPreset.value = (hit || RETRY_PRESETS[1]).label
   if (f.value.tg_mode && f.value.tg_mode !== 'polling') loadUb()
   loaded.value = true
   await nextTick()
@@ -283,11 +313,7 @@ const load = async () => {
   dirty.value = false
 }
 const save = async () => {
-  const backoff = retryText.value.split(',').map((s) => parseInt(s.trim())).filter((n) => n > 0)
-  if (!backoff.length) {
-    ElMessage.error('重试退避至少需要填写一个大于 0 的秒数，例如 60, 300, 1800')
-    return
-  }
+  const backoff = (RETRY_PRESETS.find((p) => p.label === retryPreset.value) || RETRY_PRESETS[1]).sec
   try {
     await api.put('/api/settings', { ...f.value, retry_backoff: backoff })
     dirty.value = false
@@ -328,6 +354,18 @@ const testNotify = async () => {
     ElMessage.error(errMsg(e))
   } finally {
     testing.value = false
+  }
+}
+// 扩展渠道测试：用已保存的配置向指定渠道发一条测试消息（需先保存设置）
+const testChannel = async (ch) => {
+  chTesting.value = ch
+  try {
+    const { data } = await api.post(`/api/settings/notify/test/${ch}`)
+    saveOk(`✅ ${data.detail || '测试消息已发送'}`, '请打开对应 App（Bark / 微信 / ntfy）确认收到')
+  } catch (e) {
+    ElMessage.error(errMsg(e))
+  } finally {
+    chTesting.value = ''
   }
 }
 // 生成随机对外 API Token（32 位十六进制），点击「保存设置」后才落库生效

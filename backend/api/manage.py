@@ -944,18 +944,20 @@ def cancel_transfer(t_id: int, _=Depends(require_user)):
 
 # ---------- settings ----------
 _INT_SETTINGS = {
-    "poll_interval_min": (1, 3600),
-    "poll_interval_max": (1, 3600),
-    "transfer_interval_min": (1, 3600),
-    "transfer_interval_max": (1, 3600),
-    "daily_limit": (0, 10000),
+    # 轮询/转存间隔下限按风控保守值设定：115 转存类操作过快会触发风控，
+    # TG 网页轮询过快也易被限流，因此分别限制在 15/30 秒以上
+    "poll_interval_min": (15, 3600),
+    "poll_interval_max": (15, 3600),
+    "transfer_interval_min": (30, 1800),
+    "transfer_interval_max": (30, 1800),
+    # 115 单账号每日转存安全上限：1~50（0 不再表示「不限制」）
+    "daily_limit": (1, 50),
     "tg_api_id": (0, 2 ** 31 - 1),
     "auto_backup_days": (1, 365),
 }
 _BOOL_SETTINGS = {"enable_share_transfer", "enable_offline_download",
                   "notify_transfer_success", "schedule_enabled",
                   "subscription_only", "dedup_by_name", "organize_enabled",
-                  "tmdb_enabled", "tmdb_subdir",
                   "digest_enabled", "auto_backup_enabled"}
 
 
@@ -992,8 +994,9 @@ def _norm_setting(k: str, v):
                 n = int(float(item))
             except (TypeError, ValueError):
                 raise HTTPException(400, "重试退避只能包含数字（秒）")
-            if n < 1:
-                raise HTTPException(400, "重试退避的秒数必须大于 0")
+            # 重试间隔下限 30 秒（前端只提供预设档位，此处兜底防过密重试触发风控）
+            if n < 30:
+                raise HTTPException(400, "重试退避的秒数不能小于 30（避免过密重试触发风控）")
             vals.append(min(n, 86400))
         return vals[:10]
     if k in ("schedule_start", "schedule_end", "digest_time"):
@@ -1023,8 +1026,8 @@ def get_settings(_=Depends(require_user)):
             "schedule_enabled", "schedule_start", "schedule_end",
             "tg_api_id", "tg_api_hash", "tg_phone",
             "subscription_only", "dedup_by_name", "organize_enabled",
-            "tmdb_enabled", "tmdb_api_key", "tmdb_language", "tmdb_subdir",
-            "bark_url", "pushplus_token", "ntfy_url",
+            "tmdb_api_key",
+            "bark_url", "pushplus_token", "pushplus_topic", "ntfy_url", "ntfy_token",
             "digest_enabled", "digest_time",
             "auto_backup_enabled", "auto_backup_days",
             "api_token"]
@@ -1041,8 +1044,8 @@ def put_settings(body: dict, _=Depends(require_user)):
                "schedule_enabled", "schedule_start", "schedule_end",
                "tg_api_id", "tg_api_hash", "tg_phone",
                "subscription_only", "dedup_by_name", "organize_enabled",
-               "tmdb_enabled", "tmdb_api_key", "tmdb_language", "tmdb_subdir",
-               "bark_url", "pushplus_token", "ntfy_url",
+               "tmdb_api_key",
+               "bark_url", "pushplus_token", "pushplus_topic", "ntfy_url", "ntfy_token",
                "digest_enabled", "digest_time",
                "auto_backup_enabled", "auto_backup_days",
                "api_token"}
@@ -1080,6 +1083,18 @@ def test_notify(body: dict = None, _=Depends(require_user)):
     if not ok:
         raise HTTPException(400, detail)
     return {"ok": True}
+
+
+@router.post("/settings/notify/test/{channel}")
+def test_channel(channel: str, _=Depends(require_user)):
+    """按渠道发送测试通知（bark / pushplus / ntfy），用已保存的配置。
+
+    返回 ok + 说明；失败时说明里含未配置提示或失败原因，前端直接展示。
+    """
+    ok, detail = jobs.test_channel(channel)
+    if not ok:
+        raise HTTPException(400, detail)
+    return {"ok": True, "detail": detail}
 
 
 # ---------- logs ----------

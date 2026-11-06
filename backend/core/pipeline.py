@@ -2,7 +2,7 @@
 import time
 
 from .. import database as db
-from ..core import classifier, extractor, filters, logstream, subscribe, tmdb
+from ..core import classifier, extractor, filters, logstream, subscribe
 
 # 进程内提示标记：每频道只提示一次"无链接"说明，避免刷屏
 _runtime_flags: dict[str, bool] = {}
@@ -81,33 +81,15 @@ def process_message(channel: str, message_id: int, text: str, bypass: bool = Fal
         result["sub_skipped"] = True
         return result
 
-    # 4.6 TMDB 刮削（可选）：标题规范成「官方名 (年份)」，通知与目录子目录都用它
-    official = None
-    if category and tmdb.enabled():
-        try:
-            official = tmdb.display_name(display_title, category)
-        except Exception:
-            official = None
-        if official:
-            display_title = official
-
-    # 刮削成功且开启子目录开关时，把「名称 (年份)」追加为分类目录下的子目录
-    # （媒体库目录形如 /媒体库/电视剧/漫长的季节 (2023)/，Emby/Jellyfin 识别率更高）
-    subdir_suffix = ""
-    if official and db.get_setting("tmdb_subdir", True):
-        subdir_suffix = official.replace("/", " ").replace("\\", " ").strip()
-
     for link in links:
         code = link["share_code"]
         kind = link.get("kind", "share")
 
-        # 按链接类型路由目录（分享/云下载可分别指定），TMDB 子目录仅对真实目录生效
+        # 按链接类型路由目录（分享/云下载可分别指定）
         target = classifier.resolve_target(category, kind=kind) if category else ""
         if not category:
             action = db.get_setting("unclassified_action", "skip")
             target = "" if action == "skip" else str(action)
-        if target and target != "skip" and subdir_suffix:
-            target = target.rstrip("/") + "/" + subdir_suffix
 
         # 5. 分享码去重：已排队/处理中/已成功的不重复入队；
         #    被跳过的重复链接也落一条 duplicate 记录，便于追溯来源频道与时间

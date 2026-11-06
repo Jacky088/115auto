@@ -19,7 +19,8 @@
           <el-input v-model="form.api_id" placeholder="my.telegram.org 获取（纯数字）" />
         </el-form-item>
         <el-form-item label="API Hash">
-          <el-input v-model="form.api_hash" placeholder="my.telegram.org 获取" />
+          <el-input v-model="form.api_hash" type="password" show-password
+                    placeholder="my.telegram.org 获取" />
         </el-form-item>
         <el-form-item label="手机号">
           <el-input v-model="form.phone" placeholder="+8613800138000（建议小号）" />

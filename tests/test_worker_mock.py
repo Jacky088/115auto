@@ -1058,29 +1058,13 @@ try:
 finally:
     db.set_setting("subscription_only", False)
 
-print("\n=== 28. TMDB 子目录（刮削命中 → 目标目录追加「名称 (年份)」）===")
-from backend.core import tmdb as tmdb_mod  # noqa: E402
-
-_orig_tmdb_enabled, _orig_tmdb_display = tmdb_mod.enabled, tmdb_mod.display_name
-try:
-    tmdb_mod.enabled = lambda: True
-    tmdb_mod.display_name = lambda title, category: "某某电影 (2023)"
-    r = pipeline.process_message("test_ch", int(time.time() * 1000) % 10**9,
-                                 f"某某电影.2023.1080p https://115.com/s/tmdb001?password=ab12")
-    row = dict(db.query("SELECT * FROM transfers WHERE share_code='tmdb001'", one=True))
-    check("刮削命中 → 标题规范为官方名", row["title"] == "某某电影 (2023)", row["title"])
-    check("目标目录追加官方名子目录", row["target_dir"].endswith("/某某电影 (2023)"),
-          row["target_dir"])
-    # 关闭子目录开关 → 目录不含后缀
-    db.set_setting("tmdb_subdir", False)
-    r = pipeline.process_message("test_ch", int(time.time() * 1000) % 10**9,
-                                 f"某某电影.2023.1080p https://115.com/s/tmdb002?password=ab12")
-    row = dict(db.query("SELECT * FROM transfers WHERE share_code='tmdb002'", one=True))
-    check("关闭开关 → 目录不含子目录", "/某某电影 (2023)" not in row["target_dir"],
-          row["target_dir"])
-finally:
-    tmdb_mod.enabled, tmdb_mod.display_name = _orig_tmdb_enabled, _orig_tmdb_display
-    db.set_setting("tmdb_subdir", True)
+print("\n=== 28. （已移除）TMDB 刮削 → 确认模块删除后转存不受影响 ===")
+r = pipeline.process_message("test_ch", int(time.time() * 1000) % 10**9,
+                             f"某某电影.2023.1080p https://115.com/s/tmdb001?password=ab12")
+row = dict(db.query("SELECT * FROM transfers WHERE share_code='tmdb001'", one=True))
+check("无刮削：标题保留原始解析结果", "某某电影" in row["title"], row["title"])
+check("无刮削：目标目录为分类目录", row["target_dir"] and "(2023)" not in row["target_dir"],
+      row["target_dir"])
 
 print("\n=== 29. TG Bot 新指令（/quota /sub /ls /space）===")
 from backend.worker import bot_commands as bc  # noqa: E402
