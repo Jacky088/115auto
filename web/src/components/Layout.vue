@@ -12,6 +12,7 @@
           <el-menu-item index="/dashboard"><el-icon><Odometer /></el-icon>仪表盘</el-menu-item>
           <el-menu-item index="/files"><el-icon><FolderOpened /></el-icon>网盘文件</el-menu-item>
           <el-menu-item index="/channels"><el-icon><Connection /></el-icon>频道管理</el-menu-item>
+          <el-menu-item index="/subscriptions"><el-icon><VideoPlay /></el-icon>订阅追剧</el-menu-item>
           <el-menu-item index="/dirs"><el-icon><Collection /></el-icon>转存目录</el-menu-item>
           <el-menu-item index="/match"><el-icon><Sort /></el-icon>匹配规则</el-menu-item>
           <el-menu-item index="/transfers"><el-icon><List /></el-icon>转存记录</el-menu-item>
@@ -19,7 +20,10 @@
           <el-menu-item index="/account"><el-icon><User /></el-icon>账号管理</el-menu-item>
           <el-menu-item index="/settings"><el-icon><Setting /></el-icon>系统设置</el-menu-item>
         </el-menu>
-        <div class="aside-footer">Telegram → 115 自动化</div>
+        <div class="aside-footer">
+          <div>Telegram → 115 自动化</div>
+          <div v-if="version" class="aside-ver">v{{ version }}</div>
+        </div>
       </div>
     </el-drawer>
     <!-- 桌面端侧边栏 -->
@@ -32,6 +36,7 @@
         <el-menu-item index="/dashboard"><el-icon><Odometer /></el-icon>仪表盘</el-menu-item>
         <el-menu-item index="/files"><el-icon><FolderOpened /></el-icon>网盘文件</el-menu-item>
         <el-menu-item index="/channels"><el-icon><Connection /></el-icon>频道管理</el-menu-item>
+        <el-menu-item index="/subscriptions"><el-icon><VideoPlay /></el-icon>订阅追剧</el-menu-item>
         <el-menu-item index="/dirs"><el-icon><Collection /></el-icon>转存目录</el-menu-item>
         <el-menu-item index="/match"><el-icon><Sort /></el-icon>匹配规则</el-menu-item>
         <el-menu-item index="/transfers"><el-icon><List /></el-icon>转存记录</el-menu-item>
@@ -39,7 +44,10 @@
         <el-menu-item index="/account"><el-icon><User /></el-icon>账号管理</el-menu-item>
         <el-menu-item index="/settings"><el-icon><Setting /></el-icon>系统设置</el-menu-item>
       </el-menu>
-      <div class="aside-footer">Telegram → 115 自动化</div>
+      <div class="aside-footer">
+        <div>Telegram → 115 自动化</div>
+        <div v-if="version" class="aside-ver">v{{ version }}</div>
+      </div>
     </el-aside>
     <el-container>
       <el-header height="52px" class="header">
@@ -60,6 +68,11 @@
             <el-button v-else type="danger" plain class="start-btn"
                        :loading="toggling" @click="stopSystem">停止</el-button>
           </span>
+        </el-tooltip>
+        <el-tooltip :content="isDark ? '切换到浅色模式' : '切换到深色模式'" placement="bottom">
+          <el-button text class="theme-btn" @click="toggleTheme">
+            <el-icon :size="17"><Sunny v-if="isDark" /><Moon v-else /></el-icon>
+          </el-button>
         </el-tooltip>
         <el-dropdown @command="onCommand">
           <div class="user-chip">
@@ -135,7 +148,8 @@ import { api, errMsg, saveOk } from '../api'
 
 const route = useRoute()
 const router = useRouter()
-const titles = { dashboard: '仪表盘', files: '网盘文件', channels: '频道管理', dirs: '转存目录', match: '匹配规则',
+const titles = { dashboard: '仪表盘', files: '网盘文件', channels: '频道管理', subscriptions: '订阅追剧',
+                 dirs: '转存目录', match: '匹配规则',
                  transfers: '转存记录', history: '日志查询',
                  account: '账号管理', settings: '系统设置', setup: '初始化向导' }
 const title = computed(() => titles[route.path.slice(1)] || '')
@@ -191,6 +205,21 @@ const check = async () => {
     cookieExpired.value = data.cookie_ok === false && data.completed
   } catch { /* ignore */ }
 }
+
+// ---- 深色模式：偏好存 localStorage('theme')，初始类已在 main.js 挂载前应用 ----
+const isDark = ref(localStorage.getItem('theme') === 'dark')
+const toggleTheme = () => {
+  isDark.value = !isDark.value
+  document.documentElement.classList.toggle('dark', isDark.value)
+  localStorage.setItem('theme', isDark.value ? 'dark' : 'light')
+}
+
+// ---- 版本号：取免登录的 /api/health，失败静默不显示 ----
+const version = ref('')
+const loadVersion = async () => {
+  try { version.value = (await api.get('/api/health')).data.version || '' } catch { /* ignore */ }
+}
+
 // 定时刷新系统状态/ cookie 状态：随组件销毁一起清理，避免退出登录后定时器累积
 let sysTimer = null
 let cookieTimer = null
@@ -198,6 +227,7 @@ onMounted(() => {
   loadSys()
   check()
   loadUsername()
+  loadVersion()
   sysTimer = setInterval(loadSys, 10000)
   cookieTimer = setInterval(check, 60000)
 })
@@ -290,6 +320,8 @@ const changePwd = async () => {
 .aside-footer {
   color: rgba(174, 189, 223, .45); font-size: 11px; text-align: center; padding: 14px 0;
 }
+.aside-ver { margin-top: 3px; letter-spacing: .5px; }
+.theme-btn { padding: 8px; color: #44506b; }
 .header {
   display: flex; align-items: center; justify-content: space-between; gap: 8px;
   background: #fff; border-bottom: 1px solid var(--saas-line); padding: 0 12px;

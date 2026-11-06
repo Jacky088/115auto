@@ -64,7 +64,48 @@ def _interval() -> float:
     lo = _num_setting("transfer_interval_min", 30)
     hi = _num_setting("transfer_interval_max", 90)
     lo, hi = max(lo, 1.0), max(hi, 1.0)  # 至少 1 秒，避免忙轮询
-    return random.uniform(lo, max(hi, lo))
+    # 115 风控自适应：出现风控征兆错误时按档位放大间隔（1→2→3→5→8 倍）
+    return random.uniform(lo, max(hi, lo)) * pan.pace_factor()
+
+
+def _space_preflight(total_size: int) -> bool:
+    """空间预检：115 剩余空间不足时跳过任务并告警（转存前拦截，而不是失败后被动发现）。
+
+    返回 True = 空间足够（或无法判定，放行）；False = 明显不足，任务打 skipped。
+    """
+    if total_size <= 0:
+        return True
+    try:
+        sp = pan.space_info()
+    except Exception:
+        return True  # 容量接口失败不阻塞转存
+    free = sp.get("free", 0)
+    if free and total_size > free:
+        jobs.notify_failure("share", "空间不足", "", "", "",
+                            retry_info=f"💡 115 剩余空间不足（剩 {_fmt_gb(free)}，"
+                                       f"本次需 {_fmt_gb(total_size)}），任务已保留为跳过状态，"
+                                       "清理空间后可手动重试")
+        return False
+    return True
+
+
+def _fmt_gb(b: int) -> str:
+    return f"{b / (1 << 30):.2f}GB"
+
+
+def _dedup_by_name(target: str, title: str) -> str:
+    """同名去重：目标目录（或其下的「名称 (年份)」子目录）已存在时返回原因，否则空串。"""
+    if not db.get_setting("dedup_by_name", True):
+        return ""
+    try:
+        names = pan.list_file_names(pan.mkdirs(target), limit=500)
+    except Exception:
+        return ""  # 检查失败不阻塞转存
+    # 目标目录里直接有同名条目
+    for n in names:
+        if n == title or n.startswith(title):
+            return f"目标目录已存在「{n}」（同名去重），如需强制转存请在转存记录中关闭该开关后重试"
+    return ""
 
 
 def _process_one(job: dict):
@@ -96,7 +137,7 @@ def _process_one(job: dict):
 
     # ---- 分享转存任务 ----
     snap = pan.share_snap_all(code, rc)
-    # 名称优先取频道消息里的标题（如「塔尔萨之王 (2022)」），分享内的文件夹名（如 Season 04）仅兜底
+    # 名称优先取频道消息里的标题（已可能是 TMDB 官方名），分享内的文件夹名仅兜底
     title = (classifier.headline(job["title"]) or snap["title"] or job["title"][:100] or code)
 
     # 1.5 分享内没有任何文件（空目录/链接空壳）：无法转存，直接跳过而不是反复重试
@@ -105,6 +146,25 @@ def _process_one(job: dict):
         db.execute("UPDATE transfers SET status='skipped', title=?, error=? WHERE id=?",
                    (title, reason, job["id"]))
         logstream.warn("transfer", f"分享 {code} 跳过：{reason}")
+        return
+
+    # 1.6 空间预检：115 剩余空间不足时跳过（转存前拦截）
+    if not _space_preflight(snap["total_size"]):
+        db.execute("UPDATE transfers SET status='skipped', title=?, size=?, file_count=?, "
+                   "error=? WHERE id=?",
+                   (title, snap["total_size"], len(snap["files"]),
+                    f"115 空间不足（需 {_fmt_gb(snap['total_size'])}）", job["id"]))
+        logstream.warn("transfer",
+                       f"分享 {code} 跳过：115 剩余空间不足"
+                       f"（需 {_fmt_gb(snap['total_size'])}），任务保留为跳过状态")
+        return
+
+    # 1.7 同名去重（可关）：目标目录已有同名内容时不重复占空间
+    dedup_reason = _dedup_by_name(target, title) if target else ""
+    if dedup_reason:
+        db.execute("UPDATE transfers SET status='duplicate', title=?, size=?, error=? WHERE id=?",
+                   (title, snap["total_size"], dedup_reason, job["id"]))
+        logstream.info("transfer", f"分享 {code} 跳过：{dedup_reason}")
         return
 
     # 2. 内容黑名单：文件名 + 体积（放行任务跳过）
@@ -159,12 +219,21 @@ def _process_one(job: dict):
                "finished_at=? WHERE id=?",
                (title, snap["total_size"], file_total, time.time(), job["id"]))
     db.quota_incr()
+    pan.note_115_ok()  # 完整成功：风控退避逐级恢复
     logstream.info("transfer",
                    f"转存成功: {title[:50]} → {target}（{file_total} 个文件, "
                    f"{snap['total_size'] / (1 << 30):.2f} GB）")
     jobs.notify_transfer(title, job.get("category", ""), job.get("channel", ""),
                          target, size=snap["total_size"], kind="share",
                          file_count=file_total)
+    # 6. 转存后整理（可选）：把剧集文件按季归入 Season N 子目录
+    if db.get_setting("organize_enabled", False) and top_ids:
+        try:
+            moved = pan.organize_seasons(cid)
+            if moved:
+                logstream.info("transfer", f"已整理 {moved} 个文件到 Season 子目录（{target}）")
+        except Exception as e:
+            logstream.warn("transfer", f"转存后整理失败（不影响转存结果）: {e}")
 
 
 def _verify_receive(cid: int, snap: dict) -> bool:
@@ -355,6 +424,7 @@ async def queue_worker():
                 db.execute("UPDATE transfers SET status='failed', attempts=?, error=? WHERE id=?",
                            (job["attempts"] + 1, str(e)[:500], job["id"]))
                 logstream.error("transfer", f"任务永久失败: {str(e)}")
+                pan.note_115_error(str(e))
                 jobs.notify_failure(job.get("kind", "share"),
                                     classifier.headline(job.get("title", "")) or job.get("title", ""),
                                     job.get("category", ""), job.get("channel", ""),
@@ -362,6 +432,7 @@ async def queue_worker():
                 consecutive_fails = 0  # 任务自身问题不计入熔断
             except Exception as e:
                 consecutive_fails += 1
+                pan.note_115_error(str(e))
                 _fail(job, str(e))
                 if consecutive_fails >= 5:
                     logstream.error("transfer", "连续失败 5 次，暂停转存 30 分钟")

@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from . import auth, config, database as db
-from .api import account, files, manage, ws
+from .api import account, ext, files, manage, ws
 from .core import logstream
 from .tg import polling, userbot
 from .worker import bot_commands, jobs, queue_worker
@@ -38,6 +38,8 @@ async def lifespan(app: FastAPI):
     _background.append(asyncio.create_task(jobs.health_check_loop()))
     _background.append(asyncio.create_task(jobs.log_cleanup_loop()))
     _background.append(asyncio.create_task(jobs.offline_check_loop()))
+    _background.append(asyncio.create_task(jobs.digest_loop()))
+    _background.append(asyncio.create_task(jobs.auto_backup_loop()))
     _background.append(asyncio.create_task(bot_commands.bot_command_loop()))
     yield
     # 优雅停机：先取消后台任务并等待退出，再断开 Userbot —— 保证 Telethon session
@@ -55,6 +57,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="115 自动转存助手", lifespan=lifespan)
 app.include_router(manage.router)
+app.include_router(ext.router)
 app.include_router(account.router)
 app.include_router(files.router)
 app.include_router(ws.router)
@@ -62,7 +65,7 @@ app.include_router(ws.router)
 
 @app.get("/api/health")
 def health():
-    return {"ok": True}
+    return {"ok": True, "version": config.APP_VERSION}
 
 
 # 前端静态文件（Docker 构建 / 本地 npm run build 后存在）

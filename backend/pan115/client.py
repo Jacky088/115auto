@@ -4,6 +4,7 @@
 """
 import io
 import json
+import re
 import threading
 import time
 
@@ -15,6 +16,37 @@ from ..core import logstream
 
 _lock = threading.Lock()
 _client = None  # P115Client 单例（懒加载）
+
+# ---- 115 风控自适应限速 ----
+# 连续出现风控征兆错误时放大转存间隔（1→2→3→5→8 倍），成功若干次后逐级恢复。
+# 转存节奏由 queue_worker 读取 pace_factor() 应用。
+_risk_lock = threading.Lock()
+_consec_risk = 0
+_RISK_KEYWORDS = ("频繁", "风控", "验证码", "IP登录异常", "too many", "limit", "405")
+_PACE_STEPS = (1, 2, 3, 5, 8)
+
+
+def note_115_error(err: str):
+    """转存相关接口报错后调用：命中风控征兆词则升级退避档位。"""
+    global _consec_risk
+    s = (err or "").lower()
+    with _risk_lock:
+        if any(k in s for k in _RISK_KEYWORDS):
+            _consec_risk = min(_consec_risk + 1, len(_PACE_STEPS) - 1)
+
+
+def note_115_ok():
+    """一次完整成功后调用：逐级恢复到正常节奏。"""
+    global _consec_risk
+    with _risk_lock:
+        if _consec_risk > 0:
+            _consec_risk -= 1
+
+
+def pace_factor() -> int:
+    """当前应使用的间隔倍数（1 = 正常）。"""
+    with _risk_lock:
+        return _PACE_STEPS[_consec_risk]
 
 # 登录态/容量查询缓存：后台仪表盘与文件浏览会频繁调用，避免每次都打 115 接口
 _cache_lock = threading.Lock()
@@ -501,6 +533,78 @@ def task_list_all(max_pages: int = 5) -> list[dict]:
             break
         time.sleep(0.5)
     return out
+
+
+def list_entries(cid: int, limit: int = 2000) -> list[dict]:
+    """列出目录内全部条目 [{id, name, is_dir}]（整理/去重用，需要 id 而不只是名字）。"""
+    client = _get_client()
+    out: list[dict] = []
+    offset = 0
+    while offset < limit:
+        resp = client.fs_files({"cid": cid, "limit": min(500, limit - offset),
+                                "offset": offset, "o": "user_ptime", "asc": 0,
+                                "show_dir": 1})
+        if not resp.get("state"):
+            raise Pan115Error(f"列目录失败: {str(resp)[:200]}")
+        data = resp.get("data") or []
+        for f in data:
+            if not isinstance(f, dict):
+                continue
+            name = _file_name(f)
+            if not name:
+                continue
+            out.append({"id": _file_id(f), "name": name, "is_dir": _is_dir_item(f)})
+        if not data:
+            break
+        offset += len(data)
+        if offset < limit:
+            time.sleep(0.4)
+    return out
+
+
+_EP_SEASON_RE = re.compile(r"[Ss](\d{1,2})[\s._-]*[Ee]\d{1,3}")
+_EP_CN_RE = re.compile(r"第\s?(\d{1,3})\s?[集话話]")
+
+
+def organize_seasons(cid: int, min_files: int = 2) -> int:
+    """把目录下的剧集文件按季归入「Season N」子目录，返回移动的文件数。
+
+    - 只处理带集数标识（S01E01 / 第1集）的文件；第N集默认按第 1 季
+    - 单季少于 min_files 个文件时不建目录（避免为两三集碎片建一堆空壳）
+    - 目录已存在时复用
+    """
+    client = _get_client()
+    entries = list_entries(cid)
+    groups: dict[int, list[dict]] = {}
+    for e in entries:
+        if e["is_dir"]:
+            continue
+        m = _EP_SEASON_RE.search(e["name"]) or _EP_CN_RE.search(e["name"])
+        if not m:
+            continue
+        season = 1 if _EP_CN_RE.fullmatch(m.group(0).strip()) else max(int(m.group(1)), 1)
+        groups.setdefault(season, []).append(e)
+    moved = 0
+    for season, items in sorted(groups.items()):
+        if len(items) < min_files:
+            continue
+        sname = f"Season {season}"
+        target = next((e for e in entries if e["is_dir"] and e["name"] == sname), None)
+        if target is None:
+            resp = client.fs_mkdir({"cname": sname, "pid": cid})
+            if not resp.get("state"):
+                raise Pan115Error(f"创建 {sname} 失败: {str(resp)[:200]}")
+            data = resp.get("data", {}) or {}
+            new_id = _to_int(data.get("file_id") or data.get("cid") or resp.get("cid"), 0)
+            if not new_id:
+                new_id = _list_dir(cid).get(sname, 0)
+            target = {"id": str(new_id), "name": sname, "is_dir": True}
+            entries.append(target)
+            time.sleep(0.5)
+        client.fs_move([str(i["id"]) for i in items], pid=int(str(target["id"])))
+        moved += len(items)
+        time.sleep(0.5)
+    return moved
 
 
 def list_file_names(cid: int, limit: int = 500) -> set[str]:

@@ -957,12 +957,16 @@ def _record_receive(code, rc, cid, ids):
 
 pan.share_snap_all, pan.mkdirs, pan.receive = _folder_snap, lambda p: 12345, _record_receive
 pan.list_file_names = lambda cid, limit=500: {"传奇办公室 (2015)"}
+# 本用例关注整包转存链路本身；mock 的 list_file_names 会与「同名去重」检查撞车，
+# 这里临时关闭该开关（同名去重已有独立用例覆盖）
+db.set_setting("dedup_by_name", False)
 try:
     job = mkjob("folder001")
     queue_worker._process_one(job)
 finally:
     pan.share_snap_all, pan.mkdirs, pan.receive = _orig_snap_all2, _orig_mkdirs2, _orig_receive2
     pan.list_file_names = _orig_list_names
+    db.set_setting("dedup_by_name", True)
 row = dict(db.query("SELECT * FROM transfers WHERE id=?", (job["id"],), one=True))
 check("提交的是顶层文件夹 id 而非上百个子文件 id", _received_ids.get("ids") == ["900001"],
       str(_received_ids.get("ids")))
@@ -1002,6 +1006,132 @@ check("转存请求不带 is_check（该参数会变成只校验、不落地文�
 check("转存请求带目标目录 cid 与文件 id",
       _captured.get("cid") == 12345 and _captured.get("file_id") == "900001", str(_captured))
 check("转存请求带 user_id", _captured.get("user_id") == 777, str(_captured))
+
+print("\n=== 25. 空间预检（剩余空间不足 → 转存前跳过）===")
+_orig_snap_all3, _orig_mkdirs3, _orig_receive3 = pan.share_snap_all, pan.mkdirs, pan.receive
+_orig_space_info, _orig_list_names3 = pan.space_info, pan.list_file_names
+try:
+    pan.share_snap_all, pan.mkdirs, pan.receive = fake_share_snap_all, fake_mkdirs, fake_receive
+    pan.space_info = lambda force=False: {"use": 99 << 30, "total": 100 << 30,
+                                          "free": 1 << 30, "ratio": 99}
+    pan.list_file_names = lambda cid, limit=500: set()
+    _old_total = FakePan.total_size
+    FakePan.total_size = 5 << 30  # 前面用例把快照体积改成过 1GB，这里确保明显大于剩余空间
+    job = mkjob("space001")
+    queue_worker._process_one(job)
+    row = dict(db.query("SELECT * FROM transfers WHERE id=?", (job["id"],), one=True))
+    check("空间不足 → 状态 skipped（不是 failed）", row["status"] == "skipped", row["status"])
+    check("错误原因标注空间不足", "空间不足" in (row["error"] or ""), row["error"])
+    check("体积已记录（来自分享快照）", row["size"] == 5 * (1 << 30), str(row["size"]))
+
+    print("\n=== 26. 同名去重（目标目录已有同名内容 → duplicate）===")
+    db.set_setting("dedup_by_name", True)
+    pan.space_info = lambda force=False: {"use": 1 << 30, "total": 100 << 30,
+                                          "free": 99 << 30, "ratio": 1}
+    pan.list_file_names = lambda cid, limit=500: {"测试资源合集"}
+    job = mkjob("same001")
+    queue_worker._process_one(job)
+    row = dict(db.query("SELECT * FROM transfers WHERE id=?", (job["id"],), one=True))
+    check("同名命中 → 状态 duplicate", row["status"] == "duplicate", row["status"])
+    check("错误原因标注同名去重", "同名去重" in (row["error"] or ""), row["error"])
+finally:
+    FakePan.total_size = _old_total
+    pan.share_snap_all, pan.mkdirs, pan.receive = _orig_snap_all3, _orig_mkdirs3, _orig_receive3
+    pan.space_info, pan.list_file_names = _orig_space_info, _orig_list_names3
+    db.set_setting("dedup_by_name", True)
+
+print("\n=== 27. 订阅追剧（订阅模式过滤 + 进度记录）===")
+from backend.core import subscribe as sub_mod  # noqa: E402
+
+db.set_setting("subscription_only", True)
+db.execute("INSERT OR IGNORE INTO subscriptions(keyword,created_at) VALUES('某某电影',?)",
+           (time.time(),))
+try:
+    r = pipeline.process_message("test_ch", int(time.time() * 1000) % 10**9,
+                                 f"别的剧集分享 https://115.com/s/sub0000?password=ab12")
+    check("订阅模式下未命中 → 不入队", r.get("sub_skipped") is True and r["queued"] == 0, str(r))
+    r = pipeline.process_message("test_ch", int(time.time() * 1000) % 10**9,
+                                 f"某某电影.2023.1080p https://115.com/s/sub0001?password=ab12")
+    check("命中订阅 → 正常入队", r["queued"] == 1, str(r))
+    sub_row = dict(db.query("SELECT * FROM subscriptions WHERE keyword='某某电影'", one=True))
+    check("订阅命中时间已记录", sub_row["last_match_at"] is not None, str(sub_row))
+finally:
+    db.set_setting("subscription_only", False)
+
+print("\n=== 28. TMDB 子目录（刮削命中 → 目标目录追加「名称 (年份)」）===")
+from backend.core import tmdb as tmdb_mod  # noqa: E402
+
+_orig_tmdb_enabled, _orig_tmdb_display = tmdb_mod.enabled, tmdb_mod.display_name
+try:
+    tmdb_mod.enabled = lambda: True
+    tmdb_mod.display_name = lambda title, category: "某某电影 (2023)"
+    r = pipeline.process_message("test_ch", int(time.time() * 1000) % 10**9,
+                                 f"某某电影.2023.1080p https://115.com/s/tmdb001?password=ab12")
+    row = dict(db.query("SELECT * FROM transfers WHERE share_code='tmdb001'", one=True))
+    check("刮削命中 → 标题规范为官方名", row["title"] == "某某电影 (2023)", row["title"])
+    check("目标目录追加官方名子目录", row["target_dir"].endswith("/某某电影 (2023)"),
+          row["target_dir"])
+    # 关闭子目录开关 → 目录不含后缀
+    db.set_setting("tmdb_subdir", False)
+    r = pipeline.process_message("test_ch", int(time.time() * 1000) % 10**9,
+                                 f"某某电影.2023.1080p https://115.com/s/tmdb002?password=ab12")
+    row = dict(db.query("SELECT * FROM transfers WHERE share_code='tmdb002'", one=True))
+    check("关闭开关 → 目录不含子目录", "/某某电影 (2023)" not in row["target_dir"],
+          row["target_dir"])
+finally:
+    tmdb_mod.enabled, tmdb_mod.display_name = _orig_tmdb_enabled, _orig_tmdb_display
+    db.set_setting("tmdb_subdir", True)
+
+print("\n=== 29. TG Bot 新指令（/quota /sub /ls /space）===")
+from backend.worker import bot_commands as bc  # noqa: E402
+
+check("/quota 设置限额", "20" in bc._handle_command("/quota 20", "x"))
+check("限额已落库", db.get_setting("daily_limit") == 20, str(db.get_setting("daily_limit")))
+check("/sub 添加", "已添加" in bc._handle_command("/sub 权力的游戏", "x"))
+check("/sub 列表含新订阅", "权力的游戏" in bc._handle_command("/sub", "x"))
+check("/sub 删除", "已删除" in bc._handle_command("/sub del 权力的游戏", "x"))
+check("/ls 列出最近记录", "最近转存" in bc._handle_command("/ls", "x"))
+_orig_space_info2 = pan.space_info
+try:
+    pan.space_info = lambda force=False: {"use": 40 << 30, "total": 100 << 30,
+                                          "free": 60 << 30, "ratio": 40}
+    out = bc._handle_command("/space", "x")
+finally:
+    pan.space_info = _orig_space_info2
+check("/space 返回空间信息", "剩余" in out and "60.0GB" in out, out)
+
+print("\n=== 30. 每日摘要文本 ======")
+from backend.worker import jobs as jobs_mod  # noqa: E402
+
+text = jobs_mod._digest_text()
+check("摘要含成功/失败统计", "每日摘要" in text and "今日成功" in text, text[:80])
+check("摘要含队列", "队列剩余" in text)
+
+print("\n=== 31. 对外 API（token 鉴权 + 入队判重）===")
+from backend.api import ext as ext_mod  # noqa: E402
+from fastapi import HTTPException as _HTTPException  # noqa: E402
+
+db.set_setting("api_token", "secret-token")
+try:
+    ext_mod.require_token(x_api_token="secret-token")  # 不抛即通过
+    check("正确 token 放行", True)
+    try:
+        ext_mod.require_token(x_api_token="wrong")
+        check("错误 token 拒绝", False)
+    except _HTTPException as e:
+        check("错误 token 拒绝", e.status_code == 401, str(e.status_code))
+    r = ext_mod.enqueue_transfer({"share_url": "https://115.com/s/ext0001?password=ab12",
+                                  "title": "外部入队"})
+    check("对外入队成功", r["queued"] is True, str(r))
+    r2 = ext_mod.enqueue_transfer({"share_code": "ext0001"})
+    check("重复入队判重", r2["duplicate"] is True, str(r2))
+    try:
+        ext_mod.enqueue_transfer({"share_url": "https://evil.com/x"})
+        check("非法链接拒绝", False)
+    except _HTTPException as e:
+        check("非法链接拒绝", e.status_code == 400, str(e.status_code))
+finally:
+    db.set_setting("api_token", "")
 
 print(f"\n{'='*40}\n结果: {len(PASS)} 通过, {len(FAIL)} 失败, {len(SKIP)} 跳过（外网不可达）")
 if FAIL:

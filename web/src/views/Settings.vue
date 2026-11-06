@@ -133,6 +133,97 @@
             </div>
           </el-form-item>
           </div>
+
+          <div class="section-card"><div class="section-title">转存增强</div>
+          <el-form-item label="按文件名去重">
+            <div class="switch-row">
+              <el-switch v-model="f.dedup_by_name" />
+              <span class="tip">开启后转存前再按文件名查重：网盘同名目录下已存在同名文件时自动跳过</span>
+            </div>
+          </el-form-item>
+          <el-form-item label="自动整理">
+            <div class="switch-row">
+              <el-switch v-model="f.organize_enabled" />
+              <span class="tip">开启后转存完成自动按「剧名/季/集」结构整理文件并重命名</span>
+            </div>
+          </el-form-item>
+          </div>
+
+          <div class="section-card"><div class="section-title">TMDB 刮削</div>
+          <el-form-item label="TMDB 刮削">
+            <div class="switch-row">
+              <el-switch v-model="f.tmdb_enabled" />
+              <span class="tip">开启后自动从 TMDB 获取剧集/电影元数据与海报，配合「自动整理」使用</span>
+            </div>
+          </el-form-item>
+          <el-form-item label="TMDB API Key">
+            <el-input v-model="f.tmdb_api_key" placeholder="在 themoviedb.org 免费申请的 API Key（v3）" />
+            <div class="tip" style="width: 100%">国内直连可能不稳定；已配置「TG 代理」时刮削流量同样走代理</div>
+          </el-form-item>
+          <el-form-item label="刮削语言">
+            <el-input v-model="f.tmdb_language" placeholder="zh-CN" style="width: 180px" />
+          </el-form-item>
+          <el-form-item label="元数据子目录">
+            <div class="switch-row">
+              <el-switch v-model="f.tmdb_subdir" />
+              <span class="tip">开启后将海报/NFO 等刮削产物放入媒体目录内的独立子目录</span>
+            </div>
+          </el-form-item>
+          </div>
+
+          <div class="section-card"><div class="section-title">通知渠道扩展</div>
+          <el-form-item label="Bark">
+            <el-input v-model="f.bark_url" placeholder="https://api.day.app/你的key" />
+            <div class="tip" style="width: 100%">iOS Bark 推送，形如 <code>https://api.day.app/你的key</code></div>
+          </el-form-item>
+          <el-form-item label="PushPlus">
+            <el-input v-model="f.pushplus_token" placeholder="pushplus.plus 的 Token" />
+          </el-form-item>
+          <el-form-item label="ntfy">
+            <el-input v-model="f.ntfy_url" placeholder="https://ntfy.sh/你的主题" />
+            <div class="tip" style="width: 100%">完整的 ntfy 主题 URL，如 <code>https://ntfy.sh/my-115-topic</code></div>
+          </el-form-item>
+          </div>
+
+          <div class="section-card"><div class="section-title">每日摘要</div>
+          <el-form-item label="每日摘要">
+            <div class="switch-row">
+              <el-switch v-model="f.digest_enabled" />
+              <span class="tip">开启后每天定时把当日转存汇总推送到已配置的通知渠道（TG / Bark / PushPlus / ntfy）</span>
+            </div>
+          </el-form-item>
+          <el-form-item v-if="f.digest_enabled" label="推送时间">
+            <el-time-select v-model="f.digest_time" start="00:00" step="00:30" end="23:30"
+                            placeholder="选择时间" style="width: 130px" />
+          </el-form-item>
+          </div>
+
+          <div class="section-card"><div class="section-title">定时自动备份</div>
+          <el-form-item label="自动备份">
+            <div class="switch-row">
+              <el-switch v-model="f.auto_backup_enabled" />
+              <span class="tip">开启后定时把设置/频道/规则/订阅/转存记录打包推送到 TG Bot，可直接转发回 Bot 恢复</span>
+            </div>
+          </el-form-item>
+          <el-form-item label="备份间隔（天）">
+            <div class="range-row">
+              <el-input-number v-model="f.auto_backup_days" :min="1" :max="365" controls-position="right" />
+              <span class="tip">1-365 天</span>
+            </div>
+          </el-form-item>
+          </div>
+
+          <div class="section-card"><div class="section-title">对外 API</div>
+          <el-form-item label="API Token">
+            <div class="range-row" style="width: 100%">
+              <el-input v-model="f.api_token" placeholder="留空关闭对外 API" clearable />
+              <el-button @click="genToken">生成随机 Token</el-button>
+            </div>
+            <div class="tip" style="width: 100%">
+              留空关闭。开启后调用方携带请求头 <code>X-API-Token</code> 访问 <code>/api/ext/v1/*</code> 接口
+            </div>
+          </el-form-item>
+          </div>
       </div>
 
       <div class="btn-row" style="margin-top: 10px">
@@ -238,6 +329,13 @@ const testNotify = async () => {
   } finally {
     testing.value = false
   }
+}
+// 生成随机对外 API Token（32 位十六进制），点击「保存设置」后才落库生效
+const genToken = () => {
+  const bytes = new Uint8Array(16)
+  crypto.getRandomValues(bytes)
+  f.value.api_token = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
+  ElMessage.success('已生成随机 Token，点击「保存设置」后生效')
 }
 onMounted(load)
 </script>

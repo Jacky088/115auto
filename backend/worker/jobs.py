@@ -18,8 +18,8 @@ def _tg_proxy() -> str | None:
     return str(db.get_setting("proxy", "") or "") or None
 
 
-def notify(message: str) -> bool:
-    """通过 TG Bot 发通知，失败静默（不影响主流程）。"""
+def _notify_tg(message: str) -> bool:
+    """TG Bot 通知。失败静默。"""
     token = db.get_setting("notify_token", "")
     chat_id = db.get_setting("notify_chat_id", "")
     if not token or not chat_id:
@@ -33,6 +33,57 @@ def notify(message: str) -> bool:
         return resp.status_code == 200
     except Exception:
         return False
+
+
+def _notify_bark(message: str) -> bool:
+    """Bark（iOS）推送。bark_url 形如 https://api.day.app/你的key。失败静默。"""
+    base = str(db.get_setting("bark_url", "") or "").strip().rstrip("/")
+    if not base:
+        return False
+    try:
+        from urllib.parse import quote
+        resp = httpx.get(f"{base}/{quote(message[:400])}", timeout=10)
+        return resp.status_code == 200
+    except Exception:
+        return False
+
+
+def _notify_pushplus(message: str) -> bool:
+    """PushPlus（微信推送）。失败静默。"""
+    token = str(db.get_setting("pushplus_token", "") or "").strip()
+    if not token:
+        return False
+    try:
+        resp = httpx.post("https://www.pushplus.plus/send",
+                          json={"token": token, "title": message.splitlines()[0][:60],
+                                "content": message, "template": "txt"}, timeout=10)
+        return resp.status_code == 200
+    except Exception:
+        return False
+
+
+def _notify_ntfy(message: str) -> bool:
+    """ntfy.sh Webhook 推送。ntfy_url 为完整主题 URL。失败静默。"""
+    url = str(db.get_setting("ntfy_url", "") or "").strip()
+    if not url:
+        return False
+    try:
+        resp = httpx.post(url, content=message.encode()[:4000],
+                          headers={"Title": "115 自动转存", "Tags": "floppy_disk"}, timeout=10)
+        return resp.status_code in (200, 202)
+    except Exception:
+        return False
+
+
+def notify(message: str) -> bool:
+    """向所有已配置的通知渠道推送，任一成功即返回 True。失败静默，不影响主流程。"""
+    ok = False
+    for fn in (_notify_tg, _notify_bark, _notify_pushplus, _notify_ntfy):
+        try:
+            ok = fn(message) or ok
+        except Exception:
+            pass
+    return ok
 
 
 def test_proxy(proxy: str) -> tuple[bool, str]:
@@ -391,3 +442,92 @@ def _finish_offline(job: dict, ok: bool, name: str = "", reason: str = ""):
         notify_failure("offline", job["title"], job.get("category", ""),
                        job.get("channel", ""), reason,
                        retry_info="💡 该任务已提交 115 云下载但未成功，请检查链接有效性后重新添加")
+
+
+# ---------- 每日摘要 ----------
+def _digest_text() -> str:
+    """汇总最近 24 小时的运行情况（成功/失败/队列/空间/追剧进度）。"""
+    from datetime import datetime
+    day_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+    rows = db.query("SELECT status, count(*) c FROM transfers WHERE created_at>=? GROUP BY status",
+                    (day_start,))
+    by = {r["status"]: r["c"] for r in rows}
+    queued = db.query("SELECT count(*) c FROM transfers WHERE status='queued'", one=True)["c"]
+    lines = ["📊 每日摘要", "",
+             f"✅ 今日成功：{by.get('success', 0)}",
+             f"❌ 失败/拦截：{by.get('failed', 0) + by.get('blocked', 0)}",
+             f"⏭ 跳过/重复：{by.get('skipped', 0) + by.get('duplicate', 0)}",
+             f"📥 队列剩余：{queued}"]
+    if db.get_setting("cookie_ok", None):
+        try:
+            sp = pan.space_info()
+            gb = lambda b: f"{b / (1 << 30):.1f}GB"
+            lines.append(f"💾 115 空间：已用 {gb(sp['use'])}/{gb(sp['total'])}（{sp['ratio']}%）")
+        except Exception:
+            pass
+    subs = db.query("SELECT keyword, last_ep, last_title FROM subscriptions"
+                    " WHERE enabled=1 AND last_match_at IS NOT NULL ORDER BY last_match_at DESC LIMIT 5")
+    if subs:
+        lines.append("")
+        lines.append("🎬 追剧进度：")
+        for s in subs:
+            ep = f"（{s['last_ep']}）" if s["last_ep"] else ""
+            lines.append(f"  · {s['keyword']}{ep}")
+    return "\n".join(lines)
+
+
+async def digest_loop():
+    """每日摘要：每天在设定时间推送一次运行汇总（默认 21:00，可关）。"""
+    while True:
+        try:
+            if db.get_setting("digest_enabled", True) and notify:
+                today = time.strftime("%Y-%m-%d")
+                target = str(db.get_setting("digest_time", "21:00") or "21:00")
+                now_hm = time.strftime("%H:%M")
+                last = str(db.get_setting("digest_last_sent", "") or "")
+                if last != today and now_hm >= target:
+                    # 当天到点后第一次轮询触发；跨天由 digest_last_sent 去重
+                    text = _digest_text()
+                    await asyncio.to_thread(notify, text)
+                    db.set_setting("digest_last_sent", today)
+                    logstream.info("system", "已推送每日摘要通知")
+        except Exception as e:
+            logstream.error("system", f"每日摘要推送失败: {logstream.exc(e)}")
+        await asyncio.sleep(600)
+
+
+# ---------- 定时自动备份 ----------
+def _backup_json() -> bytes:
+    import json
+    return json.dumps(db.backup_payload(), ensure_ascii=False, indent=1).encode()
+
+
+async def auto_backup_loop():
+    """定时把数据备份（JSON）作为 TG 文档推送给自己的 Bot（默认每 7 天，可关）。
+
+    备份不含登录密码哈希（db.backup_payload 已剔除）；恢复时替换 data 目录或
+    手动导入 JSON。仅配置了 TG Bot 时生效。
+    """
+    while True:
+        try:
+            days = int(db.get_setting("auto_backup_days", 7) or 0)
+            if db.get_setting("auto_backup_enabled", False) and days > 0:
+                token = str(db.get_setting("notify_token", "") or "").strip()
+                chat_id = str(db.get_setting("notify_chat_id", "") or "").strip()
+                last = float(db.get_setting("backup_last_sent", 0) or 0)
+                if token and chat_id and time.time() - last >= days * 86400:
+                    content = await asyncio.to_thread(_backup_json)
+                    fname = f"autosave_backup_{time.strftime('%Y%m%d_%H%M%S')}.json"
+                    resp = httpx.post(
+                        f"https://api.telegram.org/bot{token}/sendDocument",
+                        data={"chat_id": chat_id, "caption": "🗄 自动备份（设置/频道/规则/订阅/转存记录）"},
+                        files={"document": (fname, content, "application/json")},
+                        proxy=_tg_proxy(), timeout=60)
+                    if resp.status_code == 200:
+                        db.set_setting("backup_last_sent", time.time())
+                        logstream.info("system", f"已推送自动备份到 TG（{fname}，{len(content) // 1024}KB）")
+                    else:
+                        logstream.warn("system", f"自动备份推送失败: HTTP {resp.status_code}")
+        except Exception as e:
+            logstream.error("system", f"自动备份异常: {logstream.exc(e)}")
+        await asyncio.sleep(3600)

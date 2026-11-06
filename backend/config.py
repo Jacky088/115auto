@@ -2,6 +2,8 @@
 import os
 from pathlib import Path
 
+APP_VERSION = "1.1.0"  # 展示于网页页脚与 /api/version，随发行包更新
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 BACKEND_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get("DATA_DIR", BASE_DIR / "data"))

@@ -52,6 +52,16 @@ CREATE TABLE IF NOT EXISTS blacklist_hits(
     stage TEXT,                        -- message / share_info
     created_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS subscriptions(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    keyword TEXT NOT NULL UNIQUE,      -- 匹配关键词（对消息标题/正文做不区分大小写的子串匹配）
+    note TEXT DEFAULT '',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    last_ep TEXT DEFAULT '',           -- 最近一次命中的集数标识（S01E48 / 第495集）
+    last_title TEXT DEFAULT '',        -- 最近一次命中的标题
+    last_match_at REAL,                -- 最近命中时间
+    created_at REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS messages(
     channel TEXT NOT NULL,
     message_id INTEGER NOT NULL,
@@ -121,6 +131,28 @@ DEFAULT_SETTINGS = {
     "tg_phone": "",
     "cookie_ok": None,                # 115 cookie 状态
     "userbot_ok": None,               # userbot 登录状态
+    # ---- 订阅追剧 ----
+    "subscription_only": False,       # 开启后仅转存命中订阅关键词的内容
+    # ---- 转存增强 ----
+    "dedup_by_name": True,            # 转存前检查目标目录已有同名内容，命中判重跳过
+    "organize_enabled": False,        # 转存后把剧集文件归入 Season N 子目录
+    # ---- TMDB 刮削 ----
+    "tmdb_enabled": False,
+    "tmdb_api_key": "",
+    "tmdb_language": "zh-CN",
+    "tmdb_subdir": True,              # 刮削成功后在分类目录下建「名称 (年份)」子目录
+    # ---- 通知渠道 ----
+    "bark_url": "",                   # Bark 推送（https://api.day.app/你的key）
+    "pushplus_token": "",             # PushPlus token
+    "ntfy_url": "",                   # ntfy 主题完整 URL（https://ntfy.sh/你的主题）
+    # ---- 定时任务 ----
+    "digest_enabled": True,           # 每日摘要通知
+    "digest_time": "21:00",
+    "auto_backup_enabled": False,     # 定时把数据备份 JSON 推送到 TG
+    "auto_backup_days": 7,
+    "digest_last_sent": "",           # 内部状态：上次摘要日期
+    "backup_last_sent": 0,            # 内部状态：上次备份时间戳
+    "api_token": "",                  # 对外 API token（留空 = 对外 API 关闭）
 }
 
 DEFAULT_RULES = [
@@ -260,3 +292,25 @@ def quota_incr():
 def add_log(level: str, module: str, message: str):
     execute("INSERT INTO logs(level,module,message,created_at) VALUES(?,?,?,?)",
             (level, module, message[:2000], time.time()))
+
+
+# 备份不含登录密码哈希：备份文件可能被转发/共享，不应携带可用于离线爆破的凭据
+BACKUP_EXCLUDE_SETTINGS = {"web_password_hash"}
+
+
+def backup_payload() -> dict:
+    """全部业务数据 → JSON 备份字典（网页导出与 TG 定时备份共用）。"""
+    def dump(sql):
+        return [dict(r) for r in query(sql)]
+
+    return {
+        "_meta": {"version": 1, "exported_at": time.strftime("%Y-%m-%d %H:%M:%S")},
+        "settings": {r["key"]: r["value"] for r in dump("SELECT * FROM settings")
+                     if r["key"] not in BACKUP_EXCLUDE_SETTINGS},
+        "channels": dump("SELECT * FROM channels"),
+        "rules": dump("SELECT * FROM rules"),
+        "routes": dump("SELECT * FROM routes"),
+        "blacklist": dump("SELECT * FROM blacklist"),
+        "subscriptions": dump("SELECT * FROM subscriptions"),
+        "transfers": dump("SELECT * FROM transfers ORDER BY id"),
+    }

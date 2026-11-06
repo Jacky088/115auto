@@ -81,8 +81,14 @@
           </el-button>
         </div>
       </template>
+      <!-- 模块筛选：从日志流中动态收集出现过的 module，点击切换「全部/某模块」 -->
+      <div class="module-chips">
+        <span class="m-chip" :class="{ active: modFilter === '' }" @click="modFilter = ''">全部</span>
+        <span v-for="m in logModules" :key="m" class="m-chip" :class="{ active: modFilter === m }"
+              @click="modFilter = m">{{ m }}</span>
+      </div>
       <div class="log-window" ref="logBox" @touchstart.passive="autoScroll = false">
-        <div v-for="(l, i) in lines" :key="i" class="log-line">
+        <div v-for="(l, i) in shownLines" :key="i" class="log-line">
           <span style="color: #666">{{ ts(l.ts) }}</span>
           <span :class="'lv-' + l.level">[{{ l.level }}]</span>
           <span class="mod">{{ l.module }}</span>
@@ -107,6 +113,13 @@ const autoScroll = ref(true)
 const logBox = ref(null)
 const pieRef = ref(null)
 let pieChart = null
+
+// ---- 模块筛选：从日志流中出现过的 module 动态收集 ----
+const modFilter = ref('')
+const logModules = ref([])
+const shownLines = computed(() => modFilter.value
+  ? lines.value.filter((l) => l.module === modFilter.value)
+  : lines.value)
 
 // 空间颜色：<70% 蓝、70~90% 橙、>90% 红
 const spaceColor = computed(() => {
@@ -156,6 +169,7 @@ const connectWs = () => {
     }
     replayWithoutSeq = false
     lines.value.push(l)
+    if (l.module && !logModules.value.includes(l.module)) logModules.value.push(l.module)
     if (lines.value.length > 400) lines.value.splice(0, lines.value.length - 400)
     if (autoScroll.value) nextTick(() => { if (logBox.value) logBox.value.scrollTop = logBox.value.scrollHeight })
   }
@@ -293,6 +307,16 @@ const onResize = () => { if (pieChart) pieChart.resize(); if (spaceChart) spaceC
 }
 .stat-label { color: var(--saas-text-sub); font-size: 13px; }
 .stat-value { font-size: 26px; font-weight: 700; margin-top: 10px; letter-spacing: .3px; }
+.module-chips { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+.m-chip {
+  padding: 3px 14px; border-radius: 999px; font-size: 12px; cursor: pointer; user-select: none;
+  border: 1px solid var(--saas-line); color: var(--saas-text-sub);
+  background: var(--el-bg-color); transition: all .15s ease;
+}
+.m-chip:hover { border-color: var(--el-color-primary-light-5); color: var(--el-color-primary); }
+.m-chip.active {
+  background: var(--el-color-primary); border-color: var(--el-color-primary); color: #fff;
+}
 .space-bar { height: 10px; border-radius: 5px; background: #e9eefb; margin-top: 16px; overflow: hidden; }
 .space-used { height: 100%; border-radius: 5px; transition: width .6s ease; min-width: 3%; }
 .space-text { font-size: 12px; color: var(--saas-text-sub); margin-top: 8px; }

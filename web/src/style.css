@@ -304,6 +304,56 @@ body {
   .el-table { min-width: max-content; }
 }
 
+/* ================== 深色模式适配（html.dark，由 Layout 顶栏切换） ================== */
+html.dark {
+  /* 自定义 SaaS 变量 */
+  --saas-bg: #0e1424;
+  --saas-line: #263049;
+  --saas-text-main: #e6ebf7;
+  --saas-text-sub: #8a97b3;
+  /* Element Plus 变量：统一为深蓝底色系（覆盖 dark css-vars 的中性灰黑） */
+  --el-bg-color: #131b2e;
+  --el-bg-color-page: #0e1424;
+  --el-bg-color-overlay: #182338;
+  --el-border-color: #2a3550;
+  --el-border-color-light: #263049;
+  --el-border-color-lighter: #222c44;
+  --el-fill-color: #182338;
+  --el-fill-color-light: #1c2740;
+  --el-fill-color-lighter: #182338;
+}
+html.dark body { background: var(--saas-bg); }
+html.dark .el-card__header { border-bottom-color: var(--saas-line); }
+html.dark .el-dialog__header { border-bottom-color: var(--saas-line); }
+html.dark .el-drawer__header { border-bottom-color: var(--saas-line); }
+/* 表格：本文件给表头写死了浅色变量，深色下需要覆盖 */
+html.dark .el-table {
+  --el-table-header-bg-color: #1a2338;
+  --el-table-header-text-color: #8a97b3;
+  --el-table-border-color: #222c44;
+}
+/* 组件内写死的浅色背景 */
+html.dark .header { background: #131b2e; }
+html.dark .theme-btn { color: #b7c4de; }
+html.dark .user-chip:hover { background: #1c2740; }
+html.dark .user-name { color: #b7c4de; }
+html.dark .auto-stop-body { color: #8a97b3; }
+html.dark .pwd-tips { background: #131b2e; border-color: var(--saas-line); }
+html.dark .pwd-tips-title { color: #b7c4de; }
+html.dark .pwd-tips li { color: #8a97b3; }
+html.dark .section-card { background: #131b2e; }
+html.dark .day-chip { background: #131b2e; }
+html.dark .msg-item { background: #131b2e; border-color: var(--saas-line); }
+html.dark .msg-body { color: #b7c4de; }
+html.dark .files-toolbar { background: #131b2e; }
+html.dark .detail-content { background: #131b2e; border-color: var(--saas-line); color: #b7c4de; }
+html.dark .help-body p, html.dark .help-body li { color: #b7c4de; }
+html.dark .help-body .eg { background: #131b2e; }
+html.dark .dp-row:hover { background: #1c2740; }
+html.dark .dp-row.active { background: var(--el-color-primary-light-9); }
+html.dark ::-webkit-scrollbar-thumb { background: #2a3757; }
+html.dark ::-webkit-scrollbar-thumb:hover { background: #3b4c75; }
+
 /* 超窄屏（<=480px）：进一步压缩 */
 @media (max-width: 480px) {
   .el-dialog { width: 97vw !important; max-width: 97vw !important; }

@@ -22,6 +22,11 @@ def _tg_proxy() -> str | None:
 HELP = (
     "可用指令：\n"
     "/status — 查看运行状态（队列/限额/空间/频道）\n"
+    "/space — 查看 115 剩余空间\n"
+    "/ls — 最近 5 条转存记录\n"
+    "/add <频道> — 添加监控频道\n"
+    "/quota <数量> — 设置每日转存限额\n"
+    "/sub [关键词] — 查看/添加追剧订阅，/sub del <关键词> 删除\n"
     "/pause — 暂停转存（停止消费队列）\n"
     "/resume — 恢复转存\n"
     "/retry — 重试全部失败任务\n"
@@ -29,9 +34,15 @@ HELP = (
 )
 
 
+def _gb(b: float) -> str:
+    return f"{b / (1 << 30):.1f}GB"
+
+
 def _handle_command(text: str, chat_id: str) -> str:
     """执行指令，返回回复文本。"""
-    cmd = text.strip().split()[0].lower().split("@")[0]
+    parts = text.strip().split()
+    cmd = parts[0].lower().split("@")[0]
+    args = parts[1:]
     if cmd == "/status":
         queued = db.query("SELECT count(*) c FROM transfers WHERE status='queued'", one=True)["c"]
         today_s = db.query("SELECT count(*) c FROM transfers WHERE status='success' AND created_at>?",
@@ -46,8 +57,7 @@ def _handle_command(text: str, chat_id: str) -> str:
             try:
                 from ..pan115 import client as pan
                 sp = pan.space_info()
-                gb = lambda b: f"{b / (1 << 30):.1f}GB"
-                space_line = f"\n💾 115 空间：已用 {gb(sp['use'])}/{gb(sp['total'])}（{sp['ratio']}%）"
+                space_line = f"\n💾 115 空间：已用 {_gb(sp['use'])}/{_gb(sp['total'])}（{sp['ratio']}%）"
             except Exception:
                 pass
         running = db.get_setting("running", False)
@@ -57,6 +67,40 @@ def _handle_command(text: str, chat_id: str) -> str:
                 f"📥 队列：{queued} 个待转存\n"
                 f"✅ 24h 成功：{today_s}｜❌ 失败/拦截：{today_f}\n"
                 f"📈 今日限额：{quota}/{limit}{space_line}")
+    if cmd == "/space":
+        try:
+            from ..pan115 import client as pan
+            sp = pan.space_info()
+            return (f"💾 115 空间\n\n已用 {_gb(sp['use'])} / {_gb(sp['total'])}"
+                    f"（{sp['ratio']}%）\n剩余 {_gb(sp.get('free', 0))}")
+        except Exception as e:
+            return f"查询空间失败: {str(e)[:120]}"
+    if cmd == "/ls":
+        rows = db.query("SELECT title, status, target_dir, created_at FROM transfers"
+                        " ORDER BY id DESC LIMIT 5")
+        if not rows:
+            return "暂无转存记录"
+        label = {"success": "✅", "failed": "❌", "blocked": "⛔", "queued": "⏳",
+                 "running": "🔄", "skipped": "⏭", "duplicate": "🔁", "submitted": "☁️"}
+        lines = ["🕘 最近转存", ""]
+        for r in rows:
+            title = (r["title"] or "-")[:40]
+            mark = label.get(r["status"], "·")
+            lines.append(f"{mark} {title}")
+        return "\n".join(lines)
+    if cmd == "/add":
+        # 真正的添加流程由 bot_command_loop 的异步分支执行（需 await 频道校验），
+        # 同步路径仅做用法提示兜底
+        return "用法：/add <频道名或链接>\n例如：/add @somechannel"
+    if cmd == "/quota":
+        if not args or not args[0].lstrip("-").isdigit():
+            return "用法：/quota <数量>（0 = 不限制，每日转存限额）"
+        n = max(0, min(int(args[0]), 10000))
+        db.set_setting("daily_limit", n)
+        logstream.info("transfer", f"已通过 TG 指令设置每日限额 {n}（/quota）")
+        return f"📈 每日限额已设为 {n}" + ("（不限制）" if n == 0 else "")
+    if cmd == "/sub":
+        return _handle_sub(args)
     if cmd == "/pause":
         db.set_setting("paused", True)
         logstream.warn("transfer", "已通过 TG 指令暂停转存（/pause）")
@@ -75,6 +119,68 @@ def _handle_command(text: str, chat_id: str) -> str:
     if cmd == "/help":
         return HELP
     return f"未知指令 {cmd}\n\n{HELP}"
+
+
+async def add_channel_flow(name: str) -> str:
+    """/add 指令的完整流程：解析名称 → 可访问性校验 → 入库。与网页添加同一套校验。"""
+    import re as _re
+    m = _re.search(r"t\.me/(?:s/)?@?([0-9A-Za-z_]+)", name)
+    name = (m.group(1) if m else name).lstrip("@").strip()
+    if not name:
+        return "频道名不能为空。用法：/add <频道名或链接>"
+    if len(name) > 64:
+        return "频道名过长（最多 64 字符）"
+    if db.query("SELECT 1 FROM channels WHERE type='polling' AND name=?", (name,), one=True):
+        return f"频道 @{name} 已存在"
+    n = db.query("SELECT count(*) c FROM channels", one=True)["c"]
+    if n >= 50:
+        return "监控频道已达上限 50 个，请先清理不需要的频道"
+    from ..tg import polling as tg_polling
+    res = await tg_polling.check_channel(name)
+    if not res.get("ok"):
+        return f"无法添加 @{name}：{res.get('err') or '频道不可访问，请核对后重试'}"
+    title = str(res.get("title") or "")
+    db.execute("INSERT INTO channels(type,name,created_at) VALUES('polling',?,?)",
+               (name, time.time()))
+    logstream.info("channels",
+                   f"已通过 TG 指令添加监控频道 @{name}（{title}，已通过访问校验）")
+    return f"✅ 已添加频道 @{name}（{title}），下一轮轮询开始抓取"
+
+
+def _handle_sub(args: list[str]) -> str:
+    """/sub 查看订阅；/sub <关键词> 添加；/sub del <关键词> 删除。"""
+    from ..core import subscribe as _sub
+    if args and args[0].lower() == "del":
+        kw = " ".join(args[1:]).strip()
+        if not kw:
+            return "用法：/sub del <关键词>"
+        n = db.execute("DELETE FROM subscriptions WHERE keyword=?", (kw,))
+        if n:
+            logstream.info("subscribe", f"已通过 TG 指令删除订阅: {kw}")
+            return f"🗑 已删除订阅「{kw}」"
+        return f"未找到订阅「{kw}」"
+    if args:
+        kw = " ".join(args).strip()[:100]
+        exists = db.query("SELECT 1 FROM subscriptions WHERE keyword=?", (kw,), one=True)
+        if exists:
+            return f"订阅「{kw}」已存在"
+        db.execute("INSERT INTO subscriptions(keyword,created_at) VALUES(?,?)", (kw, time.time()))
+        logstream.info("subscribe", f"已通过 TG 指令添加订阅: {kw}")
+        return f"🎬 已添加订阅「{kw}」" + ("（订阅模式已开启，命中才会转存）"
+                                       if _sub.subscription_only() else
+                                       "（命中后会推送追更通知）")
+    rows = db.query("SELECT keyword, enabled, last_ep, last_title FROM subscriptions ORDER BY id")
+    if not rows:
+        return "暂无订阅。用法：/sub <关键词> 添加追剧订阅"
+    lines = ["🎬 追剧订阅", ""]
+    for r in rows:
+        ep = f"（{r['last_ep']}）" if r["last_ep"] else ""
+        mark = "" if r["enabled"] else "⏸ "
+        lines.append(f"· {mark}{r['keyword']}{ep}")
+    lines.append("")
+    mode = "订阅模式（仅转存命中项）" if _sub.subscription_only() else "全量模式（命中项额外追更通知）"
+    lines.append(f"当前：{mode}")
+    return "\n".join(lines)
 
 
 async def bot_command_loop():
@@ -139,7 +245,12 @@ async def bot_command_loop():
                         if not text.startswith("/"):
                             continue
                         try:
-                            reply = await asyncio.to_thread(_handle_command, text, chat_id)
+                            if text.lower().startswith("/add"):
+                                # /add 需要异步做频道可访问性校验，单独处理
+                                reply = await add_channel_flow(text.split(None, 1)[1]) \
+                                    if len(text.split(None, 1)) > 1 else "用法：/add <频道名或链接>"
+                            else:
+                                reply = await asyncio.to_thread(_handle_command, text, chat_id)
                         except Exception as e:
                             reply = f"指令执行失败: {e}"
                         try:

@@ -24,6 +24,12 @@
       <el-table-column prop="last_fetch_at" label="最近抓取" width="160">
         <template #default="{ row }">{{ row.last_fetch_at ? fmtTime(row.last_fetch_at) : '-' }}</template>
       </el-table-column>
+      <el-table-column label="健康" width="130">
+        <template #default="{ row }">
+          <span v-if="row.fail_count > 0" class="health-bad">连续失败 {{ row.fail_count }} 轮</span>
+          <span v-else class="health-ok">正常</span>
+        </template>
+      </el-table-column>
       <el-table-column prop="enabled" label="启用" width="80">
         <template #default="{ row }">
           <el-switch :model-value="!!row.enabled" @change="(v) => toggle(row, v)" />
@@ -73,9 +79,13 @@
     <div v-for="m in previewMsgs" :key="m.message_id" class="msg-item">
       <div class="msg-head">
         <span class="mono">#{{ m.message_id }}</span>
-        <el-tag size="small" :type="m.transfer_status ? statusTagType(m.transfer_status) : 'info'">
-          {{ m.transfer_status ? statusLabel[m.transfer_status] : '非分享/待处理' }}
-        </el-tag>
+        <div class="msg-head-right">
+          <el-tag size="small" :type="m.transfer_status ? statusTagType(m.transfer_status) : 'info'">
+            {{ m.transfer_status ? statusLabel[m.transfer_status] : '非分享/待处理' }}
+          </el-tag>
+          <el-button size="small" type="primary" plain :loading="transferingId === m.message_id"
+                     @click="transferMsg(m)">转存此消息</el-button>
+        </div>
       </div>
       <div class="msg-body" v-html="highlightLinks(m.text)"></div>
     </div>
@@ -92,7 +102,9 @@ const addVisible = ref(false)
 const addForm = reactive({ name: '', type: 'polling' })
 const previewVisible = ref(false)
 const previewCh = ref('')
+const previewChId = ref('')
 const previewMsgs = ref([])
+const transferingId = ref('')
 const drawerSize = ref(window.innerWidth <= 768 ? '94%' : '600px')
 const onRz = () => { drawerSize.value = window.innerWidth <= 768 ? '94%' : '600px' }
 onMounted(() => window.addEventListener('resize', onRz))
@@ -184,9 +196,22 @@ const del = async (row) => {
 const preview = async (row) => {
   try {
     previewCh.value = row.name
+    previewChId.value = row.id
     previewMsgs.value = (await api.get(`/api/channels/${row.id}/messages`)).data
     previewVisible.value = true
   } catch (e) { ElMessage.error(errMsg(e)) }
+}
+// 手动转存单条消息：清除去重记忆后重放管道，成功后提示入队数并刷新预览
+const transferMsg = async (m) => {
+  if (transferingId.value) return
+  transferingId.value = m.message_id
+  try {
+    const { data } = await api.post(`/api/channels/${previewChId.value}/messages/${m.message_id}/transfer`)
+    const r = data.result || {}
+    const dup = r.duplicates ? `，重复跳过 ${r.duplicates} 条` : ''
+    ElMessage.success(`已提交转存：入队 ${r.queued ?? 0} 条${dup}`)
+    previewMsgs.value = (await api.get(`/api/channels/${previewChId.value}/messages`)).data
+  } catch (e) { ElMessage.error(errMsg(e)) } finally { transferingId.value = '' }
 }
 onMounted(load)
 </script>
@@ -198,6 +223,9 @@ onMounted(load)
 .msg-item { border: 1px solid #e9eefb; border-radius: 10px; padding: 12px 14px; margin-bottom: 12px;
             background: #fff; }
 .msg-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.msg-head-right { display: flex; align-items: center; gap: 8px; }
+.health-ok { color: #16a34a; font-size: 12px; font-weight: 600; }
+.health-bad { color: #dc2626; font-size: 12px; font-weight: 600; }
 .msg-body { font-size: 13px; line-height: 1.8; color: #3a4661; white-space: pre-wrap;
             word-break: break-word; }
 </style>

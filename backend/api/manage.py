@@ -208,7 +208,16 @@ def recent_transfers(_=Depends(require_user)):
 # ---------- channels ----------
 @router.get("/channels")
 def list_channels(_=Depends(require_user)):
-    return [dict(r) for r in db.query("SELECT * FROM channels ORDER BY id DESC")]
+    """频道列表 + 健康信息：连续失败轮数（poll_fail_*）、最近抓取时间、消息量。"""
+    items = []
+    for r in db.query("SELECT * FROM channels ORDER BY id DESC"):
+        item = dict(r)
+        try:
+            item["fail_count"] = int(db.get_setting(f"poll_fail_{r['id']}", 0) or 0)
+        except (TypeError, ValueError):
+            item["fail_count"] = 0
+        items.append(item)
+    return items
 
 
 @router.post("/channels")
@@ -333,6 +342,90 @@ def channel_messages(ch_id: int, _=Depends(require_user)):
         " LIMIT 1) transfer_status FROM messages m WHERE m.channel=? ORDER BY m.message_id DESC LIMIT 50",
         (ch["name"],))
     return [dict(r) for r in rows]
+
+
+@router.post("/channels/{ch_id}/messages/{message_id}/transfer")
+def transfer_message(ch_id: int, message_id: int, _=Depends(require_user)):
+    """手动转存：把消息预览里的某条消息重新走一遍处理管道。
+
+    - 清除该消息的去重记忆后重放（否则会被消息级去重直接跳过）
+    - bypass=True：跳过消息级黑名单（用户明确点了按钮）；分享内容黑名单仍生效
+    - 链接重复仍按 duplicate 留痕，不会重复转存
+    """
+    ch = db.query("SELECT * FROM channels WHERE id=?", (ch_id,), one=True)
+    if not ch:
+        raise HTTPException(404, "频道不存在")
+    msg = db.query("SELECT * FROM messages WHERE channel=? AND message_id=?",
+                   (ch["name"], message_id), one=True)
+    if not msg:
+        raise HTTPException(404, "消息不存在（可能已被清理）")
+    db.execute("DELETE FROM messages WHERE channel=? AND message_id=?", (ch["name"], message_id))
+    result = pipeline.process_message(ch["name"], message_id, msg["text"] or "", bypass=True)
+    logstream.info("channels",
+                   f"手动转存消息 #{message_id}（@{ch['name']}）：入队 {result.get('queued', 0)}，"
+                   f"重复 {result.get('duplicates', 0)}")
+    return {"ok": True, "result": result}
+
+
+# ---------- subscriptions ----------
+@router.get("/subscriptions")
+def list_subscriptions(_=Depends(require_user)):
+    return {"items": [dict(r) for r in db.query("SELECT * FROM subscriptions ORDER BY id DESC")],
+            "subscription_only": bool(db.get_setting("subscription_only", False))}
+
+
+@router.post("/subscriptions")
+def add_subscription(body: dict, _=Depends(require_user)):
+    kw = (body.get("keyword") or "").strip()
+    if not kw:
+        raise HTTPException(400, "关键词不能为空")
+    if len(kw) > 100:
+        raise HTTPException(400, "关键词最长 100 字符")
+    if db.query("SELECT 1 FROM subscriptions WHERE keyword=?", (kw,), one=True):
+        raise HTTPException(400, f"订阅「{kw}」已存在")
+    db.execute("INSERT INTO subscriptions(keyword,note,created_at) VALUES(?,?,?)",
+               (kw, (body.get("note") or "")[:200], time.time()))
+    logstream.info("subscribe", f"添加追剧订阅: {kw}")
+    return {"ok": True}
+
+
+@router.put("/subscriptions/{sub_id}")
+def update_subscription(sub_id: int, body: dict, _=Depends(require_user)):
+    sub = db.query("SELECT id FROM subscriptions WHERE id=?", (sub_id,), one=True)
+    if not sub:
+        raise HTTPException(404, "订阅不存在")
+    if "enabled" in body:
+        db.execute("UPDATE subscriptions SET enabled=? WHERE id=?",
+                   (1 if body["enabled"] else 0, sub_id))
+    if "keyword" in body:
+        kw = (str(body["keyword"]) or "").strip()
+        if not kw:
+            raise HTTPException(400, "关键词不能为空")
+        dup = db.query("SELECT id FROM subscriptions WHERE keyword=? AND id<>?", (kw, sub_id), one=True)
+        if dup:
+            raise HTTPException(400, f"订阅「{kw}」已存在")
+        db.execute("UPDATE subscriptions SET keyword=? WHERE id=?", (kw[:100], sub_id))
+    # 进度重置：清除追更记录，下次命中重新通知
+    if body.get("reset_progress"):
+        db.execute("UPDATE subscriptions SET last_ep='', last_title='', last_match_at=NULL WHERE id=?",
+                   (sub_id,))
+    return {"ok": True}
+
+
+@router.delete("/subscriptions/{sub_id}")
+def delete_subscription(sub_id: int, _=Depends(require_user)):
+    row = db.query("SELECT keyword FROM subscriptions WHERE id=?", (sub_id,), one=True)
+    db.execute("DELETE FROM subscriptions WHERE id=?", (sub_id,))
+    if row:
+        logstream.info("subscribe", f"删除追剧订阅: {row['keyword']}")
+    return {"ok": True}
+
+
+# ---------- version ----------
+@router.get("/version")
+def version(_=Depends(require_user)):
+    from .. import config
+    return {"version": config.APP_VERSION}
 
 
 # ---------- rules & routes ----------
@@ -624,9 +717,13 @@ _INT_SETTINGS = {
     "transfer_interval_max": (1, 3600),
     "daily_limit": (0, 10000),
     "tg_api_id": (0, 2 ** 31 - 1),
+    "auto_backup_days": (1, 365),
 }
 _BOOL_SETTINGS = {"enable_share_transfer", "enable_offline_download",
-                  "notify_transfer_success", "schedule_enabled"}
+                  "notify_transfer_success", "schedule_enabled",
+                  "subscription_only", "dedup_by_name", "organize_enabled",
+                  "tmdb_enabled", "tmdb_subdir",
+                  "digest_enabled", "auto_backup_enabled"}
 
 
 def _norm_setting(k: str, v):
@@ -666,7 +763,7 @@ def _norm_setting(k: str, v):
                 raise HTTPException(400, "重试退避的秒数必须大于 0")
             vals.append(min(n, 86400))
         return vals[:10]
-    if k in ("schedule_start", "schedule_end"):
+    if k in ("schedule_start", "schedule_end", "digest_time"):
         s = str(v).strip()
         if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", s):
             raise HTTPException(400, f"{k} 需为 HH:MM 格式（如 08:30）")
@@ -691,7 +788,13 @@ def get_settings(_=Depends(require_user)):
             "unclassified_action", "notify_token", "notify_chat_id",
             "notify_transfer_success", "proxy",
             "schedule_enabled", "schedule_start", "schedule_end",
-            "tg_api_id", "tg_api_hash", "tg_phone"]
+            "tg_api_id", "tg_api_hash", "tg_phone",
+            "subscription_only", "dedup_by_name", "organize_enabled",
+            "tmdb_enabled", "tmdb_api_key", "tmdb_language", "tmdb_subdir",
+            "bark_url", "pushplus_token", "ntfy_url",
+            "digest_enabled", "digest_time",
+            "auto_backup_enabled", "auto_backup_days",
+            "api_token"]
     return {k: db.get_setting(k) for k in keys}
 
 
@@ -703,7 +806,13 @@ def put_settings(body: dict, _=Depends(require_user)):
                "unclassified_action", "notify_token", "notify_chat_id",
                "notify_transfer_success", "proxy",
                "schedule_enabled", "schedule_start", "schedule_end",
-               "tg_api_id", "tg_api_hash", "tg_phone"}
+               "tg_api_id", "tg_api_hash", "tg_phone",
+               "subscription_only", "dedup_by_name", "organize_enabled",
+               "tmdb_enabled", "tmdb_api_key", "tmdb_language", "tmdb_subdir",
+               "bark_url", "pushplus_token", "ntfy_url",
+               "digest_enabled", "digest_time",
+               "auto_backup_enabled", "auto_backup_days",
+               "api_token"}
     # 先整体校验再落库：任一字段非法时不写入，避免半新半旧配置
     updates = {k: _norm_setting(k, v) for k, v in body.items() if k in allowed}
     # 间隔成对提交时保证 min <= max
@@ -815,24 +924,13 @@ def export_logs(date: str = "", _=Depends(require_user)):
 # ---------- 备份 ----------
 @router.get("/backup/export")
 def backup_export(_=Depends(require_user)):
-    """导出全部数据（设置/频道/规则/黑名单/转存记录/日志）为 JSON 备份文件。"""
+    """导出全部数据（设置/频道/规则/黑名单/订阅/转存记录）为 JSON 备份文件。
+
+    与 TG 定时自动备份共用 db.backup_payload，保证两者内容一致。
+    """
     import json
     from fastapi.responses import Response
-
-    def dump(sql):
-        return [dict(r) for r in db.query(sql)]
-
-    payload = {
-        "_meta": {"version": 1, "exported_at": time.strftime("%Y-%m-%d %H:%M:%S")},
-        # 剔除登录密码哈希：备份文件可能被转发/共享，不应携带可用于离线爆破的凭据
-        "settings": {r["key"]: r["value"] for r in dump("SELECT * FROM settings")
-                     if r["key"] != "web_password_hash"},
-        "channels": dump("SELECT * FROM channels"),
-        "rules": dump("SELECT * FROM rules"),
-        "routes": dump("SELECT * FROM routes"),
-        "blacklist": dump("SELECT * FROM blacklist"),
-        "transfers": dump("SELECT * FROM transfers ORDER BY id"),
-    }
+    payload = db.backup_payload()
     content = json.dumps(payload, ensure_ascii=False, indent=1)
     fname = f"autosave_backup_{time.strftime('%Y%m%d_%H%M%S')}.json"
     logstream.info("system", "已导出数据备份（JSON）")
