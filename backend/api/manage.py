@@ -250,7 +250,11 @@ async def add_channel(body: dict, _=Depends(require_user)):
         raise HTTPException(400, f"无法添加 @{name}：{res.get('err') or '频道不可访问，请核对后重试'}")
     title = str(res.get("title") or "")
 
-    db.execute("INSERT INTO channels(type,name,created_at) VALUES(?,?,?)", (ctype, name, time.time()))
+    # 新频道继承全局订阅模式设置（之后可在「频道管理」按频道独立调整）
+    from ..core import subscribe as _submod
+    sub_only = 1 if _submod.subscription_only() else 0
+    db.execute("INSERT INTO channels(type,name,sub_only,created_at) VALUES(?,?,?,?)",
+               (ctype, name, sub_only, time.time()))
     logstream.info("channels",
                    f"添加监控频道 @{name}（{title}，接入方式：{ctype}，已通过访问校验）")
     return {"ok": True, "name": name, "title": title}
@@ -278,6 +282,13 @@ def update_channel(ch_id: int, body: dict, _=Depends(require_user)):
         if ch:
             state = "启用" if body["enabled"] else "停用"
             logstream.info("channels", f"已{state}监控频道 @{ch['name']}")
+    if "sub_only" in body:
+        ch = db.query("SELECT name FROM channels WHERE id=?", (ch_id,), one=True)
+        if not ch:
+            raise HTTPException(404, "频道不存在")
+        db.execute("UPDATE channels SET sub_only=? WHERE id=?", (1 if body["sub_only"] else 0, ch_id))
+        logstream.info("channels",
+                       f"频道 @{ch['name']} 订阅模式已{'开启（仅转存命中订阅的内容）' if body['sub_only'] else '关闭（全盘转存）'}")
     return {"ok": True}
 
 

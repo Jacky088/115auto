@@ -35,6 +35,17 @@
           <el-switch :model-value="!!row.enabled" @change="(v) => toggle(row, v)" />
         </template>
       </el-table-column>
+      <el-table-column label="仅订阅" width="90">
+        <template #header>
+          <el-tooltip content="开启后该频道只转存命中订阅关键词的内容；关闭则全盘转存。每个频道独立设置"
+                      placement="top">
+            <span>仅订阅 ⓘ</span>
+          </el-tooltip>
+        </template>
+        <template #default="{ row }">
+          <el-switch :model-value="!!row.sub_only" @change="(v) => toggleSubOnly(row, v)" />
+        </template>
+      </el-table-column>
       <el-table-column label="操作" width="250">
         <template #default="{ row }">
           <div class="ch-actions">
@@ -139,6 +150,19 @@ const toggle = async (row, v) => {
     ElMessage.success(v ? `已启用监控 @${row.name}` : `已停用监控 @${row.name}`)
   } catch (e) {
     row.enabled = v ? 0 : 1  // 保存失败时恢复开关显示
+    ElMessage.error(errMsg(e))
+  }
+}
+// 频道级订阅模式：开启后该频道仅转存命中订阅关键词的内容
+const toggleSubOnly = async (row, v) => {
+  try {
+    await api.put(`/api/channels/${row.id}`, { sub_only: !!v })
+    row.sub_only = v ? 1 : 0
+    ElMessage.success(v
+      ? `@${row.name} 已开启「仅订阅」：只转存命中订阅关键词的内容`
+      : `@${row.name} 已关闭「仅订阅」：全盘转存`)
+  } catch (e) {
+    row.sub_only = v ? 0 : 1
     ElMessage.error(errMsg(e))
   }
 }

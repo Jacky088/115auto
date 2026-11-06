@@ -164,21 +164,34 @@ def _do_resume() -> str:
 
 
 def _menu_keyboard() -> dict:
-    """快捷操作菜单：按钮随当前状态变化（暂停/恢复、订阅模式开关）。"""
-    from ..core import subscribe as _sub
-    paused = bool(db.get_setting("paused", False))
+    """快捷操作菜单：按钮随当前状态变化（暂停/恢复）。订阅模式按频道独立设置。"""
     return {"inline_keyboard": [
         [{"text": "📊 运行状态", "callback_data": "c:status"},
          {"text": "💾 115 空间", "callback_data": "c:space"}],
         [{"text": "🕘 最近转存", "callback_data": "c:ls"},
          {"text": "🔄 重试失败任务", "callback_data": "c:retry"}],
-        [{"text": "⏸ 暂停转存" if not paused else "▶ 恢复转存",
+        [{"text": "⏸ 暂停转存" if not db.get_setting("paused", False) else "▶ 恢复转存",
           "callback_data": "c:toggle_pause"}],
         [{"text": "🎬 订阅列表", "callback_data": "c:sub"},
-         {"text": "🛎 订阅模式：" + ("开" if _sub.subscription_only() else "关"),
-          "callback_data": "c:toggle_submode"}],
+         {"text": "📺 频道订阅模式", "callback_data": "c:submode"}],
         [{"text": "❓ 全部指令帮助", "callback_data": "c:help"}],
     ]}
+
+
+def _submode_text() -> str:
+    """各频道的订阅模式状态（只读展示，网页「频道管理」可调整）。"""
+    rows = db.query("SELECT name, enabled, sub_only FROM channels ORDER BY id")
+    if not rows:
+        return "还没有监控频道。发送 /add <频道> 添加"
+    lines = ["📺 频道订阅模式", ""]
+    for r in rows:
+        state = "🟢 全盘转存" if not r["sub_only"] else "🛎 仅订阅"
+        if not r["enabled"]:
+            state += "（频道已停用）"
+        lines.append(f"@{r['name']} — {state}")
+    lines.append("")
+    lines.append("在网页「频道管理」页可按频道开关订阅模式；新增频道默认全盘转存")
+    return "\n".join(lines)
 
 
 def _handle_callback(data: str) -> tuple[str, dict]:
@@ -187,16 +200,8 @@ def _handle_callback(data: str) -> tuple[str, dict]:
     if data == "toggle_pause":
         text = _do_resume() if db.get_setting("paused", False) else _do_pause()
         return text, _menu_keyboard()
-    if data == "toggle_submode":
-        from ..core import subscribe as _sub
-        new_val = not _sub.subscription_only()
-        db.set_setting("subscription_only", new_val)
-        logstream.info("subscribe",
-                       f"已通过 TG 菜单切换订阅模式: {'开' if new_val else '关'}")
-        text = ("🛎 订阅模式已开启：仅转存命中订阅关键词的内容"
-                if new_val else
-                "🛎 订阅模式已关闭：全部转存，命中订阅的额外推送追更通知")
-        return text, _menu_keyboard()
+    if data == "c:submode":
+        return _submode_text(), _menu_keyboard()
     if data.startswith("c:"):
         cmd = data[2:].split()[0] if data[2:].strip() else ""
         args = data[2:].split()[1:]
@@ -225,8 +230,9 @@ async def add_channel_flow(name: str) -> str:
     if not res.get("ok"):
         return f"无法添加 @{name}：{res.get('err') or '频道不可访问，请核对后重试'}"
     title = str(res.get("title") or "")
-    db.execute("INSERT INTO channels(type,name,created_at) VALUES('polling',?,?)",
-               (name, time.time()))
+    from ..core import subscribe as _submod  # 新频道继承全局订阅模式，之后可在网页按频道调整
+    db.execute("INSERT INTO channels(type,name,sub_only,created_at) VALUES('polling',?,?,?)",
+               (name, 1 if _submod.subscription_only() else 0, time.time()))
     logstream.info("channels",
                    f"已通过 TG 指令添加监控频道 @{name}（{title}，已通过访问校验）")
     return f"✅ 已添加频道 @{name}（{title}），下一轮轮询开始抓取"
@@ -255,8 +261,7 @@ def _handle_sub(args: list[str]) -> str:
         mark = "" if r["enabled"] else "⏸ "
         lines.append(f"· {mark}{r['keyword']}{ep}")
     lines.append("")
-    mode = "订阅模式（仅转存命中项）" if _sub.subscription_only() else "全量模式（命中项额外追更通知）"
-    lines.append(f"当前：{mode}")
+    lines.append("ℹ️ 仅订阅/全盘转存按频道独立设置：网页「频道管理」或菜单「📺 频道订阅模式」查看")
     return "\n".join(lines)
 
 

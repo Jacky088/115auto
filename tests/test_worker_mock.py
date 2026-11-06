@@ -1087,9 +1087,11 @@ from backend.worker import bot_commands as bc  # noqa: E402
 
 check("/quota 设置限额", "20" in bc._handle_command("/quota 20", "x"))
 check("限额已落库", db.get_setting("daily_limit") == 20, str(db.get_setting("daily_limit")))
-check("/sub 添加", "已添加" in bc._handle_command("/sub 权力的游戏", "x"))
-check("/sub 列表含新订阅", "权力的游戏" in bc._handle_command("/sub", "x"))
-check("/sub 删除", "已删除" in bc._handle_command("/sub del 权力的游戏", "x"))
+check("/sub 搜索提示", "搜索" in bc._handle_command("/sub 权力的游戏", "x")
+      and "点选" in bc._handle_command("/sub 权力的游戏", "x"))
+_sub_list_out = bc._handle_command("/sub", "x")
+check("/sub 列表", ("追剧订阅" in _sub_list_out) or ("暂无订阅" in _sub_list_out), _sub_list_out[:80])
+check("/sub 删除未存在", "未找到" in bc._handle_command("/sub del 权力的游戏", "x"))
 check("/ls 列出最近记录", "最近转存" in bc._handle_command("/ls", "x"))
 _orig_space_info2 = pan.space_info
 try:

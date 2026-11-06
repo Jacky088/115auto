@@ -66,15 +66,18 @@ def process_message(channel: str, message_id: int, text: str, bypass: bool = Fal
     category, matched = classifier.classify(text or "")
     display_title = classifier.headline(text or "") or (text or "")[:300]
 
-    # 4.5 订阅追剧：命中订阅 → 记录进度；订阅模式下未命中的消息不转存
+    # 4.5 订阅追剧：命中订阅 → 记录进度；该频道开了「仅订阅」→ 未命中的消息不转存
+    # 判断优先级：频道自己的 sub_only 开关 > 全局 subscription_only 设置（频道不存在时兜底）
     sub = subscribe.match(f"{display_title}\n{text or ''}")
-    if subscribe.subscription_only() and sub is None:
+    ch_row = db.query("SELECT sub_only FROM channels WHERE name=?", (channel,), one=True)
+    sub_only = bool(ch_row["sub_only"]) if ch_row else subscribe.subscription_only()
+    if sub_only and sub is None:
         key = f"_sub_skip_logged_{channel}"
         if not _runtime_flags.get(key):
             _runtime_flags[key] = True
             logstream.info("pipeline",
-                           f"[{channel}] 订阅模式已开启：该消息未命中任何订阅关键词，仅记录不转存"
-                           "（到「订阅追剧」页添加关键词）")
+                           f"[{channel}] 该频道已开启「仅订阅」模式：此消息未命中任何订阅关键词，"
+                           "仅记录不转存（在「频道管理」或「订阅追剧」页调整）")
         result["sub_skipped"] = True
         return result
 

@@ -3,10 +3,7 @@
     <template #header>
       <div class="toolbar" style="margin-bottom: 0">
         <span>订阅追剧</span>
-        <div class="sub-only-row">
-          <el-switch v-model="subOnly" @change="toggleSubOnly" />
-          <span class="tip">订阅模式：开启后仅转存命中订阅关键词的内容</span>
-        </div>
+        <span class="tip">「仅订阅 / 全盘转存」已改为按频道独立设置，到「频道管理」页按频道开关</span>
       </div>
     </template>
 
@@ -151,7 +148,6 @@ import { Search, Close } from '@element-plus/icons-vue'
 import { api, errMsg, fmtTime, saveOk } from '../api'
 
 const items = ref([])
-const subOnly = ref(false)
 const loading = ref(false)
 
 // ---- TMDB 选剧订阅：默认按分类浏览，搜索用于精确查找 ----
@@ -271,24 +267,12 @@ const load = async () => {
       api.get('/api/settings').catch(() => null),
     ])
     items.value = sub.data.items || []
-    subOnly.value = !!sub.data.subscription_only
     if (st?.data) {
       tmdbKey.value = String(st.data.tmdb_api_key || '')
     }
   } catch (e) { ElMessage.error(errMsg(e)) } finally { loading.value = false }
   // 已配置 Key：进页面就按分类拉取热门影视（无需搜索）
   if (tmdbKey.value) loadBrowse(true)
-}
-
-// 订阅模式开关：后端 PUT /api/settings 为按键合并，可单独提交
-const toggleSubOnly = async (v) => {
-  try {
-    await api.put('/api/settings', { subscription_only: !!v })
-    saveOk(v ? '订阅模式已开启' : '订阅模式已关闭', v ? '仅转存命中订阅关键词的内容' : '恢复转存全部内容')
-  } catch (e) {
-    subOnly.value = !v  // 保存失败时恢复开关显示
-    ElMessage.error(errMsg(e))
-  }
 }
 
 const toggle = async (row, v) => {
@@ -323,7 +307,6 @@ onMounted(load)
 
 <style scoped>
 .tip { color: #999; font-size: 12px; font-weight: 400; }
-.sub-only-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .sub-actions { display: flex; align-items: center; flex-wrap: nowrap; gap: 6px; white-space: nowrap; }
 .sub-actions :deep(.el-button) { margin-left: 0 !important; }
 .hit-title { font-size: 12px; color: #999; margin-top: 2px; word-break: break-all; }

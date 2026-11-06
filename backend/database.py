@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS channels(
     type TEXT NOT NULL,               -- polling | userbot
     name TEXT NOT NULL,               -- 频道名（不含 @）
     enabled INTEGER NOT NULL DEFAULT 1,
+    sub_only INTEGER NOT NULL DEFAULT 0,  -- 1=仅转存命中订阅关键词的内容（按频道独立设置）
     last_message_id INTEGER NOT NULL DEFAULT 0,
     last_fetch_at REAL,
     msg_count INTEGER NOT NULL DEFAULT 0,
@@ -223,6 +224,10 @@ def _migrate():
     rcols = {r["name"] for r in _conn.execute("PRAGMA table_info(routes)")}
     if "offline_dir" not in rcols:
         _conn.execute("ALTER TABLE routes ADD COLUMN offline_dir TEXT NOT NULL DEFAULT ''")
+    # 频道级订阅模式开关（旧库无此列，默认全盘转存）
+    ccols = {r["name"] for r in _conn.execute("PRAGMA table_info(channels)")}
+    if "sub_only" not in ccols:
+        _conn.execute("ALTER TABLE channels ADD COLUMN sub_only INTEGER NOT NULL DEFAULT 0")
     # 老库迁移：向导已完成的部署视为已启动，保持原有运行行为
     if not _conn.execute("SELECT value FROM settings WHERE key='running'").fetchone():
         done = _conn.execute("SELECT value FROM settings WHERE key='setup_completed'").fetchone()
