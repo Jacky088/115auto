@@ -224,24 +224,35 @@ const currentName = computed(() => path.value[path.value.length - 1]?.name || '�
 const needLogin = computed(() => /未登录|Cookie|登录/.test(loadError.value))
 
 const clipboard = ref(null)
+const pathFromSearch = ref(false) // 从搜索结果进入目录后，需要用后端返回重建完整路径
 
 const onSelection = (rows) => { selected.value = rows }
 
 const normalizePath = (raw, fallbackName = '') => {
-  const list = (raw || []).map((p) => {
+  // 清洗后端返回的路径节点：id 无效的丢弃（否则点面包屑会跳错目录），
+  // 根目录（id=0）只允许出现在首位
+  const list = []
+  for (const p of raw || []) {
     const id = String(p.id ?? '')
     const name = String(p.name ?? '')
-    // 115 没返回目录名时后端会填 id，这里留空，稍后用当前已知名称补上
-    return { id, name: !name || name === id ? '' : name }
-  })
+    if (!id || (id === '0' && list.length)) continue
+    if (list.length && list[list.length - 1].id === id) continue
+    list.push({ id, name: !name || name === id ? '' : name })
+  }
   if (!list.length || list[0].id !== '0') {
     list.unshift({ id: '0', name: '根目录' })
   }
   const last = list[list.length - 1]
+  const curName = fallbackName || currentName.value
   if (!last || String(last.id) !== String(cid.value)) {
-    list.push({ id: String(cid.value), name: fallbackName || currentName.value })
+    if (last && last.name && last.name === curName) {
+      // 末位节点与当前目录同名但 id 对不上（115 path 解析错位）：认定为同一目录，纠正 id
+      last.id = String(cid.value)
+    } else {
+      list.push({ id: String(cid.value), name: curName })
+    }
   } else if (!last.name) {
-    last.name = fallbackName || String(last.id)
+    last.name = curName
   }
   return list
 }
@@ -257,8 +268,17 @@ const load = async () => {
     total.value = data.total || 0
     selected.value = []
     if (!isSearching.value) {
-      const fallbackName = path.value[path.value.length - 1]?.name || '根目录'
-      path.value = normalizePath(data.path, fallbackName)
+      // 客户端路径已与当前目录一致（点击导航时自己维护、id 都是真实值）：
+      // 不要用后端返回的 path 重建，否则 115 路径解析错位时会出现同名目录重复显示。
+      // 仅「从搜索结果进入」时路径是猜的，需要用后端返回重建完整层级链。
+      const cur = path.value[path.value.length - 1]
+      if (pathFromSearch.value || !cur || String(cur.id) !== String(cid.value)) {
+        const fallbackName = cur?.name || '根目录'
+        path.value = normalizePath(data.path, fallbackName)
+        pathFromSearch.value = false
+      } else if (!cur.name) {
+        cur.name = String(cid.value) === '0' ? '根目录' : String(cid.value)
+      }
     }
   } catch (e) {
     items.value = []
@@ -275,6 +295,7 @@ const goRoot = () => {
   page.value = 1
   cid.value = '0'
   path.value = [{ id: '0', name: '根目录' }]
+  pathFromSearch.value = false
   load()
 }
 
@@ -286,23 +307,35 @@ const goHome = () => {
 const goPath = (index) => {
   if (index === path.value.length - 1) return
   const node = path.value[index]
+  if (!node || !node.id) return // 无有效 id 的节点不可导航（如解析失败的占位）
   searchInput.value = ''
   searchTerm.value = ''
   page.value = 1
   cid.value = String(node.id)
   path.value = path.value.slice(0, index + 1)
+  pathFromSearch.value = false
   load()
 }
 
 const openDir = (row) => {
+  if (!row || !row.is_dir) return
+  const wasSearching = isSearching.value
   searchInput.value = ''
   searchTerm.value = ''
   page.value = 1
   cid.value = String(row.id)
   const existing = path.value.findIndex((p) => String(p.id) === String(row.id))
-  path.value = existing >= 0
-    ? path.value.slice(0, existing + 1)
-    : [{ id: '0', name: '根目录' }, { id: String(row.id), name: row.name }]
+  if (existing >= 0) {
+    path.value = path.value.slice(0, existing + 1)
+  } else if (wasSearching) {
+    // 从搜索结果进入的目录与当前面包屑无关：先重置为「根目录 → 该目录」，
+    // 等列表加载完成后用后端返回的真实层级链重建
+    path.value = [{ id: '0', name: '根目录' }, { id: String(row.id), name: row.name }]
+    pathFromSearch.value = true
+  } else {
+    // 正常下钻：在现有路径上追加，保留完整层级（之前会丢掉中间目录）
+    path.value = [...path.value, { id: String(row.id), name: row.name }]
+  }
   load()
 }
 

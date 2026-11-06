@@ -64,28 +64,48 @@ def _sorted_items(raw) -> list[dict]:
 
 
 def _breadcrumb(resp: dict, cid: int) -> list[dict]:
-    """把 115 返回的 path 统一成「根目录 → 当前目录」的面包屑。"""
+    """把 115 返回的 path 统一成「根目录 → 当前目录」的面包屑。
+
+    兼容两种返回形态：
+    - webapi fs_files: [["目录名", "cid"], ...]（根目录在前，末位通常是当前目录）
+    - dict 形态: {"cid"/"file_id"/"fid"/"id", "pid"/"parent_id", "name"/"n"/...}
+    id 解析不出来（或错位）的节点一律丢弃，避免前端出现「同名目录重复显示」
+    和「点面包屑跳错目录」的问题。
+    """
     if cid == 0:
         return [{"id": 0, "name": "根目录"}]
 
-    nodes = []
+    nodes: list[dict] = []
     for p in (resp.get("path") or []):
-        if not isinstance(p, dict):
-            continue
-        nodes.append({
-            "id": _int(p.get("cid") or p.get("file_id") or p.get("fid") or 0),
-            "pid": _int(p.get("pid") if p.get("pid") is not None else p.get("parent_id"), -1),
-            "name": _name(p),
-        })
+        if isinstance(p, (list, tuple)) and len(p) >= 2:
+            a, b = str(p[0] or ""), str(p[1] or "")
+            # 两列里全数字的是 id、另一个是名称（不同接口顺序可能相反）
+            if a.isdigit() and not b.isdigit():
+                nodes.append({"id": _int(a), "pid": -1, "name": b})
+            elif b.isdigit() and not a.isdigit():
+                nodes.append({"id": _int(b), "pid": -1, "name": a})
+            elif a.isdigit() and b.isdigit():
+                nodes.append({"id": _int(a), "pid": -1, "name": b})
+            else:
+                continue
+        elif isinstance(p, dict):
+            if not any(k in p for k in ("cid", "file_id", "fid", "id")):
+                continue  # 完全没有 id 字段，解析不出来，直接丢弃
+            nodes.append({
+                "id": _int(p.get("cid") or p.get("file_id") or p.get("fid")
+                           or p.get("id") or 0),
+                "pid": _int(p.get("pid") if p.get("pid") is not None else p.get("parent_id"), -1),
+                "name": _name(p),
+            })
     if not nodes:
         # 接口没给路径信息，交给前端沿用已知的目录名
         return []
     by_id = {str(n["id"]): n for n in nodes}
 
-    # 1) 优先根据 pid 链回溯，避免依赖接口返回顺序
+    # 1) 优先根据 pid 链回溯（仅 dict 形态带 pid），避免依赖接口返回顺序
     chain: list[dict] = []
     cur = str(cid)
-    seen = set()
+    seen: set[str] = set()
     while cur not in seen:
         seen.add(cur)
         n = by_id.get(cur)
@@ -97,20 +117,30 @@ def _breadcrumb(resp: dict, cid: int) -> list[dict]:
             break
         cur = str(pid)
 
-    if chain and chain[-1]["id"] == 0:
+    if chain and chain[-1]["id"] == 0 and len(chain) > 1:
         return list(reversed(chain))
 
-    # 2) 没有可靠 pid 时按接口 path 顺序兜底，并截断到当前目录
+    # 2) 按 115 返回顺序兜底（本来就是根目录 → 当前目录）
     ordered = list(nodes)
     if len(ordered) > 1 and ordered[-1]["id"] == 0 and ordered[0]["id"] != 0:
-        ordered.reverse()
-    index = next((i for i, n in enumerate(ordered) if str(n["id"]) == str(cid)), None)
-    if index is None:
+        ordered.reverse()  # 个别形态根目录在末位
+    cleaned: list[dict] = []
+    for n in ordered:
+        if n["id"] == 0 and cleaned:
+            continue  # 根目录（id=0）只允许出现在首位
+        if cleaned and cleaned[-1]["id"] == n["id"]:
+            continue  # 相邻重复节点去重
+        cleaned.append({"id": n["id"], "name": n["name"] or ("根目录" if n["id"] == 0 else "")})
+    if not cleaned:
         return []
-    ordered = ordered[:index + 1]
-    if ordered[0]["id"] != 0:
-        ordered.insert(0, {"id": 0, "name": "根目录"})
-    return ordered
+    if cleaned[0]["id"] != 0:
+        cleaned.insert(0, {"id": 0, "name": "根目录"})
+    # 截断到当前目录；若当前目录不在列表里（或 id 解析失败被丢弃），
+    # 原样返回祖先链，由前端用已知的目录名补上当前目录
+    index = next((i for i, n in enumerate(cleaned) if str(n["id"]) == str(cid)), None)
+    if index is not None:
+        cleaned = cleaned[:index + 1]
+    return cleaned
 
 
 def _client():
