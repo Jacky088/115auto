@@ -62,8 +62,8 @@ def status():
 def recent_transfers(limit: int = 20):
     """最近转存记录（默认 20 条，最多 100）。"""
     limit = max(1, min(limit, 100))
-    rows = db.query("SELECT id,kind,title,category,target_dir,size,file_count,status,error,"
-                    "channel,created_at,finished_at FROM transfers ORDER BY id DESC LIMIT ?",
+    rows = db.query("SELECT id,kind,share_code,share_url,title,category,target_dir,size,file_count,"
+                    "status,error,channel,created_at,finished_at FROM transfers ORDER BY id DESC LIMIT ?",
                     (limit,))
     return [dict(r) for r in rows]
 
