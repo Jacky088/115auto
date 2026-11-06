@@ -217,7 +217,11 @@
           <el-form-item label="每日摘要">
             <div class="switch-row">
               <el-switch v-model="f.digest_enabled" />
-              <span class="tip">开启后每天定时把当日转存汇总推送到已配置的通知渠道（TG / Bark / PushPlus / ntfy）</span>
+              <el-button :loading="digestTesting" @click="testDigest">立即推送一次</el-button>
+            </div>
+            <div class="tip" style="width: 100%">
+              开启后每天定时把当日转存汇总推送到已配置的通知渠道（TG / Bark / PushPlus / ntfy）；
+              「立即推送一次」用与定时推送完全相同的内容验证渠道是否可达
             </div>
           </el-form-item>
           <el-form-item v-if="f.digest_enabled" label="推送时间">
@@ -517,6 +521,24 @@ const testChannel = async (ch) => {
     ElMessage.error(errMsg(e))
   } finally {
     chTesting.value = ''
+  }
+}
+// 立即推送一次每日摘要（内容与定时推送一致），用于验证摘要功能是否正常
+const digestTesting = ref(false)
+const testDigest = async () => {
+  digestTesting.value = true
+  try {
+    const { data } = await api.post('/api/settings/digest/test')
+    if (data.ok) {
+      ElMessage.success('✅ 摘要已推送，请到 TG / Bark / 微信 / ntfy 查看')
+    } else {
+      const fail = Object.entries(data.detail || {}).filter(([, v]) => !v).map(([k]) => k).join('、')
+      ElMessage.error(`推送失败：以下渠道未成功 → ${fail}（未配置或发送失败，请检查通知配置）`)
+    }
+  } catch (e) {
+    ElMessage.error(errMsg(e))
+  } finally {
+    digestTesting.value = false
   }
 }
 // 生成随机对外 API Token（32 位十六进制），点击「保存设置」后才落库生效

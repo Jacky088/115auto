@@ -1031,7 +1031,16 @@ def get_settings(_=Depends(require_user)):
             "digest_enabled", "digest_time",
             "auto_backup_enabled", "auto_backup_days",
             "api_token"]
-    return {k: db.get_setting(k) for k in keys}
+    # 未配置过的键必须回代码默认值而非 null：前端会把 null 当「关」显示，
+    # 且保存时 bool(null)=false 落库，把默认开启的功能（如每日摘要）悄悄关掉
+    defaults = {"enable_share_transfer": True, "enable_offline_download": True,
+                "notify_transfer_success": True, "schedule_enabled": False,
+                "schedule_start": "22:00", "schedule_end": "08:00",
+                "subscription_only": False, "dedup_by_name": True,
+                "organize_enabled": False,
+                "digest_enabled": True, "digest_time": "21:00",
+                "auto_backup_enabled": False, "auto_backup_days": 7}
+    return {k: db.get_setting(k, defaults.get(k)) for k in keys}
 
 
 @router.put("/settings")
@@ -1049,8 +1058,10 @@ def put_settings(body: dict, _=Depends(require_user)):
                "digest_enabled", "digest_time",
                "auto_backup_enabled", "auto_backup_days",
                "api_token"}
-    # 先整体校验再落库：任一字段非法时不写入，避免半新半旧配置
-    updates = {k: _norm_setting(k, v) for k, v in body.items() if k in allowed}
+    # 先整体校验再落库：任一字段非法时不写入，避免半新半旧配置。
+    # null 表示「前端从未配置过该键」，跳过不写，防止 bool(null)=false 把默认开启的功能关掉
+    updates = {k: _norm_setting(k, v) for k, v in body.items()
+               if k in allowed and v is not None}
     # 间隔成对提交时保证 min <= max
     for lo_k, hi_k in (("poll_interval_min", "poll_interval_max"),
                        ("transfer_interval_min", "transfer_interval_max")):
@@ -1095,6 +1106,16 @@ def test_channel(channel: str, _=Depends(require_user)):
     if not ok:
         raise HTTPException(400, detail)
     return {"ok": True, "detail": detail}
+
+
+@router.post("/settings/digest/test")
+def digest_test(_=Depends(require_user)):
+    """立即推送一次每日摘要（内容与定时推送完全一致），用于验证摘要功能与通知渠道。"""
+    detail = jobs.notify_detail(jobs.digest_text())
+    ok = any(detail.values())
+    logstream.info("system", "已手动推送每日摘要（测试）" if ok else
+                   "手动推送每日摘要失败：所有通知渠道都未成功（未配置或发送失败）")
+    return {"ok": ok, "detail": detail}
 
 
 # ---------- logs ----------

@@ -502,10 +502,19 @@ def _finish_offline(job: dict, ok: bool, name: str = "", reason: str = ""):
 
 
 # ---------- 每日摘要 ----------
-def _digest_text() -> str:
-    """汇总最近 24 小时的运行情况（成功/失败/队列/空间/追剧进度）。"""
-    from datetime import datetime
-    day_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+def _bj_now():
+    """摘要调度统一用北京时间：不依赖容器/宿主机时区配置（配置错也不影响 21 点推送）。"""
+    from datetime import datetime, timezone, timedelta
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo("Asia/Shanghai"))
+    except Exception:  # 系统缺 zoneinfo 数据时按 UTC+8 手动换算
+        return datetime.now(timezone(timedelta(hours=8)))
+
+
+def digest_text() -> str:
+    """汇总当天的运行情况（成功/失败/队列/空间/追剧进度）。"""
+    day_start = _bj_now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
     rows = db.query("SELECT status, count(*) c FROM transfers WHERE created_at>=? GROUP BY status",
                     (day_start,))
     by = {r["status"]: r["c"] for r in rows}
@@ -538,27 +547,32 @@ async def digest_loop():
 
     只有至少一个渠道发送成功才标记 digest_last_sent，失败时下轮（10 分钟后）
     自动重试，避免一次网络抖动导致当天摘要永久丢失。
+    时间判定固定按北京时间（Asia/Shanghai），与容器/宿主机时区无关。
     """
     while True:
         try:
             if db.get_setting("digest_enabled", True):
-                today = time.strftime("%Y-%m-%d")
+                now = _bj_now()
+                today = now.strftime("%Y-%m-%d")
                 target = str(db.get_setting("digest_time", "21:00") or "21:00")
-                now_hm = time.strftime("%H:%M")
+                now_hm = now.strftime("%H:%M")
                 last = str(db.get_setting("digest_last_sent", "") or "")
                 if last != today and now_hm >= target:
-                    text = _digest_text()
+                    text = digest_text()
                     detail = await asyncio.to_thread(notify_detail, text)
                     if any(detail.values()):
                         db.set_setting("digest_last_sent", today)
-                        logstream.info("system", "已推送每日摘要通知")
+                        sent = "、".join(k for k, v in detail.items() if v)
+                        logstream.info("system", f"已推送每日摘要通知（渠道: {sent}）")
                     else:
                         # 全部渠道失败：记 warn 便于排查（未配置 Token/网络不通等），
                         # 不标记已发送，10 分钟后自动重试
+                        stat = "、".join(f"{k}:{'成功' if v else '失败/未配置'}"
+                                         for k, v in detail.items())
                         logstream.warn("system",
-                                       "每日摘要推送失败：所有通知渠道都未成功。"
-                                       "请检查「通知」区是否已配置 TG Bot Token / Chat ID，"
-                                       "或其他渠道配置是否正确（10 分钟后自动重试）")
+                                       f"每日摘要推送失败（{stat}）。"
+                                       "请检查「通知」区渠道配置，或在设置页点「立即推送一次」验证"
+                                       "（10 分钟后自动重试）")
         except Exception as e:
             logstream.error("system", f"每日摘要推送失败: {logstream.exc(e)}")
         await asyncio.sleep(600)

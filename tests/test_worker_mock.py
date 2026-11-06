@@ -1089,7 +1089,7 @@ check("/space 返回空间信息", "剩余" in out and "60.0GB" in out, out)
 print("\n=== 30. 每日摘要文本 ======")
 from backend.worker import jobs as jobs_mod  # noqa: E402
 
-text = jobs_mod._digest_text()
+text = jobs_mod.digest_text()
 check("摘要含成功/失败统计", "每日摘要" in text and "今日成功" in text, text[:80])
 check("摘要含队列", "队列剩余" in text)
 
