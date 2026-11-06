@@ -61,19 +61,52 @@ async def restore_upload_flow(client: "httpx.AsyncClient", token: str, chat_id: 
             "确认恢复请回复：/restore confirm（10 分钟内有效，或直接忽略即取消）")
 
 
+def _restore_guide() -> str:
+    """恢复操作三步引导（/menu 按钮、/restore 指令共用）。"""
+    return ("♻️ 从备份恢复（三步）：\n"
+            "① 直接把备份 JSON 文件发送给本 Bot（自动备份的文件或网页导出的文件均可）\n"
+            "② 我会校验并回显备份摘要\n"
+            "③ 回复 /restore confirm 确认恢复（10 分钟内有效）\n\n"
+            "恢复会整体覆盖当前的设置/频道/规则/订阅/转存记录（登录密码不变），"
+            "完成并校验一致后我会回复恢复结果")
+
+
+def _verify_restore(data: dict) -> str:
+    """恢复写库后逐表核对：返回空串=校验通过，否则返回不一致说明。"""
+    tables = ("channels", "rules", "routes", "blacklist", "subscriptions", "transfers")
+    for t in tables:
+        want = len(data.get(t) or [])
+        got = db.query(f"SELECT count(*) c FROM {t}", one=True)["c"]
+        if want != got:
+            return f"{t} 数量不一致（备份 {want} 条，实际 {got} 条）"
+    want_s = len(data.get("settings") or {})
+    got_s = db.query("SELECT count(*) c FROM settings", one=True)["c"]
+    # 恢复时强制补写 running=0（停止状态），行数可能比备份多 1
+    if got_s not in (want_s, want_s + 1):
+        return f"settings 数量不一致（备份 {want_s} 项，实际 {got_s} 项）"
+    return ""
+
+
 def _do_restore(chat_id: str) -> str:
-    """执行恢复：校验待确认区 → 写库 → 返回统计。"""
+    """执行恢复：校验待确认区 → 写库 → 复核数量 → 返回结果。"""
     pending = _RESTORE_PENDING.pop(chat_id, None)
     if not pending:
-        return "没有待恢复的备份文件。请先把备份 JSON 文件直接发送给本 Bot，再回复 /restore confirm"
+        return _restore_guide()
     data, ts = pending
     if time.time() - ts > _RESTORE_TTL:
         return "待确认的备份已超时（10 分钟），请重新发送备份文件"
     try:
         stats = db.restore_payload(data)
     except ValueError as e:
-        return f"恢复失败：{e}"
-    return ("✅ 已从备份恢复\n" + _backup_summary(data) +
+        logstream.warn("system", f"TG 恢复备份失败（校验未通过）: {e}")
+        return f"❌ 恢复失败：{e}\n当前数据未被改动（恢复是整体事务，失败自动回滚）"
+    # 写库成功后再逐表复核，确认真实落库才报成功
+    mismatch = _verify_restore(data)
+    if mismatch:
+        logstream.error("system", f"TG 恢复备份后复核不一致: {mismatch}")
+        return f"❌ 恢复结果异常（{mismatch}），请查看系统日志，必要时用网页入口重新恢复"
+    logstream.info("system", f"已通过 TG 指令恢复备份（{_backup_summary(data)}），复核一致")
+    return ("✅ 已从备份恢复（已逐表复核一致）\n" + _backup_summary(data) +
             "\n\n系统已回到停止状态，确认无误后到网页顶栏点「开始运行」。")
 
 
@@ -229,7 +262,8 @@ def _menu_keyboard() -> dict:
           "callback_data": "c:toggle_pause"}],
         [{"text": "🎬 订阅列表", "callback_data": "c:sub"},
          {"text": "📺 频道订阅模式", "callback_data": "c:submode"}],
-        [{"text": "❓ 全部指令帮助", "callback_data": "c:help"}],
+        [{"text": "♻️ 从备份恢复", "callback_data": "c:restore"},
+         {"text": "❓ 全部指令帮助", "callback_data": "c:help"}],
     ]}
 
 
@@ -257,6 +291,8 @@ def _handle_callback(data: str) -> tuple[str, dict]:
         return text, _menu_keyboard()
     if data == "c:submode":
         return _submode_text(), _menu_keyboard()
+    if data == "c:restore":
+        return _restore_guide(), _menu_keyboard()
     if data.startswith("c:"):
         cmd = data[2:].split()[0] if data[2:].strip() else ""
         args = data[2:].split()[1:]
@@ -574,8 +610,7 @@ async def bot_command_loop():
                                 if arg == "confirm":
                                     reply = await asyncio.to_thread(_do_restore, chat_id)
                                 else:
-                                    reply = ("把自动备份/网页导出的 JSON 文件直接发送给本 Bot，"
-                                             "然后回复 /restore confirm 确认恢复")
+                                    reply = _restore_guide()
                             elif text.lower().startswith("/menu"):
                                 reply = "🛠 快捷操作（点按钮执行，执行后菜单原位刷新）"
                                 try:
