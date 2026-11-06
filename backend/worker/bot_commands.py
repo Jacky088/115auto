@@ -24,6 +24,7 @@ HELP = (
     "/status — 查看运行状态（队列/限额/空间/频道）\n"
     "/space — 查看 115 剩余空间\n"
     "/ls — 最近 5 条转存记录\n"
+    "/menu — 快捷操作菜单（按钮面板）\n"
     "/add <频道> — 添加监控频道\n"
     "/quota <数量> — 设置每日转存限额\n"
     "/sub [关键词] — 查看/添加追剧订阅，/sub del <关键词> 删除\n"
@@ -32,6 +33,34 @@ HELP = (
     "/retry — 重试全部失败任务\n"
     "/help — 显示本帮助"
 )
+
+# 注册到 Telegram 的指令菜单：输入框左侧「菜单」按钮 / 输入 / 时可见
+BOT_MENU_COMMANDS = [
+    {"command": "status", "description": "运行状态（队列/限额/空间）"},
+    {"command": "space", "description": "115 剩余空间"},
+    {"command": "ls", "description": "最近 5 条转存记录"},
+    {"command": "menu", "description": "快捷操作菜单（按钮面板）"},
+    {"command": "add", "description": "添加监控频道：/add @频道"},
+    {"command": "quota", "description": "设置每日限额：/quota 30"},
+    {"command": "sub", "description": "追剧订阅：查看/添加/删除"},
+    {"command": "pause", "description": "暂停转存"},
+    {"command": "resume", "description": "恢复转存"},
+    {"command": "retry", "description": "重试全部失败任务"},
+    {"command": "help", "description": "显示帮助"},
+]
+
+
+async def register_bot_menu(client: "httpx.AsyncClient", token: str) -> None:
+    """把指令清单注册到 Telegram（setMyCommands），失败不影响运行。"""
+    try:
+        r = await client.post(f"https://api.telegram.org/bot{token}/setMyCommands",
+                              json={"commands": BOT_MENU_COMMANDS})
+        if r.status_code == 200 and r.json().get("ok"):
+            logstream.info("system", "TG Bot 指令菜单已注册（输入框菜单按钮 / 输入 / 可见）")
+        else:
+            logstream.warn("system", f"TG Bot 菜单注册失败: {str(r.text)[:120]}")
+    except Exception as e:
+        logstream.warn("system", f"TG Bot 菜单注册异常: {logstream.exc(e)}")
 
 
 def _gb(b: float) -> str:
@@ -101,16 +130,8 @@ def _handle_command(text: str, chat_id: str) -> str:
         return f"📈 每日限额已设为 {n}" + ("（不限制）" if n == 0 else "")
     if cmd == "/sub":
         return _handle_sub(args)
-    if cmd == "/pause":
-        db.set_setting("paused", True)
-        logstream.warn("transfer", "已通过 TG 指令暂停转存（/pause）")
-        return "⏸ 已暂停转存（队列保留）。发送 /resume 恢复"
-    if cmd == "/resume":
-        if not db.get_setting("running", False):
-            return "⏹ 系统尚未启动，请先在网页顶栏点「开始运行」"
-        db.set_setting("paused", False)
-        logstream.info("transfer", "已通过 TG 指令恢复转存（/resume）")
-        return "▶ 已恢复转存"
+    if cmd in ("/pause", "/resume"):
+        return _do_pause() if cmd == "/pause" else _do_resume()
     if cmd == "/retry":
         n = db.execute("UPDATE transfers SET status='queued', attempts=0, error='', next_retry_at=NULL"
                        " WHERE status='failed'")
@@ -118,7 +139,66 @@ def _handle_command(text: str, chat_id: str) -> str:
         return f"🔄 已重试 {n} 个失败任务" if n else "当前没有失败任务"
     if cmd == "/help":
         return HELP
+    if cmd == "/menu":
+        return "发送 /menu 打开快捷操作菜单"
     return f"未知指令 {cmd}\n\n{HELP}"
+
+
+def _do_pause() -> str:
+    db.set_setting("paused", True)
+    logstream.warn("transfer", "已通过 TG 指令暂停转存（/pause）")
+    return "⏸ 已暂停转存（队列保留）。发送 /resume 恢复"
+
+
+def _do_resume() -> str:
+    if not db.get_setting("running", False):
+        return "⏹ 系统尚未启动，请先在网页顶栏点「开始运行」"
+    db.set_setting("paused", False)
+    logstream.info("transfer", "已通过 TG 指令恢复转存（/resume）")
+    return "▶ 已恢复转存"
+
+
+def _menu_keyboard() -> dict:
+    """快捷操作菜单：按钮随当前状态变化（暂停/恢复、订阅模式开关）。"""
+    from ..core import subscribe as _sub
+    paused = bool(db.get_setting("paused", False))
+    return {"inline_keyboard": [
+        [{"text": "📊 运行状态", "callback_data": "c:status"},
+         {"text": "💾 115 空间", "callback_data": "c:space"}],
+        [{"text": "🕘 最近转存", "callback_data": "c:ls"},
+         {"text": "🔄 重试失败任务", "callback_data": "c:retry"}],
+        [{"text": "⏸ 暂停转存" if not paused else "▶ 恢复转存",
+          "callback_data": "c:toggle_pause"}],
+        [{"text": "🎬 订阅列表", "callback_data": "c:sub"},
+         {"text": "🛎 订阅模式：" + ("开" if _sub.subscription_only() else "关"),
+          "callback_data": "c:toggle_submode"}],
+        [{"text": "❓ 全部指令帮助", "callback_data": "c:help"}],
+    ]}
+
+
+def _handle_callback(data: str) -> tuple[str, dict]:
+    """处理菜单按钮点击，返回 (回复文本, 键盘)。动作执行后菜单会原位刷新。"""
+    data = (data or "").strip()
+    if data == "toggle_pause":
+        text = _do_resume() if db.get_setting("paused", False) else _do_pause()
+        return text, _menu_keyboard()
+    if data == "toggle_submode":
+        from ..core import subscribe as _sub
+        new_val = not _sub.subscription_only()
+        db.set_setting("subscription_only", new_val)
+        logstream.info("subscribe",
+                       f"已通过 TG 菜单切换订阅模式: {'开' if new_val else '关'}")
+        text = ("🛎 订阅模式已开启：仅转存命中订阅关键词的内容"
+                if new_val else
+                "🛎 订阅模式已关闭：全部转存，命中订阅的额外推送追更通知")
+        return text, _menu_keyboard()
+    if data.startswith("c:"):
+        cmd = data[2:].split()[0] if data[2:].strip() else ""
+        args = data[2:].split()[1:]
+        if cmd in ("status", "space", "ls", "sub", "retry", "help"):
+            text = _handle_command(f"/{cmd} {' '.join(args)}".strip(), "")
+            return text, (_menu_keyboard() if cmd != "help" else {})
+    return "未知操作", _menu_keyboard()
 
 
 async def add_channel_flow(name: str) -> str:
@@ -213,6 +293,7 @@ async def bot_command_loop():
             async with httpx.AsyncClient(proxy=proxy, timeout=timeout) as client:
                 fingerprint = (token, chat_id, proxy)
                 if announced != fingerprint:
+                    await register_bot_menu(client, token)  # 顺手把指令菜单注册到 TG
                     logstream.info("system", "TG Bot 远程指令已启动（/help 查看指令）")
                     announced = fingerprint
                 while True:
@@ -222,7 +303,7 @@ async def bot_command_loop():
                     if cur_token != token or cur_chat != chat_id or _tg_proxy() != proxy:
                         break
                     params = {"timeout": 25, "offset": _last_update_id + 1,
-                              "allowed_updates": '["message"]'}
+                              "allowed_updates": '["message","callback_query"]'}
                     try:
                         resp = await client.get(
                             f"https://api.telegram.org/bot{token}/getUpdates", params=params)
@@ -238,6 +319,45 @@ async def bot_command_loop():
                         continue
                     for upd in updates:
                         _last_update_id = max(_last_update_id, upd["update_id"])
+
+                        # ---- 菜单按钮点击（callback_query）：原位编辑菜单消息 ----
+                        cq = upd.get("callback_query")
+                        if cq:
+                            if str(cq.get("message", {}).get("chat", {}).get("id", "")) != chat_id:
+                                continue
+                            try:
+                                reply, kb = await asyncio.to_thread(
+                                    _handle_callback, cq.get("data") or "")
+                            except Exception as e:
+                                reply, kb = f"操作失败: {e}", {}
+                            try:  # 先应答回调，去掉按钮上的加载动画
+                                await client.post(
+                                    f"https://api.telegram.org/bot{token}/answerCallbackQuery",
+                                    json={"callback_query_id": cq.get("id")})
+                            except Exception:
+                                pass
+                            try:  # 原位编辑菜单消息（结果 + 刷新后的按钮）
+                                payload = {"chat_id": chat_id,
+                                           "message_id": cq.get("message", {}).get("message_id"),
+                                           "text": reply}
+                                if kb:
+                                    payload["reply_markup"] = kb
+                                await client.post(
+                                    f"https://api.telegram.org/bot{token}/editMessageText",
+                                    json=payload)
+                            except Exception:
+                                try:  # 消息未变化等编辑失败场景：退化为发新消息
+                                    payload = {"chat_id": chat_id, "text": reply}
+                                    if kb:
+                                        payload["reply_markup"] = kb
+                                    await client.post(
+                                        f"https://api.telegram.org/bot{token}/sendMessage",
+                                        json=payload)
+                                except Exception:
+                                    pass
+                            continue
+
+                        # ---- 文本指令 ----
                         msg = upd.get("message") or {}
                         if str(msg.get("chat", {}).get("id", "")) != chat_id:
                             continue  # 非授权用户
@@ -245,6 +365,16 @@ async def bot_command_loop():
                         if not text.startswith("/"):
                             continue
                         try:
+                            if text.lower().startswith("/menu"):
+                                reply = "🛠 快捷操作（点按钮执行，执行后菜单原位刷新）"
+                                try:
+                                    await client.post(
+                                        f"https://api.telegram.org/bot{token}/sendMessage",
+                                        json={"chat_id": chat_id, "text": reply,
+                                              "reply_markup": _menu_keyboard()})
+                                except Exception:
+                                    pass
+                                continue
                             if text.lower().startswith("/add"):
                                 # /add 需要异步做频道可访问性校验，单独处理
                                 reply = await add_channel_flow(text.split(None, 1)[1]) \
