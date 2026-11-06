@@ -2,7 +2,7 @@
 import re
 import time
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 
 from .. import auth, config, database as db
 from ..core import classifier, filters, logstream, pipeline
@@ -419,6 +419,103 @@ def delete_subscription(sub_id: int, _=Depends(require_user)):
     if row:
         logstream.info("subscribe", f"删除追剧订阅: {row['keyword']}")
     return {"ok": True}
+
+
+# ---------- tmdb 选剧搜索（订阅页） ----------
+_TMDB_IMG_BASE = "https://image.tmdb.org/t/p"
+
+
+def _tmdb_lang() -> str:
+    return str(db.get_setting("tmdb_language", "zh-CN") or "zh-CN") or "zh-CN"
+
+
+def _tmdb_get(path: str, params: dict, timeout: float = 10):
+    """带代理请求 TMDB，返回响应对象；调用方自行处理异常。"""
+    import httpx
+    proxy = None
+    try:
+        proxy = jobs._tg_proxy()
+    except Exception:
+        pass
+    return httpx.get(f"https://api.themoviedb.org/3{path}",
+                     params=params, proxy=proxy, timeout=timeout)
+
+
+@router.get("/tmdb/search")
+def tmdb_search(query: str = "", kind: str = "all", page: int = 1, _=Depends(require_user)):
+    """按名称搜索 TMDB 影视（tv/movie），返回海报、年份、简介等供订阅选剧。"""
+    api_key = str(db.get_setting("tmdb_api_key", "") or "").strip()
+    if not api_key:
+        raise HTTPException(400, "请先在上方填写并保存 TMDB API Key")
+    query = query.strip()
+    if len(query) < 2:
+        raise HTTPException(400, "搜索词至少 2 个字符")
+    page = page if page >= 1 else 1
+    kinds = ("tv", "movie") if kind not in ("tv", "movie") else (kind,)
+    items = []
+    for k in kinds:
+        try:
+            resp = _tmdb_get(f"/search/{k}", {"api_key": api_key, "query": query,
+                                              "language": _tmdb_lang(), "page": page})
+            if resp.status_code != 200:
+                continue
+            for it in (resp.json().get("results") or []):
+                name = it.get("name") or it.get("title") or ""
+                if not name:
+                    continue
+                date = it.get("first_air_date") or it.get("release_date") or ""
+                poster_path = it.get("poster_path") or ""
+                items.append({
+                    "id": it.get("id"), "kind": k, "name": name,
+                    "original": it.get("original_name") or it.get("original_title") or "",
+                    "year": date[:4] if re.match(r"^(19|20)\d{2}", date) else "",
+                    "date": date,
+                    "overview": (it.get("overview") or "").strip()[:200],
+                    "rating": round(float(it.get("vote_average") or 0), 1),
+                    "poster": f"{_TMDB_IMG_BASE}/w200{poster_path}" if poster_path else "",
+                    "poster_path": poster_path,
+                    "popularity": float(it.get("popularity") or 0),
+                })
+        except Exception:
+            continue  # 网络异常时跳过该类型，另一个类型可能仍可用
+    items.sort(key=lambda x: -x["popularity"])
+    return {"items": items[:24]}
+
+
+@router.get("/tmdb/poster")
+def tmdb_poster(path: str = "", token: str = "",
+                authorization: str = Header(default="")):
+    """后端代理 TMDB 海报图片（大陆无法直连 image.tmdb.org，走 TG 代理）。
+
+    浏览器 <img> 标签无法带 Authorization 头，因此额外允许 ?token= 鉴权。
+    """
+    from fastapi.responses import Response
+    user = ""
+    if authorization.startswith("Bearer "):
+        user = auth.check_token(authorization[7:]) or ""
+    if not user and token:
+        user = auth.check_token(token) or ""
+    if not user:
+        raise HTTPException(401, "登录已过期，请重新登录")
+    if not re.match(r"^/[A-Za-z0-9._-]+(\.jpg|\.png|\.jpeg|\.webp)$", path):
+        raise HTTPException(400, "海报路径不合法")
+    proxy = None
+    try:
+        proxy = jobs._tg_proxy()
+    except Exception:
+        pass
+    try:
+        import httpx
+        resp = httpx.get(f"{_TMDB_IMG_BASE}/w200{path}", proxy=proxy, timeout=15)
+        if resp.status_code != 200:
+            raise HTTPException(404, "海报获取失败")
+        return Response(content=resp.content, media_type=resp.headers.get(
+            "content-type", "image/jpeg"),
+            headers={"Cache-Control": "public, max-age=604800"})
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, f"海报获取失败: {str(e)[:120]}")
 
 
 # ---------- version ----------

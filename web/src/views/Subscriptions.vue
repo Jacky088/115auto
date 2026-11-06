@@ -10,6 +10,67 @@
       </div>
     </template>
 
+    <!-- 从 TMDB 选剧订阅：填 API Key → 搜片名 → 出海报/播出信息 → 一键订阅 -->
+    <div class="tmdb-section">
+      <div class="tmdb-title">
+        🔍 从 TMDB 选剧订阅
+        <el-tag v-if="tmdbKey" type="success" size="small" effect="plain">API Key 已配置</el-tag>
+        <el-tag v-else type="info" size="small" effect="plain">未配置 API Key</el-tag>
+        <span class="tip">在 themoviedb.org 免费申请（项目设置 → TMDB 刮削 共用此 Key）</span>
+      </div>
+      <div class="toolbar">
+        <el-input v-model="tmdbKeyInput" type="password" show-password
+                  placeholder="TMDB API Key (v3)" style="width: 280px" clearable />
+        <el-button :loading="savingKey" @click="saveTmdbKey">保存 Key</el-button>
+      </div>
+      <div class="toolbar">
+        <el-input v-model="searchWord" maxlength="80" placeholder="输入电影 / 剧集名称搜索，如：庆余年"
+                  style="width: 320px" clearable @keyup.enter="doSearch" @clear="clearResults">
+          <template #prefix><el-icon><Search /></el-icon></template>
+        </el-input>
+        <el-select v-model="searchKind" style="width: 110px">
+          <el-option label="全部类型" value="all" />
+          <el-option label="电视剧" value="tv" />
+          <el-option label="电影" value="movie" />
+        </el-select>
+        <el-button type="primary" :loading="searching" @click="doSearch">搜索</el-button>
+      </div>
+
+      <div v-if="searched && !results.length && !searching" class="tmdb-empty">
+        没有找到相关内容，试试换个名称或切换类型
+      </div>
+      <div v-if="results.length" class="tmdb-grid">
+        <div v-for="it in results" :key="it.kind + it.id" class="tmdb-card">
+          <div class="tmdb-poster">
+            <el-image v-if="it.poster_path" :src="posterUrl(it.poster_path)"
+                      fit="cover" lazy class="poster-img">
+              <template #error><div class="poster-err">海报加载失败</div></template>
+            </el-image>
+            <div v-else class="poster-none">无海报</div>
+          </div>
+          <div class="tmdb-info">
+            <div class="tmdb-name" :title="it.name">{{ it.name }}</div>
+            <div v-if="it.original && it.original !== it.name" class="tmdb-orig" :title="it.original">
+              {{ it.original }}
+            </div>
+            <div class="tmdb-meta">
+              <el-tag size="small" :type="it.kind === 'tv' ? 'warning' : 'primary'"
+                      effect="plain">{{ it.kind === 'tv' ? '电视剧' : '电影' }}</el-tag>
+              <span v-if="it.date" class="tmdb-date">📺 {{ it.date }} 开播</span>
+              <span v-if="it.rating" class="tmdb-rating">⭐ {{ it.rating }}</span>
+            </div>
+            <div v-if="it.overview" class="tmdb-overview" :title="it.overview">{{ it.overview }}</div>
+            <el-button size="small" type="primary" class="tmdb-sub-btn"
+                       :disabled="isSubscribed(it.name)" @click="subFromTmdb(it)">
+              {{ isSubscribed(it.name) ? '已订阅' : '订阅' }}
+            </el-button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <el-divider />
+
     <div class="toolbar">
       <el-input v-model="addForm.keyword" maxlength="100" show-word-limit
                 placeholder="关键词，如剧集名（必填，≤100 字）" style="width: 280px"
@@ -64,22 +125,86 @@
 </template>
 
 <script setup>
-import { onMounted, reactive, ref } from 'vue'
+import { onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
+import { Search } from '@element-plus/icons-vue'
 import { api, errMsg, fmtTime, saveOk } from '../api'
 
 const items = ref([])
 const subOnly = ref(false)
 const loading = ref(false)
 const adding = ref(false)
-const addForm = reactive({ keyword: '', note: '' })
+const addForm = ref({ keyword: '', note: '' })
+
+// ---- TMDB 选剧订阅 ----
+const tmdbKey = ref('')
+const tmdbKeyInput = ref('')
+const savingKey = ref(false)
+const searchWord = ref('')
+const searchKind = ref('all')
+const searching = ref(false)
+const searched = ref(false)
+const results = ref([])
+
+const posterUrl = (path) => {
+  const token = encodeURIComponent(localStorage.getItem('token') || '')
+  return `/api/tmdb/poster?path=${encodeURIComponent(path)}&token=${token}`
+}
+
+// 已订阅判定：订阅关键词与片名一致（两侧去空白、忽略大小写）
+const isSubscribed = (name) =>
+  items.value.some((r) => (r.keyword || '').trim().toLowerCase() === name.trim().toLowerCase())
+
+const saveTmdbKey = async () => {
+  const key = tmdbKeyInput.value.trim()
+  if (!key) { ElMessage.warning('请输入 TMDB API Key'); return }
+  savingKey.value = true
+  try {
+    await api.put('/api/settings', { tmdb_api_key: key })
+    tmdbKey.value = key
+    tmdbKeyInput.value = ''
+    saveOk('TMDB API Key 已保存', '现在可以搜索电影 / 剧集并一键订阅了')
+  } catch (e) { ElMessage.error(errMsg(e)) } finally { savingKey.value = false }
+}
+
+const doSearch = async () => {
+  const q = searchWord.value.trim()
+  if (q.length < 2) { ElMessage.warning('请输入至少 2 个字符的片名'); return }
+  if (!tmdbKey.value) { ElMessage.warning('请先填写并保存 TMDB API Key'); return }
+  if (searching.value) return
+  searching.value = true
+  try {
+    const { data } = await api.get('/api/tmdb/search', { params: { query: q, kind: searchKind.value } })
+    results.value = data.items || []
+    searched.value = true
+  } catch (e) { ElMessage.error(errMsg(e)) } finally { searching.value = false }
+}
+
+const clearResults = () => { results.value = []; searched.value = false }
+
+const subFromTmdb = async (it) => {
+  try {
+    await api.post('/api/subscriptions', {
+      keyword: it.name,
+      note: `TMDB ${it.kind === 'tv' ? '电视剧' : '电影'}${it.year ? ' · ' + it.year : ''}`,
+    })
+    ElMessage.success(`已添加订阅「${it.name}」${it.kind === 'tv' ? '，命中后会推送追更通知' : ''}`)
+    load()
+  } catch (e) { ElMessage.error(errMsg(e)) }
+}
 
 const load = async () => {
   loading.value = true
   try {
-    const { data } = await api.get('/api/subscriptions')
-    items.value = data.items || []
-    subOnly.value = !!data.subscription_only
+    const [sub, st] = await Promise.all([
+      api.get('/api/subscriptions'),
+      api.get('/api/settings').catch(() => null),
+    ])
+    items.value = sub.data.items || []
+    subOnly.value = !!sub.data.subscription_only
+    if (st?.data) {
+      tmdbKey.value = String(st.data.tmdb_api_key || '')
+    }
   } catch (e) { ElMessage.error(errMsg(e)) } finally { loading.value = false }
 }
 
@@ -95,15 +220,15 @@ const toggleSubOnly = async (v) => {
 }
 
 const add = async () => {
-  const kw = addForm.keyword.trim()
+  const kw = addForm.value.keyword.trim()
   if (!kw) { ElMessage.warning('请输入订阅关键词'); return }
   if (adding.value) return
   adding.value = true
   try {
-    await api.post('/api/subscriptions', { keyword: kw, note: addForm.note.trim() })
+    await api.post('/api/subscriptions', { keyword: kw, note: addForm.value.note.trim() })
     ElMessage.success(`已添加订阅「${kw}」`)
-    addForm.keyword = ''
-    addForm.note = ''
+    addForm.value.keyword = ''
+    addForm.value.note = ''
     load()
   } catch (e) { ElMessage.error(errMsg(e)) } finally { adding.value = false }
 }
@@ -144,4 +269,32 @@ onMounted(load)
 .sub-actions { display: flex; align-items: center; flex-wrap: nowrap; gap: 6px; white-space: nowrap; }
 .sub-actions :deep(.el-button) { margin-left: 0 !important; }
 .hit-title { font-size: 12px; color: #999; margin-top: 2px; word-break: break-all; }
+
+/* ---- TMDB 选剧 ---- */
+.tmdb-section { margin-bottom: 4px; }
+.tmdb-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-weight: 600; margin-bottom: 10px; }
+.tmdb-title .tip { font-weight: 400; }
+.tmdb-empty { color: #999; font-size: 13px; padding: 12px 0 4px; }
+.tmdb-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 12px; margin-top: 12px; }
+.tmdb-card {
+  display: flex; gap: 12px; padding: 12px; border-radius: 10px;
+  background: var(--saas-card, #fff); border: 1px solid var(--saas-border, #e5e8f0);
+  transition: border-color .15s;
+}
+.tmdb-card:hover { border-color: var(--el-color-primary-light-5, #a0cfff); }
+.tmdb-poster { flex: none; }
+.poster-img { width: 96px; height: 144px; border-radius: 8px; display: block; background: var(--saas-hover, #f4f7fe); }
+.poster-err, .poster-none {
+  width: 96px; height: 144px; border-radius: 8px; display: flex; align-items: center; justify-content: center;
+  background: var(--saas-hover, #f4f7fe); color: #999; font-size: 12px; text-align: center; padding: 6px;
+}
+.tmdb-info { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.tmdb-name { font-weight: 600; font-size: 14px; color: var(--saas-text-main, #1f2d3d); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tmdb-orig { font-size: 12px; color: #999; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tmdb-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 6px; font-size: 12px; color: var(--saas-text-sub, #666); }
+.tmdb-overview {
+  font-size: 12px; color: #8a97b3; line-height: 1.6; margin-top: 6px;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.tmdb-sub-btn { margin-top: auto; align-self: flex-start; }
 </style>
