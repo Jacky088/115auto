@@ -86,7 +86,7 @@
                         effect="plain">{{ it.kind === 'tv' ? '电视剧' : '电影' }}</el-tag>
                 <el-tag v-if="it.season" size="small" type="danger" effect="plain"
                         :title="`最新一季：${it.season}（${it.date} 开播）`">{{ it.season }}</el-tag>
-                <span v-if="it.date" class="tmdb-date">📺 {{ it.date }} {{ it.season ? '最新季' : '开播' }}</span>
+                <span v-if="it.date" class="tmdb-date">📺 {{ it.date }} {{ it.kind === 'movie' ? '上映' : (it.season ? '最新季' : '开播') }}</span>
                 <span v-if="it.rating" class="tmdb-rating">⭐ {{ it.rating }}</span>
               </div>
               <div v-if="it.overview" class="tmdb-overview" :title="it.overview">{{ it.overview }}</div>
@@ -169,8 +169,9 @@ const searchWord = ref('')
 const searching = ref(false)
 const searchTerm = ref('') // 当前搜索词（进入搜索模式时记录）
 
-// 分类 → 后端 discover kind。全部只拉近期内容（追剧导向）：
-// on_air 正在播出 / upcoming 即将上线(电影+剧集) / anime 动漫新番(45天) / doc 纪录片(90天)
+// 分类 → 后端 discover kind。全部只拉近期内容（追剧日历导向）：
+// on_air 正在播出(在更剧+热映电影) / upcoming 即将上线(待映电影+定档新剧，按日期升序)
+// / anime 动漫新番(45天) / doc 纪录片(90天)
 const CATS = [
   { key: 'on_air', label: '📺 正在播出', kind: 'on_air' },
   { key: 'upcoming', label: '📅 即将上线', kind: 'upcoming' },

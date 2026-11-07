@@ -524,11 +524,13 @@ def _enrich_tv_latest_season(items: list[dict], api_key: str, lang: str) -> list
 
 @router.get("/tmdb/discover")
 def tmdb_discover(kind: str = "on_air", page: int = 1, _=Depends(require_user)):
-    """追剧选剧分类浏览：只拉「正在播出 / 即将上线」等近期内容，不做全量老片浏览。
+    """追剧选剧分类浏览：按「追剧日历」视角组织，电影与剧集各自对齐正确概念。
 
     kind:
-      on_air  — 📺 正在播出（TMDB 官方 /tv/on_the_air，近两周内有更新且在播的剧）
-      upcoming— 📅 即将上线（电影 /movie/upcoming + TV discover 首播日期≥今天，合并）
+      on_air  — 📺 正在播出：剧集=TMDB /tv/on_the_air（未来 7 天内有更新、在播）；
+                电影=/movie/now_playing（正在影院热映）——电影没有「播出」概念
+      upcoming— 📅 即将上线：电影=/movie/upcoming（已定档待映）；
+                剧集=discover 首播在今天~未来 90 天内的新剧/新一季，按开播日期升序（日历感）
       anime   — 🎌 动漫新番（动画类目 + 最近 45 天内开播/更新的剧）
       doc     — 🌍 纪录片（纪录片类目 + 最近 90 天内开播/更新的剧）
     """
@@ -546,49 +548,59 @@ def tmdb_discover(kind: str = "on_air", page: int = 1, _=Depends(require_user)):
 
     def _collect(path: str, params: dict, k: str) -> None:
         nonlocal total_pages
-        resp = _tmdb_get(path, params)
+        try:
+            resp = _tmdb_get(path, params)
+        except Exception as e:
+            logstream.warn("system", f"TMDB {path} 请求失败: {logstream.exc(e)}")
+            return
         if resp.status_code != 200:
+            logstream.warn("system", f"TMDB {path} 返回 {resp.status_code}: {str(resp.text)[:120]}")
             return
         data = resp.json()
         total_pages = max(total_pages, min(int(data.get("total_pages") or 1), 500))
         items.extend(x for x in (_tmdb_item(it, k)
                                  for it in (data.get("results") or [])) if x)
 
-    try:
-        if kind == "on_air":
-            _collect("/tv/on_the_air", {"api_key": api_key, "language": lang,
-                                        "page": page}, "tv")
-        elif kind == "upcoming":
-            _collect("/movie/upcoming", {"api_key": api_key, "language": lang,
-                                         "page": page}, "movie")
-            _collect("/discover/tv", {"api_key": api_key, "language": lang, "page": page,
-                                      "sort_by": "popularity.desc", "include_adult": "false",
-                                      "first_air_date.gte": today.isoformat()}, "tv")
-        elif kind == "anime":
-            _collect("/discover/tv", {"api_key": api_key, "language": lang, "page": page,
-                                      "sort_by": "popularity.desc", "include_adult": "false",
-                                      "with_genres": "16",
-                                      "air_date.gte": (today - datetime.timedelta(days=45)).isoformat()},
-                     "tv")
-        elif kind == "doc":
-            _collect("/discover/tv", {"api_key": api_key, "language": lang, "page": page,
-                                      "sort_by": "popularity.desc", "include_adult": "false",
-                                      "with_genres": "99",
-                                      "air_date.gte": (today - datetime.timedelta(days=90)).isoformat()},
-                     "tv")
-        else:
-            raise HTTPException(400, f"未知分类: {kind}")
-    except HTTPException:
-        raise
-    except Exception:
-        pass  # 单一来源失败不影响其它来源；下面统一判空
+    if kind == "on_air":
+        # 剧集：在更剧；电影：正在热映（两个世界的同一档位，保证类型筛选双方都有数据）
+        _collect("/tv/on_the_air", {"api_key": api_key, "language": lang,
+                                    "page": page}, "tv")
+        _collect("/movie/now_playing", {"api_key": api_key, "language": lang,
+                                        "page": page}, "movie")
+    elif kind == "upcoming":
+        # 电影：已定档待映；剧集：已定档新剧/新一季（今天~90 天内开播）
+        _collect("/movie/upcoming", {"api_key": api_key, "language": lang,
+                                     "page": page}, "movie")
+        _collect("/discover/tv", {"api_key": api_key, "language": lang, "page": page,
+                                  "sort_by": "first_air_date.asc", "include_adult": "false",
+                                  "first_air_date.gte": today.isoformat(),
+                                  "first_air_date.lte": (today + datetime.timedelta(days=90)).isoformat()},
+                 "tv")
+    elif kind == "anime":
+        _collect("/discover/tv", {"api_key": api_key, "language": lang, "page": page,
+                                  "sort_by": "popularity.desc", "include_adult": "false",
+                                  "with_genres": "16",
+                                  "air_date.gte": (today - datetime.timedelta(days=45)).isoformat()},
+                 "tv")
+    elif kind == "doc":
+        _collect("/discover/tv", {"api_key": api_key, "language": lang, "page": page,
+                                  "sort_by": "popularity.desc", "include_adult": "false",
+                                  "with_genres": "99",
+                                  "air_date.gte": (today - datetime.timedelta(days=90)).isoformat()},
+                 "tv")
+    else:
+        raise HTTPException(400, f"未知分类: {kind}")
     if not items:
         raise HTTPException(502, "TMDB 拉取失败，请检查 API Key 或网络/代理设置")
-    items.sort(key=lambda x: -x["popularity"])
+    if kind == "upcoming":
+        # 即将上线按开播/上映日期升序：最接近今天的排最前，符合追剧日历视角
+        items.sort(key=lambda x: x.get("date") or "9999-12-31")
+    else:
+        items.sort(key=lambda x: -x["popularity"])
     # TV 条目改用最新季的播出时间 + 季号标签（季播剧首播日期没有参考意义）
     items = _enrich_tv_latest_season(items, api_key, lang)
-    # upcoming 合并了电影+剧集两个来源，截断到单页数量，保证分页节奏一致
-    return {"items": items[:20], "page": page, "total_pages": total_pages}
+    # 合并类目含电影+剧集两个来源，返回双份单页（各 20 条），保证类型筛选双方都有数据
+    return {"items": items[:40], "page": page, "total_pages": total_pages}
 
 
 @router.get("/tmdb/search")
