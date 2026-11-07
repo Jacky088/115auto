@@ -149,6 +149,7 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { api, errMsg, saveOk } from '../api'
+import { resetWizardCache } from '../router'
 
 const route = useRoute()
 const router = useRouter()
@@ -283,7 +284,11 @@ const onCommand = (cmd) => {
     pwdVisible.value = true
     nextTick(() => pwdFormRef.value?.clearValidate())
   }
-  if (cmd === 'logout') { localStorage.removeItem('token'); router.push('/login') }
+  if (cmd === 'logout') {
+    localStorage.removeItem('token')
+    resetWizardCache()  // 下次登录重新检查向导状态（可能换账号/重置数据）
+    router.push('/login')
+  }
 }
 const changePwd = async () => {
   try {
@@ -296,6 +301,7 @@ const changePwd = async () => {
     // 服务端已轮换 JWT 签名密钥：所有旧 token（含本会话）立即失效
     // 强制退出到登录页，必须用新用户名/新密码重新登录（安全要求，不做无感续期）
     localStorage.removeItem('token')
+    resetWizardCache()
     ElMessage.success('账号已更新，请使用新的用户名 / 密码重新登录')
     setTimeout(() => router.push('/login'), 800)
   } catch (e) { ElMessage.error(errMsg(e)) }

@@ -378,6 +378,31 @@ MSG_RETENTION_SECONDS = 30 * 86400   # 消息去重记录保留 30 天（防重�
 HITS_RETENTION_SECONDS = 90 * 86400  # 黑名单命中记录保留 90 天（低频数据，留足复核期）
 
 
+def _cleanup_once() -> tuple[int, int, int]:
+    """执行一轮过期数据清理，返回 (日志, 消息, 命中记录) 删除条数。
+
+    分批删除（每批 2000 条）：单事务删几十万行会长时间持有 SQLite 写锁，
+    把整个应用（页面接口、WS 心跳、日志写入）全部卡住；分批把每次持锁时间压到毫秒级。
+    """
+    total = [0, 0, 0]
+    # messages 表是 (channel, message_id) 复合主键没有 id 列，统一用 SQLite 隐式 rowid
+    jobs = (
+        ("DELETE FROM logs WHERE rowid IN (SELECT rowid FROM logs WHERE created_at<? LIMIT 2000)",
+         time.time() - LOG_RETENTION_SECONDS, 0),
+        ("DELETE FROM messages WHERE rowid IN (SELECT rowid FROM messages WHERE processed_at<? LIMIT 2000)",
+         time.time() - MSG_RETENTION_SECONDS, 1),
+        ("DELETE FROM blacklist_hits WHERE rowid IN (SELECT rowid FROM blacklist_hits WHERE created_at<? LIMIT 2000)",
+         time.time() - HITS_RETENTION_SECONDS, 2),
+    )
+    for sql, cutoff, idx in jobs:
+        while True:
+            n = db.execute(sql, (cutoff,))
+            total[idx] += n
+            if n < 2000:
+                break
+    return tuple(total)
+
+
 async def log_cleanup_loop():
     """每小时清理一次过期数据，防止数据库随时间无限膨胀：
     - 日志：保留 7 天（网页可查/导出）
@@ -388,16 +413,12 @@ async def log_cleanup_loop():
     logstream.info("system", "数据自动清理任务启动（日志 7 天 / 消息 30 天 / 命中记录 90 天）")
     while True:
         try:
-            deleted = db.execute("DELETE FROM logs WHERE created_at<?",
-                                 (time.time() - LOG_RETENTION_SECONDS,))
+            # 清理是批量 DB 写操作：放线程池执行，不阻塞事件循环
+            deleted, stale_msgs, stale_hits = await asyncio.to_thread(_cleanup_once)
             if deleted:
                 logstream.info("system", f"已永久删除 {deleted} 条过期日志（超过 7 天）")
-            stale_msgs = db.execute("DELETE FROM messages WHERE processed_at<?",
-                                    (time.time() - MSG_RETENTION_SECONDS,))
             if stale_msgs:
                 logstream.info("system", f"已清理 {stale_msgs} 条过期消息去重记录（超过 30 天）")
-            stale_hits = db.execute("DELETE FROM blacklist_hits WHERE created_at<?",
-                                    (time.time() - HITS_RETENTION_SECONDS,))
             if stale_hits:
                 logstream.info("system", f"已归档删除 {stale_hits} 条过期黑名单命中记录（超过 90 天）")
         except Exception as e:

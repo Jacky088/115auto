@@ -386,7 +386,9 @@ def _register_handlers(c: TelegramClient):
             if text or buttons:
                 full_text = await resolver.resolve_message(text, buttons)
                 if full_text:
-                    pipeline.process_message(name or "unknown", event.message.id, full_text)
+                    # 同步 DB 操作放线程池：事件循环被阻塞时 WS 心跳会超时（前端显示「未连接」）
+                    await asyncio.to_thread(
+                        pipeline.process_message, name or "unknown", event.message.id, full_text)
         except Exception as e:
             logstream.error("userbot", f"消息处理失败: {logstream.exc(e)}")
 
@@ -427,7 +429,7 @@ async def catch_up(c: TelegramClient):
                     try:
                         full_text = await resolver.resolve_message(text, buttons)
                         if full_text:
-                            pipeline.process_message(name, m.id, full_text)
+                            await asyncio.to_thread(pipeline.process_message, name, m.id, full_text)
                             fresh += 1
                     except Exception as e:
                         logstream.error("userbot", f"[{name}] 补漏消息 {m.id} 处理失败: {logstream.exc(e)}")

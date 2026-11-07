@@ -26,14 +26,20 @@ const routes = [
 
 const router = createRouter({ history: createWebHashHistory(), routes })
 
+// 向导完成状态缓存：完成后不再每次切页都等 /api/wizard/status 返回才渲染
+// （每次导航同步等接口是「切换菜单偶发卡顿」的原因之一）
+let wizardDone = null  // null=未检查
+export function resetWizardCache() { wizardDone = null }
+
 router.beforeEach(async (to) => {
   if (to.meta.public) return true
   if (!localStorage.getItem('token')) return '/login'
-  // 首次使用 → 引导向导
-  if (to.path !== '/setup') {
+  // 首次使用 → 引导向导（未完成时每次导航都复查，完成后走缓存不再请求）
+  if (to.path !== '/setup' && wizardDone !== true) {
     try {
       const { data } = await api.get('/api/wizard/status')
-      if (!data.completed) return '/setup'
+      wizardDone = !!data.completed
+      if (!wizardDone) return '/setup'
     } catch { /* 网络错误放行，由页面自行提示 */ }
   }
   return true

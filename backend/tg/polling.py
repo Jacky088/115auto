@@ -52,7 +52,9 @@ async def fetch_channel(client: httpx.AsyncClient, name: str) -> list[dict]:
     resp = await client.get(f"https://t.me/s/{name}", timeout=_TIMEOUT)
     if resp.status_code != 200:
         raise RuntimeError(f"HTTP {resp.status_code}（频道不存在或非公开？）")
-    return parse_page(resp.text)
+    # BeautifulSoup 解析约 1MB 页面是 CPU 密集操作（单次可达上百毫秒），
+    # 移到线程池执行，避免卡住事件循环导致 WS 心跳超时（前端显示「未连接」）与页面请求排队
+    return await asyncio.to_thread(parse_page, resp.text)
 
 
 async def check_channel(name: str) -> dict:
@@ -125,7 +127,8 @@ async def _poll_one(client: httpx.AsyncClient, ch: dict):
                 # 解析内联按钮里的资源链接（如"查看资源"→ telegra.ph 文章）
                 full_text = await resolver.resolve_message(m["text"], m.get("buttons") or [])
                 if full_text:
-                    pipeline.process_message(name, m["id"], full_text)
+                    # 消息入库/分类/去重是同步 DB 操作：放线程池，不阻塞事件循环
+                    await asyncio.to_thread(pipeline.process_message, name, m["id"], full_text)
             except Exception as e:
                 logstream.error("polling", f"[{name}] 消息 {m['id']} 处理失败: {e}")
     if preserve_gap:
