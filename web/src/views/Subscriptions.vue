@@ -7,6 +7,58 @@
       </div>
     </template>
 
+    <!-- 订阅关键词列表：命中频道消息即按关键词自动追剧；操作含向前补全/重置进度 -->
+    <div class="sub-section">
+      <div class="sub-title">
+        📋 订阅关键词
+        <span class="tip">命中频道消息后自动转存并追更；在下方 TMDB 海报墙点选「订阅」即可添加</span>
+      </div>
+      <el-table :data="items" empty-text="还没有订阅，可在下方浏览或搜索后点击「订阅」添加">
+        <el-table-column prop="keyword" label="关键词" min-width="150" show-overflow-tooltip>
+          <template #default="{ row }"><span class="mono">{{ row.keyword }}</span></template>
+        </el-table-column>
+        <el-table-column prop="note" label="备注" min-width="120" show-overflow-tooltip>
+          <template #default="{ row }">{{ row.note || '-' }}</template>
+        </el-table-column>
+        <el-table-column label="启用" width="80">
+          <template #default="{ row }">
+            <el-switch :model-value="!!row.enabled" @change="(v) => toggle(row, v)" />
+          </template>
+        </el-table-column>
+        <el-table-column label="最近集数" width="100">
+          <template #default="{ row }">{{ row.last_ep || '-' }}</template>
+        </el-table-column>
+        <el-table-column label="最近命中" min-width="180">
+          <template #default="{ row }">
+            <template v-if="row.last_match_at">
+              <div>{{ fmtTime(row.last_match_at) }}</div>
+              <div v-if="row.last_title" class="hit-title">{{ row.last_title }}</div>
+            </template>
+            <span v-else>-</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="190">
+          <template #default="{ row }">
+            <div class="sub-actions">
+              <el-button type="primary" text @click="openBackfill(row)">向前补全</el-button>
+              <el-popconfirm title="重置后将清除该订阅的追更进度记录，下次命中重新记录。确认重置？"
+                             confirm-button-text="重置" cancel-button-text="取消" confirm-button-type="warning"
+                             width="280" @confirm="resetProgress(row)">
+                <template #reference><el-button type="warning" text>重置进度</el-button></template>
+              </el-popconfirm>
+              <el-popconfirm title="删除后将不再按该关键词自动追剧。确认删除？"
+                             confirm-button-text="删除" cancel-button-text="取消" confirm-button-type="danger"
+                             width="260" @confirm="del(row)">
+                <template #reference><el-button type="danger" text>删除</el-button></template>
+              </el-popconfirm>
+            </div>
+          </template>
+        </el-table-column>
+      </el-table>
+    </div>
+
+    <el-divider />
+
     <!-- 从 TMDB 选剧订阅：默认按分类浏览热门影视，点卡片订阅；精确查找时再搜索 -->
     <div class="tmdb-section">
       <div class="tmdb-title">
@@ -105,51 +157,6 @@
       </template>
       <div v-else class="tmdb-empty">填写并保存 API Key 后，这里会自动展示正在播出 / 即将上线的剧集和电影供点选订阅</div>
     </div>
-
-    <el-divider />
-
-    <el-table :data="items" empty-text="还没有订阅，可在上方浏览或搜索后点击「订阅」添加">
-      <el-table-column prop="keyword" label="关键词" min-width="150" show-overflow-tooltip>
-        <template #default="{ row }"><span class="mono">{{ row.keyword }}</span></template>
-      </el-table-column>
-      <el-table-column prop="note" label="备注" min-width="120" show-overflow-tooltip>
-        <template #default="{ row }">{{ row.note || '-' }}</template>
-      </el-table-column>
-      <el-table-column label="启用" width="80">
-        <template #default="{ row }">
-          <el-switch :model-value="!!row.enabled" @change="(v) => toggle(row, v)" />
-        </template>
-      </el-table-column>
-      <el-table-column label="最近集数" width="100">
-        <template #default="{ row }">{{ row.last_ep || '-' }}</template>
-      </el-table-column>
-      <el-table-column label="最近命中" min-width="180">
-        <template #default="{ row }">
-          <template v-if="row.last_match_at">
-            <div>{{ fmtTime(row.last_match_at) }}</div>
-            <div v-if="row.last_title" class="hit-title">{{ row.last_title }}</div>
-          </template>
-          <span v-else>-</span>
-        </template>
-      </el-table-column>
-      <el-table-column label="操作" width="190">
-        <template #default="{ row }">
-          <div class="sub-actions">
-            <el-button type="primary" text @click="openBackfill(row)">向前补全</el-button>
-            <el-popconfirm title="重置后将清除该订阅的追更进度记录，下次命中重新记录。确认重置？"
-                           confirm-button-text="重置" cancel-button-text="取消" confirm-button-type="warning"
-                           width="280" @confirm="resetProgress(row)">
-              <template #reference><el-button type="warning" text>重置进度</el-button></template>
-            </el-popconfirm>
-            <el-popconfirm title="删除后将不再按该关键词自动追剧。确认删除？"
-                           confirm-button-text="删除" cancel-button-text="取消" confirm-button-type="danger"
-                           width="260" @confirm="del(row)">
-              <template #reference><el-button type="danger" text>删除</el-button></template>
-            </el-popconfirm>
-          </div>
-        </template>
-      </el-table-column>
-    </el-table>
   </el-card>
 
   <el-dialog v-model="bfVisible" title="向前补全早期分集" width="460px">
@@ -391,6 +398,9 @@ onMounted(load)
 .hit-title { font-size: 12px; color: #999; margin-top: 2px; word-break: break-all; }
 
 /* ---- TMDB 选剧 ---- */
+.sub-section { margin-bottom: 4px; }
+.sub-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-weight: 600; margin-bottom: 10px; }
+.sub-title .tip { font-weight: 400; }
 .tmdb-section { margin-bottom: 4px; }
 .tmdb-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-weight: 600; margin-bottom: 10px; }
 .tmdb-title .tip { font-weight: 400; }

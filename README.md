@@ -27,7 +27,7 @@
 ## 快速部署
 
 ```bash
-# 1. 上传项目到服务器并解压
+# 1. 上传项目到服务器并解压（zip 内不带顶层目录，直接解到目标目录）
 unzip 115atuosave.zip -d 115atuosave && cd 115atuosave
 
 # 2.（可选）编辑 docker-compose.yml 填入 WEB_PASSWORD 强密码；
