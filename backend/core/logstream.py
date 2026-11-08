@@ -1,9 +1,10 @@
 """日志流：写 SQLite + 内存缓冲 + asyncio 广播给 WebSocket 客户端。"""
 import asyncio
 import itertools
+import threading
 import time
 from collections import deque
-from concurrent.futures import ThreadPoolExecutor
+from queue import Full, Queue
 
 from .. import database as db
 
@@ -12,8 +13,39 @@ _seq = itertools.count(1)  # 全局递增序号：前端据此对「重连补发
 _subscribers: set[asyncio.Queue] = set()
 _loop: asyncio.AbstractEventLoop | None = None  # WebSocket 所在事件循环（日志可能来自工作线程）
 # 单工作线程串行写日志 DB：事件循环线程调用 log() 时不再同步等 SQLite 写锁
-# （线程池长事务持锁时会把事件循环卡住 → WS 心跳超时「未连接」+ 页面请求排队）
-_log_writer = ThreadPoolExecutor(max_workers=1, thread_name_prefix="logwrite")
+# （线程池长事务持锁时会把事件循环卡住 → WS 心跳超时「未连接」+ 页面请求排队）。
+# 用有界队列 + 专用线程（而非 ThreadPoolExecutor）：DB 卡顿时满了就丢新日志，
+# 不让待写队列无限堆积吃内存。
+_log_q: Queue = Queue(maxsize=2000)
+
+
+def _log_worker():
+    while True:
+        fn = _log_q.get()
+        try:
+            fn()
+        except Exception:
+            pass
+        finally:
+            _log_q.task_done()
+
+
+def _submit_log(fn) -> None:
+    if _log_thread is None or not _log_thread.is_alive():
+        _start_log_worker()
+    try:
+        _log_q.put_nowait(fn)
+    except Full:
+        pass  # 队列满（DB 长时间卡死）：丢弃这条日志，保护调用方
+
+
+_log_thread: threading.Thread | None = None
+
+
+def _start_log_worker():
+    global _log_thread
+    _log_thread = threading.Thread(target=_log_worker, name="logwrite", daemon=True)
+    _log_thread.start()
 
 
 def _push(q: asyncio.Queue, entry: dict):
@@ -37,7 +69,7 @@ def log(level: str, module: str, message: str):
             on_loop = False
         if on_loop:
             # 事件循环线程：DB 写入交给后台线程（fire-and-forget），绝不阻塞循环本身
-            _log_writer.submit(db.add_log, level, module, message)
+            _submit_log(lambda: db.add_log(level, module, message))
         else:
             db.add_log(level, module, message)
     except Exception:

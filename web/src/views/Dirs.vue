@@ -39,7 +39,7 @@
             <el-button class="dir-btn" :class="{ 'dir-empty': !row.offline_dir }"
                        @click="openPicker(row, 'offline')">
               <el-icon><FolderOpened /></el-icon>
-              <span>{{ row.offline_dir || '留空 = 与分享转存相同' }}</span>
+              <span>{{ row.offline_dir || '留空 = 跟随分享转存' }}</span>
             </el-button>
           </template>
         </el-table-column>
@@ -54,7 +54,7 @@
         </el-table-column>
       </el-table>
       <div class="btn-row end" style="margin-top: 14px">
-        <span v-if="dirtyRoutes" class="tip-text">修改需点击保存后才生效</span>
+        <span v-if="dirtyRoutes" class="tip-text">修改需点击「保存目录映射」后生效</span>
         <el-button type="primary" :disabled="!dirtyRoutes" @click="saveRoutes">保存目录映射</el-button>
       </div>
     </el-card>

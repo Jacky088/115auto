@@ -81,9 +81,14 @@ def extract(text: str) -> list[dict]:
         seen.add(code.lower())
         pw = m.group("pw") or ""
         if not pw:
-            # 在链接之后的 60 字符内找独立提取码写法
+            # 优先在链接之后的 60 字符内找独立提取码写法；
+            # 再回看链接之前的 60 字符（「提取码：xxxx https://…」前置写法同样常见）
             tail = text[m.end(): m.end() + 60]
             pw_match = PW_RE.search(tail)
+            if not pw_match:
+                head_matches = list(PW_RE.finditer(text[max(0, m.start() - 60): m.start()]))
+                if head_matches:
+                    pw_match = head_matches[-1]  # 取离链接最近的一个
             if pw_match:
                 pw = pw_match.group(1)
         domain = m.group(1).lower()

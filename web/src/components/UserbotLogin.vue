@@ -48,14 +48,14 @@
     <!-- 已连接：一键自检（频道可见性） -->
     <template v-else>
       <el-button type="primary" plain :loading="testing" @click="runTest">
-        测试：检查频道可见性
+        测试连接与频道
       </el-button>
-      <span class="ub-hint">逐个验证已启用的 Userbot 频道能否真正收到消息</span>
+      <span class="ub-hint">逐个验证已启用的 Userbot 频道能否正常收到消息</span>
       <div v-if="testResult" class="ub-result">
         <el-alert v-if="!testResult.ok && testResult.err" :title="testResult.err" type="error"
                   :closable="false" show-icon />
         <template v-else>
-          <el-alert :title="testResult.ok ? '✅ 连接与授权正常' + (testResult.channels.length ? '，频道全部可访问' : '') : '⚠️ 部分频道无法访问'"
+          <el-alert :title="testResult.ok ? '连接与授权正常' + (testResult.channels.length ? '，频道全部可访问' : '') : '部分频道无法访问'"
                     :type="testResult.ok ? 'success' : 'warning'" :closable="false" show-icon />
           <div v-for="c in testResult.channels" :key="c.name" class="ub-ch">
             <el-icon :size="14" :class="c.ok ? 'ok' : 'bad'">

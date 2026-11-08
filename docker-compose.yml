@@ -5,11 +5,25 @@ services:
     # image: yourname/autosave115:latest   # 推到镜像仓库后可改用镜像名
     container_name: autosave115
     ports:
-      - "38080:8000"
+      # 默认监听全部网卡：NAS / 服务器 IP 直接访问（手机、其他设备均可连）。
+      # 更安全的部署：在 compose 同目录建 .env 文件写入 PAN_BIND_IP=127.0.0.1，
+      # 或直接把下面一行改成 "127.0.0.1:38080:8000"，远程访问走 SSH 隧道或反向代理（见 README）。
+      - "${PAN_BIND_IP:-0.0.0.0}:38080:8000"
     volumes:
       - ./data:/app/data          # 数据库 / Cookie / TG session / 日志，备份=复制此目录
     environment:
       - TZ=Asia/Shanghai
-      - WEB_USERNAME=admin        # 初始登录用户名（可在网页改密码）
-      - WEB_PASSWORD=admin123     # ⚠️ 部署时务必改成强密码
+      - WEB_USERNAME=admin        # 初始登录用户名（可在网页改）
+      # 留空 = 首次启动自动生成随机密码：看 `docker compose logs` 或打开
+      # data/initial_password.txt 获取，登录后尽快在右上角修改（改密后该文件自动删除）。
+      # 也可直接填强密码。
+      - WEB_PASSWORD=
+    healthcheck:
+      # python:3.12-slim 没有 curl/wget，用标准库探活
+      test: ["CMD", "python", "-c",
+             "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=5)"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     restart: unless-stopped

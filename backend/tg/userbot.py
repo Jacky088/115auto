@@ -78,7 +78,8 @@ def _proxy_kw() -> dict:
             "rdns": True,
         }}
     except Exception as e:
-        logstream.warn("userbot", f"代理配置无效（{proxy}），本次将直连: {e}")
+        # 日志不回显代理串（可能内嵌 user:password@host）
+        logstream.warn("userbot", "代理配置无效，本次将直连（请检查设置页的代理地址）")
         return {}
 
 
@@ -305,7 +306,7 @@ async def _finish_login(c: TelegramClient, flow: dict):
     await c2.connect()
     if not await c2.is_user_authorized():
         await c2.disconnect()
-        raise RuntimeError("登录状态校验失败，请重新发送验证码登录")
+        raise RuntimeError("登录状态校验失败，请重新发起登录")
 
     client = c2
     db.set_setting("userbot_ok", True)
@@ -327,9 +328,30 @@ async def _pump(c: TelegramClient):
         logstream.error("userbot", f"接收循环退出: {logstream.exc(e)}")
     else:
         logstream.warn("userbot", "Userbot 连接已断开")
-    # 只有当前客户端退出才标记失效：重新登录时旧客户端断开不应覆盖新登录状态
-    if client is c:
-        db.set_setting("userbot_ok", False)
+    # 只有当前客户端退出才处理：重新登录时旧客户端断开不应覆盖新登录状态
+    if client is not c:
+        return
+    # 自动重连：用现有 session 尝试恢复（最多 5 次、间隔递增），期间不动登录状态；
+    # 全部失败才标记失效（需要人工到「账号管理」重新登录）
+    for attempt in range(1, 6):
+        wait = min(60, 5 * attempt)
+        logstream.info("userbot", f"Userbot 断线，{wait} 秒后尝试自动重连（第 {attempt}/5 次）")
+        await asyncio.sleep(wait)
+        if client is not c:
+            return  # 等待期间发生了重新登录
+        try:
+            await c.connect()
+            if await c.is_user_authorized():
+                logstream.info("userbot", "Userbot 自动重连成功")
+                db.set_setting("userbot_ok", True)
+                asyncio.create_task(catch_up(c), name="userbot-catchup")
+                asyncio.create_task(_pump(c), name="userbot-pump")
+                return
+            await c.disconnect()
+        except Exception as e:
+            logstream.warn("userbot", f"自动重连第 {attempt} 次失败: {e}")
+    db.set_setting("userbot_ok", False)
+    logstream.warn("userbot", "Userbot 自动重连失败，请到「账号管理」重新登录")
 
 
 def _norm_id(value) -> str:
@@ -459,7 +481,7 @@ async def start_if_configured():
         else:
             await c.disconnect()
             db.set_setting("userbot_ok", False)
-            logstream.warn("userbot", "已有配置但 session 失效，请在网页重新登录")
+            logstream.warn("userbot", "已配置但登录已失效，请到网页「账号管理」重新登录")
     except Exception as e:
         db.set_setting("userbot_ok", False)
         logstream.error("userbot", f"自动连接失败: {logstream.exc(e)}")

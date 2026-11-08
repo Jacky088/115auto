@@ -4,7 +4,7 @@
       <div class="toolbar" style="margin-bottom: 0">
         <b>系统设置</b>
         <el-tag v-if="dirty" type="danger" effect="plain" size="small">● 有未保存的更改</el-tag>
-        <span style="margin-left: auto" class="tip">修改需点击下方「保存设置」后生效</span>
+        <span style="margin-left: auto" class="tip">修改需点击「保存设置」后生效</span>
       </div>
     </template>
     <el-form :label-width="isMobile ? 90 : 130" label-position="right" class="settings-form">
@@ -33,7 +33,7 @@
               <el-radio value="both">两者</el-radio>
             </el-radio-group>
             <div class="tip" style="width: 100%">{{ tgModeTip }}<br />
-              <span class="warn-text">⚠️ 接入方式的变更保存后需重启程序才会启停对应监听（重启容器：<code>docker restart autosave115</code>）</span>
+              <span class="warn-text">⚠️ 接入方式的变更保存后需重启程序，才会开启/停止对应监听（重启容器：<code>docker restart autosave115</code>）</span>
             </div>
           </el-form-item>
 
@@ -53,8 +53,8 @@
                 {{ ub.connected ? '已连接' : '未连接' }}
               </el-tag>
               <span class="tip">{{ ub.connected
-                ? 'TG 账号监听运行中（实时接收私有频道消息）'
-                : '尚未登录：请到「账号管理」完成 Userbot 登录，否则纯 Userbot 频道无法收到消息' }}</span>
+                ? 'TG 账号监听运行中（实时接收私密频道消息）'
+                : '尚未登录：请到「账号管理」完成 Userbot 登录，否则接入方式为 Userbot 的频道无法收到消息' }}</span>
             </div>
           </el-form-item>
 
@@ -65,7 +65,7 @@
             </div>
             <div class="tip" style="width: 100%">
               国内部署必填：所有 TG 流量（频道抓取/补漏/按钮解析/通知/Bot 指令）都走此代理，
-              115 直连不受影响。测试失败会提示具体原因。<br />
+              115 直连不受影响。<br />
               <span class="warn-text">注意：代理变更对网页轮询/Bot 即时生效，但已连接的 Userbot
               需重启程序或在「账号管理」重新登录后才会改走新代理。</span>
             </div>
@@ -85,13 +85,13 @@
           <el-form-item label="每日转存上限">
             <div class="range-row">
               <el-input-number v-model="f.daily_limit" :min="1" :max="50" controls-position="right" />
-              <span class="tip">1~50；115 单账号每日转存安全上限，不建议拉满</span>
+              <span class="tip">1~50；115 单账号每日转存的安全上限，不建议设为最大值</span>
             </div>
           </el-form-item>
           <el-form-item label="分享体积下限">
             <div class="range-row">
               <el-input-number v-model="f.min_size_gb" :min="0" :step="0.1" controls-position="right" />
-              <span class="tip">GB，低于此值的分享视为广告自动跳过；0 表示关闭</span>
+              <span class="tip">单位 GB；低于此值的分享视为广告并自动跳过，0 表示关闭</span>
             </div>
           </el-form-item>
           <el-form-item label="失败重试">
@@ -143,13 +143,19 @@
               </div>
               <div class="tip" style="width: 100%">
                 填写后无需保存即可直接测试；测试失败会提示具体原因。收不到时检查：① Token 是否完整复制
-                ② 是否先给 Bot 发送过 /start ③ 大陆服务器需在上方配置 TG 代理
+                ② 是否已给 Bot 发送 /start ③ 国内服务器需在上方「TG 代理」处填写代理地址
               </div>
             </SecretConfig>
           </el-form-item>
           </div>
 
           <div class="section-card"><div class="section-title">转存增强</div>
+          <el-form-item label="分享追更">
+            <div class="switch-row">
+              <el-switch v-model="f.share_update_enabled" />
+              <span class="tip">同一分享链接再次出现时不再判重：自动比对目标目录，只转存新增的集数文件，已存过的不重复（适配分享方往同一链接持续加更的追剧场景）</span>
+            </div>
+          </el-form-item>
           <el-form-item label="按文件名去重">
             <div class="switch-row">
               <el-switch v-model="f.dedup_by_name" />
@@ -215,8 +221,8 @@
               </div>
               <div class="tip" style="width: 100%">
                 完整的 ntfy 主题 URL，如 <code>https://ntfy.sh/my-115-topic</code>（自建服务器换域名）；
-                手机装 ntfy App 订阅同一主题即可收推送。主题名建议加随机后缀防止被他人订阅。
-                官方 ntfy.sh 公开主题令牌留空即可
+                手机装 ntfy App 订阅同一主题即可收推送。主题名建议加随机后缀防止被他人订阅；
+                使用官方 ntfy.sh 时访问令牌留空即可
               </div>
             </SecretConfig>
           </el-form-item>
@@ -243,13 +249,13 @@
           <el-form-item label="自动备份">
             <div class="switch-row">
               <el-switch v-model="f.auto_backup_enabled" />
-              <span class="tip">开启后定时把设置/频道/规则/订阅/转存记录打包推送到 TG Bot，可直接转发回 Bot 恢复</span>
+              <span class="tip">开启后定时把设置/频道/规则/黑名单/订阅/转存记录打包推送到 TG Bot，可直接转发回 Bot 恢复</span>
             </div>
           </el-form-item>
           <el-form-item label="备份间隔（天）">
             <div class="range-row">
               <el-input-number v-model="f.auto_backup_days" :min="1" :max="365" controls-position="right" />
-              <span class="tip">1-365 天</span>
+              <span class="tip">1~365 天</span>
             </div>
           </el-form-item>
           <el-form-item label="从备份恢复">
@@ -264,9 +270,9 @@
                          @click="doRestore">恢复数据</el-button>
             </div>
             <div class="tip" style="width: 100%">
-              用备份文件<b class="warn-text">整体覆盖</b>当前的设置/频道/规则/订阅/转存记录（登录密码不变），
-              恢复后系统回到停止状态。也可直接把 TG 收到的备份文件转发给 Bot 回复
-              <code>/restore confirm</code> 恢复
+              用备份文件<b class="warn-text">整体覆盖</b>当前的设置/频道/规则/黑名单/订阅/转存记录
+              （登录密码与通知密钥不变），恢复后系统回到停止状态。也可把 TG 收到的备份文件发给 Bot，
+              回复 <code>/restore confirm</code> 恢复
             </div>
           </el-form-item>
           </div>
@@ -275,7 +281,7 @@
           <el-form-item label="API Token">
             <div class="range-row" style="width: 100%">
               <el-input v-model="f.api_token" type="password" show-password
-                        placeholder="留空关闭对外 API" clearable />
+                        placeholder="未设置时对外 API 关闭" clearable />
               <el-button @click="genToken">生成随机 Token</el-button>
             </div>
             <div class="tip" style="width: 100%">
@@ -289,7 +295,7 @@
         <el-button type="primary" :disabled="!dirty" @click="save">保存设置</el-button>
         <el-button @click="backupExport">导出数据备份</el-button>
         <span class="tip" style="margin-left: 12px">
-          备份含设置/频道/规则/黑名单/转存记录（JSON）；恢复时直接替换服务器 data 目录
+          备份含设置/频道/规则/黑名单/订阅/转存记录（JSON，不含登录密码等敏感信息）
         </span>
       </div>
     </el-form>
@@ -298,7 +304,7 @@
 
 <script setup>
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { api, errMsg, saveOk } from '../api'
 import { useUnsavedGuard } from '../composables/unsavedGuard'
 
@@ -349,7 +355,7 @@ const saveNotify = async () => {
   try {
     await api.put('/api/settings', { notify_token: nf.token.trim(), notify_chat_id: nf.chat_id.trim() })
     syncF({ notify_token: nf.token.trim(), notify_chat_id: nf.chat_id.trim() })
-    ElMessage.success('TG 通知配置已保存')
+    saveOk('TG 通知配置已保存', '已即时生效')
   } catch (e) { ElMessage.error(errMsg(e)); throw e }
 }
 
@@ -360,7 +366,7 @@ const saveBark = async () => {
   try {
     await api.put('/api/settings', { bark_url: bf.url.trim() })
     syncF({ bark_url: bf.url.trim() })
-    ElMessage.success('Bark 配置已保存')
+    saveOk('Bark 配置已保存', '已即时生效')
   } catch (e) { ElMessage.error(errMsg(e)); throw e }
 }
 
@@ -371,7 +377,7 @@ const savePushPlus = async () => {
   try {
     await api.put('/api/settings', { pushplus_token: pf.token.trim(), pushplus_topic: pf.topic.trim() })
     syncF({ pushplus_token: pf.token.trim(), pushplus_topic: pf.topic.trim() })
-    ElMessage.success('PushPlus 配置已保存')
+    saveOk('PushPlus 配置已保存', '已即时生效')
   } catch (e) { ElMessage.error(errMsg(e)); throw e }
 }
 
@@ -382,7 +388,7 @@ const saveNtfy = async () => {
   try {
     await api.put('/api/settings', { ntfy_url: tf.url.trim(), ntfy_token: tf.token.trim() })
     syncF({ ntfy_url: tf.url.trim(), ntfy_token: tf.token.trim() })
-    ElMessage.success('ntfy 配置已保存')
+    saveOk('ntfy 配置已保存', '已即时生效')
   } catch (e) { ElMessage.error(errMsg(e)); throw e }
 }
 
@@ -394,7 +400,7 @@ const onRestoreFile = (ev) => {
   const file = ev.target.files?.[0]
   restoreFile.value = null
   if (!file) return
-  if (file.size > 20 * 1024 * 1024) { ElMessage.error('文件超过 20MB，不是有效的备份文件'); return }
+  if (file.size > 20 * 1024 * 1024) { ElMessage.error('文件超过 20MB 上限，无法作为备份导入'); return }
   restoreFile.value = file
   ev.target.value = '' // 允许重复选择同一文件
 }
@@ -416,9 +422,9 @@ const doRestore = async () => {
       '确认恢复备份', { confirmButtonText: '确认恢复', cancelButtonText: '取消', type: 'warning' })
     const { data: resp } = await api.post('/api/settings/backup/restore', data)
     await ElMessageBox.alert(
-      `恢复完成：设置 ${resp.stats.settings} 项、频道 ${resp.stats.channels}、` +
-      `规则 ${resp.stats.rules}、订阅 ${resp.stats.subscriptions}、转存记录 ${resp.stats.transfers}。` +
-      `页面即将刷新以加载恢复后的数据`, '恢复成功', { confirmButtonText: '刷新页面' })
+      `恢复完成：设置 ${resp.stats.settings} 项、频道 ${resp.stats.channels} 个、` +
+      `规则 ${resp.stats.rules} 条、订阅 ${resp.stats.subscriptions} 条、转存记录 ${resp.stats.transfers} 条。` +
+      `页面即将刷新以加载恢复后的数据。`, '恢复成功', { confirmButtonText: '刷新页面' })
     location.reload()
   } catch (e) {
     if (e !== 'cancel' && e?.message !== 'cancel') ElMessage.error(errMsg(e))
@@ -442,7 +448,7 @@ watch(() => f.value.tg_mode, (v) => { if (v && v !== 'polling') loadUb() })
 
 const tgModeTip = computed(() => ({
   polling: '当前模式：网页轮询——只抓取接入方式为「网页轮询」的频道（公开频道，免 TG 账号）',
-  userbot: '当前模式：Userbot——用 TG 小号实时监听接入方式为「Userbot」的频道（含私有频道）',
+  userbot: '当前模式：Userbot——用 TG 小号实时监听接入方式为「Userbot」的频道（含私密频道）',
   both: '当前模式：两者——按每个频道自身的接入方式分流处理，互不影响',
 }[f.value.tg_mode] || ''))
 
@@ -495,7 +501,7 @@ const backupExport = async () => {
     a.download = m ? m[1] : 'autosave_backup.json'
     a.click()
     URL.revokeObjectURL(url)
-    saveOk('备份已导出', '包含设置/频道/规则/黑名单/转存记录')
+    saveOk('备份已导出', '包含设置/频道/规则/黑名单/订阅/转存记录')
   } catch (e) { ElMessage.error(errMsg(e)) }
 }
 const proxyTesting = ref(false)
@@ -513,7 +519,7 @@ const testNotify = async (token, chatId) => {
       token: token ?? f.value.notify_token,
       chat_id: chatId ?? f.value.notify_chat_id,
     })
-    ElMessage.success('✅ 测试消息已发送，请查看 Telegram')
+    saveOk('测试消息已发送', '请到 Telegram 查看')
   } catch (e) {
     ElMessage.error(errMsg(e))
   } finally {
@@ -525,7 +531,7 @@ const testChannel = async (ch) => {
   chTesting.value = ch
   try {
     const { data } = await api.post(`/api/settings/notify/test/${ch}`)
-    saveOk(`✅ ${data.detail || '测试消息已发送'}`, '请打开对应 App（Bark / 微信 / ntfy）确认收到')
+    saveOk(`${data.detail || '测试消息已发送'}`, '请打开对应 App 确认收到')
   } catch (e) {
     ElMessage.error(errMsg(e))
   } finally {
@@ -539,10 +545,10 @@ const testDigest = async () => {
   try {
     const { data } = await api.post('/api/settings/digest/test')
     if (data.ok) {
-      ElMessage.success('✅ 摘要已推送，请到 TG / Bark / 微信 / ntfy 查看')
+      saveOk('摘要已推送', '请到已配置的通知渠道查看')
     } else {
       const fail = Object.entries(data.detail || {}).filter(([, v]) => !v).map(([k]) => k).join('、')
-      ElMessage.error(`推送失败：以下渠道未成功 → ${fail}（未配置或发送失败，请检查通知配置）`)
+      ElMessage.error(`推送失败：${fail} 未成功（未配置或发送失败，请检查通知配置）`)
     }
   } catch (e) {
     ElMessage.error(errMsg(e))

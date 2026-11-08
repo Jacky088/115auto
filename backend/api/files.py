@@ -147,7 +147,7 @@ def _client():
     # pan.check_login 内部有 60s 缓存，连续翻目录不会重复请求 115
     st = pan.check_login()
     if not st.get("ok"):
-        raise HTTPException(400, "115 未登录或 Cookie 失效，请先到「账号管理」扫码登录")
+        raise HTTPException(400, "115 未登录或 Cookie 失效，请到「账号管理」重新扫码登录或导入 Cookie")
     try:
         return pan._get_client()
     except Exception as e:
@@ -186,7 +186,7 @@ def _ids(body: dict, max_items: int = 200) -> list[str]:
     if not ids:
         raise HTTPException(400, "未选择文件")
     if len(ids) > max_items:
-        raise HTTPException(400, f"单次最多操作 {max_items} 项，请分批处理")
+        raise HTTPException(400, f"单次最多操作 {max_items} 项，请分批操作")
     return ids
 
 
@@ -266,7 +266,7 @@ def move(body: dict, _=Depends(require_user)):
     client = _client()
     ids, target = _ids(body), _target(body)
     if str(target) in ids:
-        raise HTTPException(400, "不能移动目录到自身内部")
+        raise HTTPException(400, "不能将目录移动到其自身内部")
     _call("移动", client.fs_move, ids, pid=target)
     return {"ok": True, "count": len(ids)}
 
@@ -277,6 +277,6 @@ def copy_files(body: dict, _=Depends(require_user)):
     client = _client()
     ids, target = _ids(body), _target(body)
     if str(target) in ids:
-        raise HTTPException(400, "不能复制目录到自身内部")
+        raise HTTPException(400, "不能将目录复制到其自身内部")
     _call("复制", client.fs_copy, ids, pid=target)
     return {"ok": True, "count": len(ids)}

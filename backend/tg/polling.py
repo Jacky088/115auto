@@ -51,7 +51,7 @@ def parse_page(html: str) -> list[dict]:
 async def fetch_channel(client: httpx.AsyncClient, name: str) -> list[dict]:
     resp = await client.get(f"https://t.me/s/{name}", timeout=_TIMEOUT)
     if resp.status_code != 200:
-        raise RuntimeError(f"HTTP {resp.status_code}（频道不存在或非公开？）")
+        raise RuntimeError(f"HTTP {resp.status_code}（频道不存在或为私密频道）")
     # BeautifulSoup 解析约 1MB 页面是 CPU 密集操作（单次可达上百毫秒），
     # 移到线程池执行，避免卡住事件循环导致 WS 心跳超时（前端显示「未连接」）与页面请求排队
     return await asyncio.to_thread(parse_page, resp.text)
@@ -140,7 +140,7 @@ async def _poll_one(client: httpx.AsyncClient, ch: dict):
 
 
 async def polling_loop():
-    logstream.info("polling", "网页轮询模块加载（等待「开始运行」）")
+    logstream.info("polling", "网页轮询已启动（等待「开始运行」）")
     waiting_logged = False
     while True:
         if not db.get_setting("running", False):

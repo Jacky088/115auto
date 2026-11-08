@@ -4,16 +4,16 @@
     <el-alert type="info" :closable="false" show-icon class="ci-scene">
       <template #title>适用场景：服务器在海外/机房，扫码确认后被 115 风控拦截</template>
       <div class="ci-steps">
-        <p>1. 在<b>你自己电脑</b>的浏览器打开 <a href="https://115.com" target="_blank" rel="noopener">115.com</a>
+        <p>1. 在<b>本地电脑</b>的浏览器打开 <a href="https://115.com" target="_blank" rel="noopener">115.com</a>
           并登录（家庭宽带 IP 一般不会被风控）；</p>
-        <p>2. 按 <b>F12</b> 打开开发者工具 → 网络(Network) → 刷新页面 → 点任意请求 →
+        <p>2. 按 <b>F12</b> 打开开发者工具 → 网络（Network）→ 刷新页面 → 点击任意请求 →
           在请求头 <b>Cookie</b> 里复制 <code>UID=...</code>、<code>CID=...</code>、<code>SEID=...</code> 三段；</p>
-        <p>3. 粘贴到下方（整段 Cookie 也可以），点「导入并校验」。</p>
+        <p>3. 粘贴到下方（整段 Cookie 也可以），点击「导入并校验」。</p>
       </div>
     </el-alert>
     <el-input v-model="cookie" type="textarea" :rows="5"
               placeholder="UID=xxx;CID=xxx;SEID=xxx" class="ci-input" />
-    <p class="ci-tip">⚠️ Cookie 等同于账号登录凭证，仅保存在你自己服务器的 data/ 目录，请勿泄露给他人。</p>
+    <p class="ci-tip">⚠️ Cookie 等同于账号登录凭证，仅保存在你服务器的 data/ 目录，请勿泄露给他人。</p>
     <template #footer>
       <div class="ci-footer">
         <el-button @click="emitVisible(false)">取消</el-button>

@@ -39,7 +39,7 @@ async def restore_upload_flow(client: "httpx.AsyncClient", token: str, chat_id: 
     """用户转发备份 JSON 文件给 Bot：下载 → 校验 → 暂存待确认。"""
     size = int(doc.get("file_size") or 0)
     if size > 10 * 1024 * 1024:
-        return f"文件过大（{size // 1024 // 1024}MB），备份文件不应超过 10MB"
+        return f"文件过大（{size // 1024} KB），备份文件不应超过 10 MB"
     # 下载文件：getFile 拿路径，再从 file 接口取内容（都走 TG 代理）
     r = await client.post(f"https://api.telegram.org/bot{token}/getFile",
                           json={"file_id": doc.get("file_id")},
@@ -79,11 +79,13 @@ def _verify_restore(data: dict) -> str:
         got = db.query(f"SELECT count(*) c FROM {t}", one=True)["c"]
         if want != got:
             return f"{t} 数量不一致（备份 {want} 条，实际 {got} 条）"
-    want_s = len(data.get("settings") or {})
-    got_s = db.query("SELECT count(*) c FROM settings", one=True)["c"]
-    # 恢复时强制补写 running=0（停止状态），行数可能比备份多 1
-    if got_s not in (want_s, want_s + 1):
-        return f"settings 数量不一致（备份 {want_s} 项，实际 {got_s} 项）"
+    # settings 逐键核对（排除恢复时保留当前值的凭据项；running 会被强制改写为停止态）
+    got_map = {r["key"]: r["value"] for r in db.query("SELECT key, value FROM settings")}
+    for k, v in (data.get("settings") or {}).items():
+        if k in db.BACKUP_EXCLUDE_SETTINGS or k == "running":
+            continue
+        if got_map.get(k) != str(v):
+            return f"settings[{k}] 恢复后与备份不一致"
     return ""
 
 
@@ -99,14 +101,14 @@ def _do_restore(chat_id: str) -> str:
         stats = db.restore_payload(data)
     except ValueError as e:
         logstream.warn("system", f"TG 恢复备份失败（校验未通过）: {e}")
-        return f"❌ 恢复失败：{e}\n当前数据未被改动（恢复是整体事务，失败自动回滚）"
+        return f"❌ 恢复失败：{e}\n当前数据未做任何更改，可放心重试"
     # 写库成功后再逐表复核，确认真实落库才报成功
     mismatch = _verify_restore(data)
     if mismatch:
         logstream.error("system", f"TG 恢复备份后复核不一致: {mismatch}")
         return f"❌ 恢复结果异常（{mismatch}），请查看系统日志，必要时用网页入口重新恢复"
     logstream.info("system", f"已通过 TG 指令恢复备份（{_backup_summary(data)}），复核一致")
-    return ("✅ 已从备份恢复（已逐表复核一致）\n" + _backup_summary(data) +
+    return ("✅ 已从备份恢复（已与备份逐项核对一致）\n" + _backup_summary(data) +
             "\n\n系统已回到停止状态，确认无误后到网页顶栏点「开始运行」。")
 
 
@@ -114,17 +116,67 @@ def _tg_proxy() -> str | None:
     return str(db.get_setting("proxy", "") or "") or None
 
 
+def _check_sender(msg: dict) -> tuple[bool, str]:
+    """发送者鉴权：chat_id 匹配之外，还要求发送者是绑定的管理员用户。
+
+    返回 (是否放行, 拒绝提示文本)。提示文本非空时调用方应将其回复给发送者。
+
+    - notify_chat_id 配成群组时，群里任何人都能给 Bot 发消息；不校验发送者
+      等于把 /retry /restore 等指令开放给全体群成员。管理员绑定（TOFU）仅在
+      **私聊**中自动完成——群聊首用会被拒绝并引导先私聊绑定，防止群成员抢绑。
+    - 绑定值带上 chat_id（f"{chat_id}:{user_id}"）：换 Bot/换对话后自动重新绑定。
+    - channel_post 等无发送者信息（from 为空）的消息：保持原有 chat_id 口径放行。
+    """
+    chat_id = str(msg.get("chat", {}).get("id", ""))
+    chat_type = str(msg.get("chat", {}).get("type") or "")
+    sender = str((msg.get("from") or {}).get("id") or "")
+    if not sender:
+        return True, ""
+    stored = str(db.get_setting("tg_admin_id", "") or "")
+    bound = f"{chat_id}:{sender}"
+    if not stored:
+        if chat_type != "private":
+            logstream.warn("system", f"TG Bot 收到群聊 {chat_id} 中用户 {sender} 的首次指令，"
+                                     "已拒绝（管理员绑定仅限私聊完成）")
+            return False, ("该 Bot 尚未绑定管理员。出于安全考虑，请在与 Bot 的私聊中发送任意指令"
+                           "完成绑定，之后即可在群内使用。")
+        db.set_setting("tg_admin_id", bound)
+        logstream.warn("system", f"TG Bot 已绑定管理员用户 {sender}（私聊自动绑定；"
+                                 "如非本人操作，请立即到网页改绑或停止使用该 Bot）")
+        return True, ""
+    if stored != bound:
+        logstream.warn("system", f"TG Bot 收到非管理员用户 {sender} 的指令，已拒绝")
+        return False, "仅绑定的管理员用户可使用 Bot 指令"
+    return True, ""
+
+
+def _restore_allowed(msg: dict) -> tuple[bool, str]:
+    """备份恢复仅限与 Bot 的私聊：群聊里转发/伪造备份文件的风险面太大。"""
+    if str(msg.get("chat", {}).get("type") or "") == "private":
+        return True, ""
+    return False, ("出于安全考虑，备份恢复仅支持在与 Bot 的私聊中进行：\n"
+                   "请私聊本 Bot 发送备份 JSON 文件")
+
+
+USAGE_ADD = (
+    "用法：/add <频道名或链接> on|off\n"
+    "· on  = 开启「仅订阅」（仅转存命中订阅关键词的内容）\n"
+    "· off = 关闭（全盘转存）\n"
+    "例如：/add @somechannel on"
+)
+
 HELP = (
     "可用指令：\n"
     "/status — 查看运行状态（队列/限额/空间/频道）\n"
     "/space — 查看 115 剩余空间\n"
     "/ls — 最近 5 条转存记录\n"
     "/menu — 快捷操作菜单（按钮面板）\n"
-    "/add <频道> on|off — 添加监控频道（on=开启仅订阅，off=全盘转存，必填）\n"
+    "/add <频道名或链接> on|off — 添加监控频道（on=仅订阅，off=全盘转存；on/off 必填）\n"
     "/sub — 查看订阅；/sub <片名> 搜索 TMDB 点选订阅；/sub del <关键词> 删除\n"
-    "/pause — 暂停转存（停止消费队列）\n"
+    "/pause — 暂停转存（暂停处理队列中的任务）\n"
     "/resume — 恢复转存\n"
     "/retry — 重试全部失败任务\n"
+    "/backfill [剧名] — 向前补全早期分集（如从 E03 开始追，补全 E01/E02）\n"
     "/restore — 发送备份 JSON 文件后确认恢复数据\n"
     "/help — 显示本帮助"
 )
@@ -140,6 +192,7 @@ BOT_MENU_COMMANDS = [
     {"command": "pause", "description": "暂停转存"},
     {"command": "resume", "description": "恢复转存"},
     {"command": "retry", "description": "重试全部失败任务"},
+    {"command": "backfill", "description": "向前补全剧集（查找早期分集）"},
     {"command": "restore", "description": "从备份文件恢复数据"},
     {"command": "help", "description": "显示帮助"},
 ]
@@ -151,7 +204,7 @@ async def register_bot_menu(client: "httpx.AsyncClient", token: str) -> None:
         r = await client.post(f"https://api.telegram.org/bot{token}/setMyCommands",
                               json={"commands": BOT_MENU_COMMANDS})
         if r.status_code == 200 and r.json().get("ok"):
-            logstream.info("system", "TG Bot 指令菜单已注册（输入框菜单按钮 / 输入 / 可见）")
+            logstream.info("system", "TG Bot 指令菜单已注册（输入框左侧菜单按钮，或输入 / 时可见）")
         else:
             logstream.warn("system", f"TG Bot 菜单注册失败: {str(r.text)[:120]}")
     except Exception as e:
@@ -186,11 +239,11 @@ def _handle_command(text: str, chat_id: str) -> str:
                 pass
         running = db.get_setting("running", False)
         state_line = ("▶ 运行中" if running and not paused
-                      else "⏸ 已暂停" if paused else "⏹ 未启动（网页顶栏可启动）")
+                      else "⏸ 已暂停" if paused else "⏹ 未启动（点击网页顶栏「开始运行」启动）")
         return (f"📊 运行状态\n\n{state_line}\n"
                 f"📥 队列：{queued} 个待转存\n"
-                f"✅ 24h 成功：{today_s}｜❌ 失败/拦截：{today_f}\n"
-                f"📈 今日限额：{quota}/{limit}{space_line}")
+                f"✅ 近 24 小时成功：{today_s}｜❌ 失败/拦截：{today_f}\n"
+                f"📈 每日限额：{quota}/{limit}{space_line}")
     if cmd == "/space":
         try:
             from ..pan115 import client as pan
@@ -200,7 +253,7 @@ def _handle_command(text: str, chat_id: str) -> str:
         except Exception as e:
             return f"查询空间失败: {str(e)[:120]}"
     if cmd == "/ls":
-        rows = db.query("SELECT title, status, target_dir, created_at FROM transfers"
+        rows = db.query("SELECT title, status, kind, increment, target_dir, created_at FROM transfers"
                         " ORDER BY id DESC LIMIT 5")
         if not rows:
             return "暂无转存记录"
@@ -210,24 +263,28 @@ def _handle_command(text: str, chat_id: str) -> str:
         for r in rows:
             title = (r["title"] or "-")[:40]
             mark = label.get(r["status"], "·")
-            lines.append(f"{mark} {title}")
+            kind_mark = ("☁️" if r["kind"] == "offline"
+                     else "🔁" if r["increment"] else "")
+        lines.append(f"{mark} {kind_mark}{title}")
         return "\n".join(lines)
     if cmd == "/add":
         # 真正的添加流程由 bot_command_loop 的异步分支执行（需 await 频道校验），
         # 同步路径仅做用法提示兜底
-        return ("用法：/add <频道名或链接> on|off\n"
-                "· on  = 开启「仅订阅」（只转存命中订阅关键词的内容）\n"
-                "· off = 关闭（全盘转存）\n"
-                "例如：/add @somechannel on")
+        return USAGE_ADD
     if cmd == "/quota":
-        return ("每日限额请在网页「系统设置」中调整（默认 50），Bot 不再支持 /quota 设置")
+        return "Bot 暂不支持修改每日限额，请在网页「系统设置」中调整（默认 50）"
     if cmd == "/sub":
         return _handle_sub(args)
     if cmd in ("/pause", "/resume"):
         return _do_pause() if cmd == "/pause" else _do_resume()
     if cmd == "/retry":
-        n = db.execute("UPDATE transfers SET status='queued', attempts=0, error='', next_retry_at=NULL"
-                       " WHERE status='failed'")
+        n = db.execute(
+            "UPDATE transfers SET status='queued', attempts=0, error='', next_retry_at=NULL"
+            " WHERE status='failed'"
+            " AND id=(SELECT MAX(id) FROM transfers t2"
+            "         WHERE t2.share_code=transfers.share_code AND t2.status='failed')"
+            " AND share_code NOT IN (SELECT share_code FROM transfers"
+            "                         WHERE status IN ('queued','running','submitted'))")
         logstream.info("transfer", f"已通过 TG 指令重试 {n} 个失败任务（/retry）")
         return f"🔄 已重试 {n} 个失败任务" if n else "当前没有失败任务"
     if cmd == "/help":
@@ -271,7 +328,7 @@ def _submode_text() -> str:
     """各频道的订阅模式状态（只读展示，网页「频道管理」可调整）。"""
     rows = db.query("SELECT name, enabled, sub_only FROM channels ORDER BY id")
     if not rows:
-        return "还没有监控频道。发送 /add <频道> 添加"
+        return "还没有监控频道，发送 /add <频道名或链接> on|off 添加"
     lines = ["📺 频道订阅模式", ""]
     for r in rows:
         state = "🟢 全盘转存" if not r["sub_only"] else "🛎 仅订阅"
@@ -279,7 +336,7 @@ def _submode_text() -> str:
             state += "（频道已停用）"
         lines.append(f"@{r['name']} — {state}")
     lines.append("")
-    lines.append("在网页「频道管理」页可按频道开关订阅模式；新增频道默认全盘转存")
+    lines.append("新增频道时必须选择订阅模式（/add 的 on|off 必填）；在网页「频道管理」可按频道调整")
     return "\n".join(lines)
 
 
@@ -310,37 +367,34 @@ async def add_channel_flow(raw: str) -> str:
     import re as _re
     tokens = str(raw or "").split()
     if len(tokens) != 2 or tokens[1].lower() not in ("on", "off"):
-        return ("用法：/add <频道名或链接> on|off\n"
-                "· on  = 开启「仅订阅」（只转存命中订阅关键词的内容）\n"
-                "· off = 关闭（全盘转存）\n"
-                "例如：/add @somechannel on")
+        return USAGE_ADD
     name, mode = tokens[0], tokens[1].lower()
     m = _re.search(r"t\.me/(?:s/)?@?([0-9A-Za-z_]+)", name)
     name = (m.group(1) if m else name).lstrip("@").strip()
     if not name:
-        return ("用法：/add <频道名或链接> on|off\n"
-                "· on  = 开启「仅订阅」（只转存命中订阅关键词的内容）\n"
-                "· off = 关闭（全盘转存）")
+        return USAGE_ADD
     if len(name) > 64:
         return "频道名过长（最多 64 字符）"
+    if not _re.fullmatch(r"[0-9A-Za-z_]{1,64}", name):
+        return "频道名仅支持字母、数字与下划线（1-64 位）"
     if db.query("SELECT 1 FROM channels WHERE type='polling' AND name=?", (name,), one=True):
         return f"频道 @{name} 已存在。订阅模式可在网页「频道管理」按频道开关"
     n = db.query("SELECT count(*) c FROM channels", one=True)["c"]
     if n >= 50:
         return "监控频道已达上限 50 个，请先清理不需要的频道"
-    from ..tg import polling as tg_polling
-    res = await tg_polling.check_channel(name)
+    from ..tg.validate import check_channel_access
+    res = await check_channel_access(name, "polling")  # Bot /add 固定网页轮询接入
     if not res.get("ok"):
         return f"无法添加 @{name}：{res.get('err') or '频道不可访问，请核对后重试'}"
     title = str(res.get("title") or "")
     sub_only = 1 if mode == "on" else 0
     db.execute("INSERT INTO channels(type,name,sub_only,created_at) VALUES('polling',?,?,?)",
                (name, sub_only, time.time()))
-    mode_txt = "仅订阅（只转存命中订阅的内容）" if sub_only else "全盘转存"
+    mode_txt = "仅订阅（仅转存命中订阅关键词的内容）" if sub_only else "全盘转存"
     logstream.info("channels",
                    f"已通过 TG 指令添加监控频道 @{name}（{title}，订阅模式：{'开' if sub_only else '关'}，已通过访问校验）")
     return (f"✅ 已添加频道 @{name}（{title}）\n"
-            f"🛎 订阅模式：{'🟢 ' + mode_txt if sub_only else mode_txt}\n"
+            f"🛎 订阅模式：{mode_txt}\n"
             "下一轮轮询开始抓取；之后可在网页「频道管理」调整该开关")
 
 
@@ -392,7 +446,7 @@ def _sub_add(name: str, note: str) -> str:
                (name, note, time.time()))
     logstream.info("subscribe", f"已通过 TG Bot 搜索订阅: {name}（{note}）")
     return (f"✅ 已订阅「{name}」" +
-            ("，订阅模式下仅转存命中它的内容" if _sub.subscription_only() else
+            ("，订阅模式下仅转存命中该关键词的内容" if _sub.subscription_only() else
              "，命中后会推送追更通知"))
 
 
@@ -419,7 +473,7 @@ async def sub_search_flow(client: "httpx.AsyncClient", token: str,
     cands = [c for c in cands if c["poster_path"]][:6]
     if not cands:
         await _bot_send_text(client, token, chat_id,
-                             f"没有找到与「{query}」相关的影视，试试换个名称")
+                             f"未找到与「{query}」相关的影视，请换个名称重试")
         return
 
     proxy = _tg_proxy()
@@ -460,6 +514,101 @@ async def sub_search_flow(client: "httpx.AsyncClient", token: str,
         for i in range(len(kept))] + [[{"text": "❌ 取消", "callback_data": "subpick:x"}]]}
     await _bot_send_text(client, token, chat_id,
                          f"「{query}」的搜索结果（按人气排序），点按钮完成订阅：", kb)
+
+
+def _like_escape(s: str) -> str:
+    """LIKE 通配符转义（%/_/\），防止关键词触发全表扫描。"""
+    return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _backfill_candidates(arg: str) -> tuple[str, dict | None]:
+    """/backfill 入口：构建候选列表（按剧名关键词或最近的成功分集转存）。
+
+    支持「/backfill <剧名> <集数>」：末尾数字作为当前集数（标题识别不出集数时兜底）。
+    """
+    arg = arg.strip()[:100]
+    ep_hint = 0
+    tokens = arg.rsplit(" ", 1)
+    if len(tokens) == 2 and tokens[1].isdigit():
+        arg, ep_hint = tokens[0].strip(), int(tokens[1])
+    if arg:
+        rows = db.query(
+            "SELECT id, title FROM transfers WHERE status IN ('success','failed')"
+            " AND kind='share' AND message_id>0 AND title LIKE ? ESCAPE '\\'"
+            " ORDER BY id DESC LIMIT 5", (f"%{_like_escape(arg)}%",))
+        if not rows:
+            return f"没有找到标题包含「{arg}」的成功转存记录", None
+        kb = {"inline_keyboard": [
+            [{"text": (r["title"] or "-")[:32], "callback_data": f"bfpick:{r['id']}:{ep_hint}"}]
+            for r in rows
+        ] + [[{"text": "❌ 取消", "callback_data": "bfcancel:x"}]]}
+        hint = f"（当前集数按 {ep_hint} 计）" if ep_hint else ""
+        return "选择要向前补全的记录（将查找其早期分集）" + hint + "：", kb
+    rows = db.query(
+        "SELECT id, title FROM transfers WHERE status IN ('success','failed') AND kind='share'"
+        " AND message_id>0 ORDER BY id DESC LIMIT 20")
+    from ..tg.episode_backfill import should_backfill
+    cands, seen = [], set()
+    for r in rows:
+        parsed = should_backfill(r["title"] or "")
+        if not parsed or (r["title"] or "") in seen:
+            continue
+        seen.add(r["title"])
+        cands.append(r)
+        if len(cands) >= 6:
+            break
+    if not cands:
+        return ("最近的成功转存里没有能识别集数的分集记录。\n"
+                "用法：/backfill <剧名关键词> [当前集数]，按标题查找后选择"), None
+    kb = {"inline_keyboard": [
+        [{"text": (r["title"] or "-")[:32], "callback_data": f"bfpick:{r['id']}:0"}]
+        for r in cands
+    ] + [[{"text": "❌ 取消", "callback_data": "bfcancel:x"}]]}
+    return "选择要向前补全的成功转存（将查找其早期分集）：", kb
+
+
+def _backfill_confirm(tid: int, ep_hint: int = 0) -> tuple[str, dict | None]:
+    """bfpick 回调：回显补全摘要 + 确认按钮。ep_hint 为 /backfill 手动指定的集数。"""
+    row = db.query("SELECT id, title, channel, message_id, status, kind FROM transfers WHERE id=?",
+                   (tid,), one=True)
+    if not row or row["status"] not in ("success", "failed") or row["kind"] != "share"             or not row["message_id"]:
+        return "该记录不可作为补全锚点（需为已转存的分享，含已失效的）", None
+    from ..tg.episode_backfill import base_title, parse_episode
+    base = base_title(row["title"] or "")
+    season, ep = parse_episode(row["title"] or "")
+    if ep is None and ep_hint > 1:
+        season, ep = None, ep_hint  # 手动指定集数兜底
+    if ep is None or ep <= 1:
+        return ("该记录标题未识别出集数（需 S01E52 / 第52集 等格式）。\n"
+                "请改用 /backfill <剧名关键词> <当前集数> 发起，"
+                "或在网页「转存记录」页发起并手动填写"), None
+    kb = {"inline_keyboard": [[{"text": "✅ 确认补全", "callback_data": f"bfgo:{tid}:{ep}"}]]}
+    rng = (f"S{season:02d} " if season is not None else "") + f"E01~E{ep - 1:02d}"
+    return (f"向前补全：《{base}》\n"
+            f"频道：@{row['channel']}\n"
+            f"当前已存：E{ep:02d}\n"
+            f"将向前查找：{rng}（最多翻 50 页历史）\n"
+            f"补全任务将优先消耗每日额度；早期链接已失效的集数会失败并注明原因。"), kb
+
+
+async def _backfill_execute(tid: int, ep_hint: int = 0) -> str:
+    """bfgo 回调：执行向前补全请求（与网页 API 共用同一执行器）。"""
+    from ..tg.episode_backfill import submit_backfill
+    row = db.query("SELECT id, title, channel, message_id, category, target_dir FROM transfers WHERE id=?",
+                   (tid,), one=True)
+    if not row:
+        return "该记录已不存在"
+    try:
+        summary = await submit_backfill(row["channel"], row["message_id"], row["title"] or "",
+                                        ep=ep_hint or None,
+                                        anchor_category=row["category"] or "",
+                                        anchor_target=row["target_dir"] or "")
+    except ValueError as e:
+        return f"❌ 无法发起补全：{e}"
+    logstream.info("system", f"用户（TG）发起向前补全：《{summary['base']}》{summary['episodes']}，"
+                             "补全任务将优先入队")
+    return (f"🔎 已开始向前补全：《{summary['base']}》{summary['episodes']}\n"
+            "补全任务将优先入队并优先消耗每日额度；完成后会推送汇总。")
 
 
 async def _handle_subpick(client: "httpx.AsyncClient", token: str,
@@ -543,6 +692,17 @@ async def bot_command_loop():
                         if cq:
                             if str(cq.get("message", {}).get("chat", {}).get("id", "")) != chat_id:
                                 continue
+                            sender_ok, sender_hint = _check_sender(
+                                {"chat": cq.get("message", {}).get("chat", {}),
+                                 "from": cq.get("from") or {}})
+                            if not sender_ok:
+                                try:
+                                    await client.post(
+                                        f"https://api.telegram.org/bot{token}/sendMessage",
+                                        json={"chat_id": chat_id, "text": sender_hint})
+                                except Exception:
+                                    pass
+                                continue
                             try:  # 先应答回调，去掉按钮上的加载动画
                                 await client.post(
                                     f"https://api.telegram.org/bot{token}/answerCallbackQuery",
@@ -552,6 +712,49 @@ async def bot_command_loop():
                             # 订阅搜索点选：独立流程，回复新消息
                             if (cq.get("data") or "").startswith("subpick:"):
                                 await _handle_subpick(client, token, chat_id, cq["data"])
+                                continue
+                            # 向前补全：候选点选 / 确认执行 / 取消
+                            if (cq.get("data") or "").startswith("bfpick:"):
+                                parts = (cq.get("data") or "").split(":")
+                                try:
+                                    tid = int(parts[1])
+                                    ep_hint = int(parts[2]) if len(parts) > 2 else 0
+                                except ValueError:
+                                    tid = 0
+                                reply, kb = await asyncio.to_thread(
+                                    _backfill_confirm, tid, ep_hint)
+                                payload = {"chat_id": chat_id, "text": reply}
+                                if kb:
+                                    payload["reply_markup"] = kb
+                                try:
+                                    await client.post(
+                                        f"https://api.telegram.org/bot{token}/sendMessage",
+                                        json=payload)
+                                except Exception:
+                                    pass
+                                continue
+                            if (cq.get("data") or "").startswith("bfgo:"):
+                                parts = (cq.get("data") or "").split(":")
+                                try:
+                                    tid = int(parts[1])
+                                    ep_hint = int(parts[2]) if len(parts) > 2 else 0
+                                except ValueError:
+                                    tid, ep_hint = 0, 0
+                                reply = await _backfill_execute(tid, ep_hint)
+                                try:
+                                    await client.post(
+                                        f"https://api.telegram.org/bot{token}/sendMessage",
+                                        json={"chat_id": chat_id, "text": reply})
+                                except Exception:
+                                    pass
+                                continue
+                            if (cq.get("data") or "").startswith("bfcancel:"):
+                                try:
+                                    await client.post(
+                                        f"https://api.telegram.org/bot{token}/sendMessage",
+                                        json={"chat_id": chat_id, "text": "已取消"})
+                                except Exception:
+                                    pass
                                 continue
                             try:
                                 reply, kb = await asyncio.to_thread(
@@ -584,15 +787,28 @@ async def bot_command_loop():
                                or upd.get("channel_post")
                                or upd.get("edited_message") or {})
                         if str(msg.get("chat", {}).get("id", "")) != chat_id:
-                            continue  # 非授权用户
+                            continue  # 非授权对话
+                        sender_ok, sender_hint = _check_sender(msg)
+                        if not sender_ok:
+                            try:
+                                await client.post(
+                                    f"https://api.telegram.org/bot{token}/sendMessage",
+                                    json={"chat_id": chat_id, "text": sender_hint})
+                            except Exception:
+                                pass
+                            continue  # 非绑定的管理员用户（群聊防成员滥用）
                         # ---- 备份文件恢复：直接发送/转发备份 JSON 给 Bot ----
                         doc = msg.get("document")
                         if doc and (str(doc.get("mime_type") or "").endswith("json")
                                     or str(doc.get("file_name") or "").lower().endswith(".json")):
-                            try:
-                                reply = await restore_upload_flow(client, token, chat_id, doc)
-                            except Exception as e:
-                                reply = f"备份文件处理失败: {e}"
+                            allowed, hint = _restore_allowed(msg)
+                            if not allowed:
+                                reply = hint
+                            else:
+                                try:
+                                    reply = await restore_upload_flow(client, token, chat_id, doc)
+                                except Exception as e:
+                                    reply = f"备份文件处理失败: {e}"
                             try:
                                 await client.post(
                                     f"https://api.telegram.org/bot{token}/sendMessage",
@@ -605,9 +821,12 @@ async def bot_command_loop():
                             continue
                         try:
                             if text.lower().startswith("/restore"):
+                                allowed, hint = _restore_allowed(msg)
                                 arg = text.split(None, 1)[1].strip().lower() \
                                     if len(text.split(None, 1)) > 1 else ""
-                                if arg == "confirm":
+                                if not allowed:
+                                    reply = hint  # 群聊里禁止恢复（含 /restore confirm）
+                                elif arg == "confirm":
                                     reply = await asyncio.to_thread(_do_restore, chat_id)
                                 else:
                                     reply = _restore_guide()
@@ -624,8 +843,20 @@ async def bot_command_loop():
                             elif text.lower().startswith("/add"):
                                 # /add 需要异步做频道可访问性校验，单独处理
                                 reply = await add_channel_flow(text.split(None, 1)[1]) \
-                                    if len(text.split(None, 1)) > 1 \
-                                    else "用法：/add <频道名或链接> on|off（on=开启仅订阅，off=全盘转存）"
+                                    if len(text.split(None, 1)) > 1 else USAGE_ADD
+                            elif text.lower().startswith("/backfill"):
+                                arg = text.split(None, 1)[1].strip() if len(text.split(None, 1)) > 1 else ""
+                                reply, kb = await asyncio.to_thread(_backfill_candidates, arg)
+                                try:
+                                    payload = {"chat_id": chat_id, "text": reply}
+                                    if kb:
+                                        payload["reply_markup"] = kb
+                                    await client.post(
+                                        f"https://api.telegram.org/bot{token}/sendMessage",
+                                        json=payload)
+                                except Exception:
+                                    pass
+                                continue
                             elif text.lower().startswith("/sub"):
                                 # /sub <片名>（非 del）：搜索订阅流程（异步 + 海报上传）
                                 parts = text.split()

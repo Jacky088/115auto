@@ -54,10 +54,11 @@
         <el-button class="menu-btn" text @click="menuOpen = true">
           <el-icon :size="20"><Fold /></el-icon>
         </el-button>
-        <div class="header-left">
+          <div class="header-left">
           <div class="header-title">
             {{ title }}
-            <el-tag v-if="sysRunning" type="success" size="small" effect="dark" class="run-tag">运行中</el-tag>
+            <el-tag v-if="sysRunning && !sysPaused" type="success" size="small" effect="dark" class="run-tag">运行中</el-tag>
+            <el-tag v-else-if="sysRunning && sysPaused" type="warning" size="small" effect="dark" class="run-tag">已暂停</el-tag>
             <el-tag v-else-if="sysReady" type="warning" size="small" effect="dark" class="run-tag">待启动</el-tag>
             <el-tag v-else type="info" size="small" effect="dark" class="run-tag">未就绪</el-tag>
           </div>
@@ -66,6 +67,8 @@
             <span class="start-wrap">
               <el-button v-if="!sysRunning" type="primary" class="start-btn"
                          :disabled="!sysReady" :loading="toggling" @click="startSystem">开始运行</el-button>
+              <el-button v-else-if="sysPaused" type="warning" class="start-btn"
+                         :loading="toggling" @click="resumeSystem">恢复转存</el-button>
               <el-button v-else type="danger" plain class="start-btn"
                          :loading="toggling" @click="stopSystem">停止</el-button>
             </span>
@@ -93,16 +96,16 @@
         </div>
       </el-header>
       <el-alert v-if="cookieExpired" type="error" :closable="false" show-icon
-                title="115 Cookie 已失效，转存已暂停 —— 请前往「账号管理」重新扫码登录"
+                title="115 Cookie 已失效，转存已暂停，请前往「账号管理」重新扫码登录"
                 style="margin: 0 10px" class="cookie-alert" />
       <el-alert v-if="autoStop" type="error" :closable="true" show-icon class="auto-stop-alert"
                 style="margin: 8px 10px 0" @close="autoStop = ''">
         <template #title>
-          ⛔ 系统已自动停止运行（运行期间检测到故障）
+          系统已自动停止运行（运行期间检测到故障）
         </template>
         <div class="auto-stop-body">
-          <div>❓ {{ autoStop }}</div>
-          <div>🔧 请按上述提示修正后，点击顶栏「开始运行」恢复；停止期间队列与配置保留，任务不会丢失。</div>
+          <div>原因：{{ autoStop }}</div>
+          <div>处理：按上述原因修正后，点击网页顶栏「开始运行」恢复（队列与配置已保留，任务不会丢失）。</div>
         </div>
       </el-alert>
       <el-main style="padding: 0; overflow-y: auto; overflow-x: hidden">
@@ -121,7 +124,7 @@
       </el-form-item>
       <el-form-item label="新密码" prop="new">
         <el-input v-model="pwdForm.new" type="password" show-password maxlength="128"
-                  placeholder="不修改密码请留空（8-128 位）" />
+                  placeholder="不修改密码请留空（8~128 位）" />
       </el-form-item>
       <el-form-item label="确认新密码" prop="confirm">
         <el-input v-model="pwdForm.confirm" type="password" show-password
@@ -131,8 +134,8 @@
     <div class="pwd-tips">
       <p class="pwd-tips-title">修改说明</p>
       <ul>
-        <li>用户名：2-32 位，仅限中英文、数字与 @ . _ -；留空表示不修改用户名</li>
-        <li>新密码：8-128 位，建议同时包含字母和数字；留空表示不修改密码</li>
+        <li>用户名：2~32 位，仅限中英文、数字与 @ . _ -；留空表示不修改用户名</li>
+        <li>新密码：8~128 位，建议同时包含字母和数字；留空表示不修改密码</li>
         <li>两次新密码必须完全一致；修改任何一项都需先验证旧密码</li>
         <li>保存后立即生效，下次登录请使用新的用户名 / 密码</li>
       </ul>
@@ -162,6 +165,7 @@ const title = computed(() => titles[route.path.slice(1)] || '')
 // 移动端菜单抽屉
 const menuOpen = ref(false)
 const sysRunning = ref(false)
+const sysPaused = ref(false)
 const sysReady = ref(false)
 const sysReasons = ref([])
 const autoStop = ref('')
@@ -171,6 +175,8 @@ const loadSys = async () => {
   try {
     const { data } = await api.get('/api/system/state')
     sysRunning.value = data.running
+    // 暂停态与运行态独立展示：Bot 侧 /pause 后网页顶栏同步可见、可恢复
+    sysPaused.value = !!data.paused
     // 就绪 = 115 登录 + 启用中频道 +（纯 Userbot 频道时）Userbot 在线；未就绪时按钮灰置并提示缺什么
     sysReady.value = !!data.ready
     sysReasons.value = data.reasons || []
@@ -183,6 +189,14 @@ const startSystem = async () => {
   try {
     await api.post('/api/system/start')
     saveOk('系统已启动', '开始监控频道并自动转存')
+    loadSys()
+  } catch (e) { ElMessage.error(errMsg(e)) } finally { toggling.value = false }
+}
+const resumeSystem = async () => {
+  toggling.value = true
+  try {
+    await api.post('/api/system/resume')
+    saveOk('已恢复转存', '队列继续按优先级处理')
     loadSys()
   } catch (e) { ElMessage.error(errMsg(e)) } finally { toggling.value = false }
 }
@@ -204,10 +218,22 @@ onMounted(() => window.addEventListener('resize', onResize))
 onUnmounted(() => window.removeEventListener('resize', onResize))
 
 const cookieExpired = ref(false)
+let prevCookieOk = null  // 上一次巡检的已知状态：true=有效 / false=失效 / null=未知
 const check = async () => {
   try {
     const { data } = await api.get('/api/wizard/status')
-    cookieExpired.value = data.cookie_ok === false && data.completed
+    const bad = data.cookie_ok === false
+    cookieExpired.value = bad && data.completed
+    // Cookie 从失效→有效的「状态翻转」那一拍才提示（仅一次，不会重复弹）
+    if (prevCookieOk === false && !bad) {
+      autoStop.value = ''
+      ElMessage.success(sysRunning.value
+        ? '✅ 115 Cookie 已恢复有效，转存继续进行'
+        : '✅ 115 Cookie 已恢复有效；点顶栏「开始运行」恢复转存')
+    }
+    // 记录本次已知状态：只有确认有效/失效才更新，未知（null）保持原状
+    if (bad) prevCookieOk = false
+    else if (data.cookie_ok === true) prevCookieOk = true
   } catch { /* ignore */ }
 }
 
@@ -234,7 +260,7 @@ onMounted(() => {
   loadUsername()
   loadVersion()
   sysTimer = setInterval(loadSys, 10000)
-  cookieTimer = setInterval(check, 60000)
+  cookieTimer = setInterval(check, 10000)  // Cookie 巡检与状态同频：恢复后 10 秒内消除警示
 })
 onUnmounted(() => {
   clearInterval(sysTimer)
@@ -250,7 +276,7 @@ const pwdRules = {
   username: [{
     validator: (_r, v, cb) => {
       if (!v) return cb()  // 留空 = 不修改用户名
-      if (!_USERNAME_RE.test(v)) return cb(new Error('2-32 位，仅限中英文、数字与 @ . _ -'))
+      if (!_USERNAME_RE.test(v)) return cb(new Error('2~32 位，仅限中英文、数字与 @ . _ -'))
       cb()
     }, trigger: 'blur',
   }],
@@ -294,7 +320,7 @@ const changePwd = async () => {
   try {
     await pwdFormRef.value.validate()
   } catch { return }  // 校验不通过：字段下方已显示红字原因，阻止修改
-  if (!pwdForm.username.trim() && !pwdForm.new) { ElMessage.warning('新用户名与新密码至少填一项'); return }
+  if (!pwdForm.username.trim() && !pwdForm.new) { ElMessage.warning('新用户名与新密码至少填写一项'); return }
   if (pwdForm.confirm && !pwdForm.new) { ElMessage.warning('已填写确认新密码，请同时填写新密码'); return }
   try {
     await api.post('/api/auth/password', pwdForm)
@@ -317,35 +343,48 @@ const changePwd = async () => {
 .pwd-tips-title { margin: 0 0 6px; font-size: 12px; font-weight: 600; color: #3a4661; }
 .pwd-tips ul { margin: 0; padding-left: 16px; }
 .pwd-tips li { font-size: 12px; line-height: 1.8; color: #7c8aa5; list-style: disc; }
-.aside { background: linear-gradient(180deg, var(--saas-sidebar-1) 0%, var(--saas-sidebar-2) 100%); }
+.aside {
+  background: var(--saas-sidebar-1);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  border-right: 1px solid var(--glass-border);
+}
 .logo { display: flex; align-items: center; gap: 10px; padding: 20px 18px 16px; }
 .logo-mark {
-  width: 32px; height: 32px; border-radius: 9px; flex: none;
-  background: linear-gradient(135deg, #2f6bff, #5d8bff);
+  width: 32px; height: 32px; border-radius: 10px; flex: none;
+  background: var(--grad-brand);
   display: flex; align-items: center; justify-content: center; color: #fff;
-  box-shadow: 0 4px 10px rgba(47, 107, 255, .4);
+  box-shadow: 0 4px 12px rgba(79, 107, 255, .45);
 }
-.logo-text { color: #fff; font-weight: 600; font-size: 15px; letter-spacing: .5px; }
+.logo-text { color: var(--saas-text-main); font-weight: 600; font-size: 15px; letter-spacing: .5px; }
 .aside-menu { flex: 1; }
 .aside-footer {
-  color: rgba(174, 189, 223, .45); font-size: 11px; text-align: center; padding: 14px 0;
+  color: var(--saas-text-sub); opacity: .6; font-size: 11px; text-align: center; padding: 14px 0;
 }
 .aside-ver { margin-top: 3px; letter-spacing: .5px; }
 .theme-btn { padding: 8px; color: var(--saas-text-main); }
+/* 告警条是 el-container（flex 列）的子项，而 el-alert 自带 overflow:hidden：
+   顶栏 + 多条告警 + 内容超过视口高度时 flex 会把告警压缩裁掉正文（表现为"被折叠"）。
+   flex:none 让告警永远按内容完整显示，高度缺口全部由可滚动的 el-main 吸收 */
+.cookie-alert, .auto-stop-alert { flex: none; }
 .header {
   display: flex; align-items: center; gap: 8px;
-  background: var(--saas-card); border-bottom: 1px solid var(--saas-line); padding: 0 12px;
+  background: var(--saas-card);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  border-bottom: 1px solid var(--glass-border); padding: 0 12px;
 }
 .header-left { flex: 1; display: flex; align-items: center; gap: 10px; min-width: 0; }
 .header-right { display: flex; align-items: center; gap: 6px; flex: none; }
 .header-title { font-weight: 600; font-size: 15px; color: var(--saas-text-main); flex: none; }
-.user-chip { display: flex; align-items: center; gap: 8px; cursor: pointer; padding: 4px 6px; border-radius: 8px; }
-.user-chip:hover { background: var(--saas-hover, #f4f7fe); }
+.user-chip { display: flex; align-items: center; gap: 8px; cursor: pointer; padding: 4px 6px; border-radius: 999px; }
+.user-chip:hover { background: var(--saas-hover, rgba(79, 107, 255, .10)); }
 .avatar {
   width: 30px; height: 30px; border-radius: 50%;
-  background: linear-gradient(135deg, #2f6bff, #5d8bff);
+  background: var(--grad-brand);
   color: #fff; display: flex; align-items: center; justify-content: center;
   font-size: 13px; font-weight: 600;
+  box-shadow: 0 3px 10px rgba(79, 107, 255, .35);
 }
 .user-name { color: var(--saas-text-main); font-size: 13px; }
 .menu-btn { display: none; padding: 6px; }
@@ -365,8 +404,11 @@ const changePwd = async () => {
 
 <style>
 /* 全局：菜单抽屉内背景（非 scoped 以作用到 el-drawer 内部） */
-.menu-drawer .el-drawer__body { padding: 0; background: #16397f; }
-.menu-drawer .aside { background: linear-gradient(180deg, #0c2456 0%, #16397f 100%); }
+.menu-drawer .el-drawer__body { padding: 0; background: transparent; }
+.menu-drawer .aside {
+  background: var(--saas-sidebar-1);
+  border-right: 1px solid var(--glass-border);
+}
 @media (max-width: 768px) {
   .el-message { max-width: calc(100vw - 24px) !important; }
 }

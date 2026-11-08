@@ -8,7 +8,7 @@
 import asyncio
 import ipaddress
 import re
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import httpx
 
@@ -94,11 +94,26 @@ async def _url_safe(url: str) -> bool:
 
 
 async def _fetch_page(client: httpx.AsyncClient, url: str) -> str:
-    resp = await client.get(url, timeout=15, follow_redirects=True,
-                            headers={"User-Agent": _UA})
-    if resp.status_code != 200:
-        return ""
-    return resp.text[:_MAX_BYTES]
+    """抓取中间页：手动跟随重定向（最多 3 跳），每一跳都重跑 SSRF 校验——
+    频道按钮指向的页面是第三方可控输入，follow_redirects=True 会被 302 绕过
+    内网防护（跳向 127.0.0.1/云元数据等）。"""
+    current = url
+    for _ in range(3):
+        if not await _url_safe(current):
+            logstream.warn("resolver", f"重定向目标指向内网或非法地址，已终止: {current.split('?')[0][:80]}")
+            return ""
+        resp = await client.get(current, timeout=15, follow_redirects=False,
+                                headers={"User-Agent": _UA})
+        if resp.status_code in (301, 302, 303, 307, 308):
+            loc = resp.headers.get("location")
+            if not loc:
+                return ""
+            current = urljoin(current, loc)
+            continue
+        if resp.status_code != 200:
+            return ""
+        return resp.text[:_MAX_BYTES]
+    return ""
 
 
 async def resolve_message(text: str, buttons: list[str]) -> str:
@@ -120,7 +135,7 @@ async def resolve_message(text: str, buttons: list[str]) -> str:
             continue
         # 中间页：先做 SSRF 校验，再查缓存 / 抓取解析
         if not await _url_safe(url):
-            logstream.warn("resolver", f"按钮指向内网或非法地址，已跳过解析: {url[:80]}")
+            logstream.warn("resolver", f"按钮指向内网或非法地址，已跳过解析: {url.split('?')[0][:80]}")
             continue
         resolved += 1
         if url in _cache:
@@ -131,7 +146,7 @@ async def resolve_message(text: str, buttons: list[str]) -> str:
                     html = await _fetch_page(client, url)
                 extracted = _extract_from_html(html) if html else ""
             except Exception as e:
-                logstream.warn("resolver", f"按钮页面解析失败 {url[:80]}: {e}")
+                logstream.warn("resolver", f"按钮页面解析失败 {url.split('?')[0][:80]}: {e}")
                 extracted = ""
             if len(_cache) >= _CACHE_MAX:
                 _cache.clear()

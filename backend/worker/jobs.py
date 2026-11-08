@@ -170,7 +170,7 @@ def send_test(token: str, chat_id: str) -> tuple[bool, str]:
         resp = httpx.post(
             f"https://api.telegram.org/bot{token}/sendMessage",
             json={"chat_id": chat_id,
-                  "text": "✅ 115自动转存助手：测试通知成功！\n转存成功后会推送到此对话。",
+                  "text": "🔔 115 自动转存助手测试通知\n收到这条消息说明该通知渠道配置正确。",
                   "disable_web_page_preview": True},
             proxy=_tg_proxy(), timeout=15,
         )
@@ -181,13 +181,13 @@ def send_test(token: str, chat_id: str) -> tuple[bool, str]:
         except Exception:
             desc = ""
         if resp.status_code == 401:
-            return False, "Bot Token 无效，请检查是否从 @BotFather 完整复制（含冒号前的数字ID）"
+            return False, "Bot Token 无效，请检查是否从 @BotFather 完整复制（含冒号前的数字 ID）"
         if "chat not found" in desc.lower():
-            return False, "Chat ID 无效（找不到该对话），请先给你的 Bot 发送过一条 /start 消息"
+            return False, "Chat ID 无效（找不到该对话），请先给你的 Bot 发送一条 /start 消息"
         return False, f"Telegram API 返回 {resp.status_code}：{desc or resp.text[:120]}"
     except Exception as e:
         return False, (f"无法连接 Telegram（{type(e).__name__}），请检查服务器网络；"
-                       "大陆服务器请在上方「TG 代理」填写代理地址")
+                       "国内服务器请在「TG 代理」处填写代理地址")
 
 
 _EP_RE = re.compile(r"[Ss]\d{1,2}\s?[Ee]\d{1,3}|第\s?\d+\s?[集话話期]")
@@ -269,14 +269,13 @@ def stop_system(reason: str):
     """运行期出现致命故障：自动停止系统，写实时日志，并给用户设定的 TG 推送警示。"""
     db.set_setting("running", False)
     db.set_setting("auto_stop_reason", reason)  # 供前端仪表盘展示，用户修正后清除
-    logstream.error("system", f"⛔ 系统已自动停止运行：{reason}")
-    logstream.warn("system", "请修正上述问题后，回到网页顶栏点击「开始运行」恢复。"
-                             "停止期间队列与配置保留，不会丢失任务。")
+    logstream.error("system", f"⛔ 系统已自动停止：{reason}")
+    logstream.warn("system", "请按上述原因修正后，点击网页顶栏「开始运行」恢复"
+                             "（队列与配置已保留，任务不会丢失）。")
     try:
-        notify("⛔ 115 自动转存助手已自动停止运行\n\n"
+        notify("⛔ 115 自动转存助手已自动停止\n\n"
                f"❓ 原因：{reason}\n\n"
-               "🔧 请到管理页面修正后，点击顶栏「开始运行」恢复。\n"
-               "（停止期间队列与配置保留，任务不会丢失）")
+               "🔧 请按上方原因中的指引修正后，点击网页顶栏「开始运行」恢复。")
     except Exception:
         pass  # 通知失败不影响停止动作本身
 
@@ -330,6 +329,18 @@ async def health_check_loop():
                 fail_streak = {"115": 0, "tg": 0}
                 continue
 
+            # --- 看门狗：转存任务卡在 running 超过 30 分钟（115 请求无响应，
+            # p115client 的 HTTP 栈无默认超时）→ 自动重新排队，避免队列永久停摆。
+            # 卡死的 worker 线程无法终止，但会被后续完成任务的状态守卫自然作废。
+            requeued = db.execute(
+                "UPDATE transfers SET status='queued', running_at=NULL,"
+                " error='转存超时：115 请求长时间无响应，已自动重新排队'"
+                " WHERE status='running' AND running_at IS NOT NULL AND running_at < ?",
+                (time.time() - 1800,))
+            if requeued:
+                logstream.warn("transfer", f"看门狗：{requeued} 个任务转存超时"
+                                           "（请求无响应），已重新排队")
+
             # --- 115 Cookie ---
             st = await asyncio.to_thread(pan.check_login, True)
             if st.get("ok"):
@@ -356,17 +367,17 @@ async def health_check_loop():
                 fail_streak["tg"] = 0
             else:
                 fail_streak["tg"] += 1
-                logstream.warn("system", f"TG Userbot 未连接（连续 {fail_streak['tg']} 次），"
-                                         "私有频道消息无法接收")
+                logstream.warn("system", f"TG 通道异常（连续 {fail_streak['tg']} 次），"
+                                         "无法接收频道消息")
                 if fail_streak["tg"] >= 2:
                     # 区分两类 TG 故障给出对应修正指引
                     rows = db.query("SELECT id, type, enabled FROM channels")
                     enabled = [dict(r) for r in rows if r["enabled"]]
                     polling = [r for r in enabled if r["type"] == "polling"]
-                    stop_reason = ("TG 频道抓取持续失败（频道可能已被删除/转为私有，"
-                                   "或服务器无法访问 t.me）。请到「频道管理」用「消息预览」核对频道，"
+                    stop_reason = ("TG 频道抓取持续失败（频道可能已被删除或转为私密，"
+                                   "或服务器无法访问 t.me）。请到「频道管理」的「消息预览」核对，"
                                    "或检查设置页的 TG 代理。") if polling and _polling_all_failed(polling) \
-                        else ("TG Userbot 已断开，监控的私有频道消息无法接收。"
+                        else ("TG Userbot 已断开，监控的私密频道消息无法接收。"
                               "请到「账号管理」重新登录 Userbot。")
                     await asyncio.to_thread(stop_system, stop_reason)
                     fail_streak = {"115": 0, "tg": 0}
@@ -384,8 +395,10 @@ def _cleanup_once() -> tuple[int, int, int]:
     分批删除（每批 2000 条）：单事务删几十万行会长时间持有 SQLite 写锁，
     把整个应用（页面接口、WS 心跳、日志写入）全部卡住；分批把每次持锁时间压到毫秒级。
     """
-    total = [0, 0, 0]
+    total = [0, 0, 0, 0]
     # messages 表是 (channel, message_id) 复合主键没有 id 列，统一用 SQLite 隐式 rowid
+    from datetime import date, timedelta
+    cutoff_day = (date.today() - timedelta(days=30)).isoformat()
     jobs = (
         ("DELETE FROM logs WHERE rowid IN (SELECT rowid FROM logs WHERE created_at<? LIMIT 2000)",
          time.time() - LOG_RETENTION_SECONDS, 0),
@@ -393,6 +406,8 @@ def _cleanup_once() -> tuple[int, int, int]:
          time.time() - MSG_RETENTION_SECONDS, 1),
         ("DELETE FROM blacklist_hits WHERE rowid IN (SELECT rowid FROM blacklist_hits WHERE created_at<? LIMIT 2000)",
          time.time() - HITS_RETENTION_SECONDS, 2),
+        ("DELETE FROM daily_quota WHERE day < ?",
+         cutoff_day, 3),
     )
     for sql, cutoff, idx in jobs:
         while True:
@@ -408,19 +423,22 @@ async def log_cleanup_loop():
     - 日志：保留 7 天（网页可查/导出）
     - 消息去重记录：保留 30 天（超过后该消息若再出现会被重新处理——30 天前的资源重转风险可忽略）
     - 黑名单命中记录：保留 90 天（低频写入，留足人工复核期）
+    - 每日额度记录：保留 30 天
     转存记录永久保留：体积极小（无正文），且是用户的核心操作台账。
     """
-    logstream.info("system", "数据自动清理任务启动（日志 7 天 / 消息 30 天 / 命中记录 90 天）")
+    logstream.info("system", "数据自动清理任务启动（日志 7 天 / 消息 30 天 / 命中记录 90 天 / 每日额度 30 天）")
     while True:
         try:
             # 清理是批量 DB 写操作：放线程池执行，不阻塞事件循环
-            deleted, stale_msgs, stale_hits = await asyncio.to_thread(_cleanup_once)
+            deleted, stale_msgs, stale_hits, stale_quota = await asyncio.to_thread(_cleanup_once)
             if deleted:
-                logstream.info("system", f"已永久删除 {deleted} 条过期日志（超过 7 天）")
+                logstream.info("system", f"已清理 {deleted} 条过期日志（超过 7 天）")
             if stale_msgs:
                 logstream.info("system", f"已清理 {stale_msgs} 条过期消息去重记录（超过 30 天）")
             if stale_hits:
-                logstream.info("system", f"已归档删除 {stale_hits} 条过期黑名单命中记录（超过 90 天）")
+                logstream.info("system", f"已清理 {stale_hits} 条过期黑名单命中记录（超过 90 天）")
+            if stale_quota:
+                logstream.info("system", f"已清理 {stale_quota} 条过期每日额度记录（超过 30 天）")
         except Exception as e:
             logstream.error("system", f"数据清理失败: {logstream.exc(e)}")
         await asyncio.sleep(3600)
@@ -506,11 +524,12 @@ def _finish_offline(job: dict, ok: bool, name: str = "", reason: str = ""):
     if ok:
         # 名称优先取频道消息标题，115 返回的文件名仅兜底
         shown = classifier.headline(job.get("title", "")) or name or job["title"]
-        db.execute("UPDATE transfers SET status='success', title=?, finished_at=? WHERE id=?",
+        db.execute("UPDATE transfers SET status='success', title=?, finished_at=?"
+                   " WHERE id=?",
                    (shown[:200], time.time(), job["id"]))
         db.quota_incr()
         logstream.info("transfer",
-                       f"✅ 云下载任务完成（②）: {shown[:60]} → {job['target_dir']}，文件已保存至目标目录")
+                       f"✅ 云下载任务完成：{shown[:60]} → {job['target_dir']}，文件已保存至目标目录")
         notify_transfer(shown, job.get("category", ""), job.get("channel", ""),
                         job["target_dir"], kind="offline_done")
     else:
@@ -584,7 +603,7 @@ async def digest_loop():
                     if any(detail.values()):
                         db.set_setting("digest_last_sent", today)
                         sent = "、".join(k for k, v in detail.items() if v)
-                        logstream.info("system", f"已推送每日摘要通知（渠道: {sent}）")
+                        logstream.info("system", f"已推送每日摘要通知（渠道：{sent}）")
                     else:
                         # 全部渠道失败：记 warn 便于排查（未配置 Token/网络不通等），
                         # 不标记已发送，10 分钟后自动重试

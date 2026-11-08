@@ -1,16 +1,29 @@
 """主业务路由：登录/向导/仪表盘/频道/规则/黑名单/转存记录/设置/日志。"""
 import re
+import threading
 import time
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 
 from .. import auth, config, database as db
-from ..core import classifier, filters, logstream, pipeline
+from ..core import classifier, filters, logstream, patguard, pipeline
 from ..pan115 import client as pan
 from ..worker import jobs
 from .deps import require_user
 
 router = APIRouter(prefix="/api")
+
+
+def _client_ip(request: Request) -> str:
+    """来源 IP：反代场景取 X-Forwarded-For 首段，兜底 remote_addr。"""
+    fwd = request.headers.get("x-forwarded-for", "")
+    return (fwd.split(",")[0].strip() if fwd else "") or (
+        request.client.host if request.client else "")
+
+
+def _like_escape(s: str) -> str:
+    """LIKE 通配符转义（%/_/\），防止用户输入触发全表扫描。"""
+    return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 # ---------- auth ----------
@@ -20,19 +33,20 @@ def _web_username() -> str:
 
 
 @router.post("/auth/login")
-def login(body: dict):
+def login(body: dict, request: Request):
+    ip = _client_ip(request)
     username = str(body.get("username", ""))[:64]
     password = str(body.get("password", ""))
     if len(password) > 128:
-        auth.record_login_fail()
-        raise HTTPException(400, "密码过长")
-    if auth.login_throttled():
-        logstream.warn("system", "登录请求被限速（连续失败过多）")
-        raise HTTPException(429, "失败次数过多，请 1 分钟后再试")
+        auth.record_login_fail(ip)
+        raise HTTPException(400, "密码过长", headers={"Retry-After": "60"})
+    if auth.login_throttled(ip):
+        logstream.warn("system", f"登录请求被限速（来源 {ip}）")
+        raise HTTPException(429, "失败次数过多，请 1 分钟后再试", headers={"Retry-After": "60"})
     stored = db.get_setting("web_password_hash", "")
     if username != _web_username() or not auth.verify_password(password, stored):
-        auth.record_login_fail()
-        logstream.warn("system", "网页登录失败（用户名或密码错误）")
+        auth.record_login_fail(ip)
+        logstream.warn("system", f"网页登录失败（来源 {ip}）")
         raise HTTPException(401, "用户名或密码错误")
     logstream.info("system", "网页登录成功")
     return {"token": auth.make_token(username)}
@@ -48,24 +62,28 @@ _USERNAME_RE = re.compile(r"^[A-Za-z0-9_@\.\-\u4e00-\u9fa5]{2,32}$")
 
 
 @router.post("/auth/password")
-def change_pwd(body: dict, _=Depends(require_user)):
+def change_pwd(body: dict, request: Request, _=Depends(require_user)):
     """修改用户名和/或密码（都需验证旧密码）。body: {old, new?, username?}"""
     old = body.get("old", "")
     if not auth.verify_password(old, db.get_setting("web_password_hash", "")):
-        auth.record_login_fail()  # 旧密码连续错误同样触发限速，防止已登录会话被暴力猜密码
+        auth.record_login_fail(_client_ip(request))  # 旧密码连续错误同样触发限速，防止已登录会话被暴力猜密码
         raise HTTPException(400, "旧密码错误")
     if auth.login_throttled():
         raise HTTPException(429, "失败次数过多，请 1 分钟后再试")
     username = str(body.get("username") or "").strip()
     new = str(body.get("new") or "")
     if not username and not new:
-        raise HTTPException(400, "请至少填写新用户名或新密码其中一项")
+        raise HTTPException(400, "新用户名与新密码至少填写一项")
     changed = []
     if username and username != _web_username():
         if not _USERNAME_RE.fullmatch(username):
             raise HTTPException(400, "用户名需为 2-32 位，仅限中英文、数字、@ . _ -")
         db.set_setting("web_username", username)
         changed.append(f"用户名 → {username}")
+        try:  # 改用户名同样清掉随机初始密码文件（已完成使命）
+            auth.INITIAL_PASSWORD_FILE.unlink(missing_ok=True)
+        except OSError:
+            pass
     if new:
         if len(new) < 8:
             raise HTTPException(400, "新密码至少 8 位")
@@ -111,11 +129,11 @@ def _readiness(strict_115: bool) -> dict:
     userbot_needed = bool(userbots) and not polling
     reasons = []
     if not st.get("ok"):
-        reasons.append("115 未登录或 Cookie 失效（请扫码登录或导入 Cookie）")
+        reasons.append("115 未登录或 Cookie 失效，请到「账号管理」重新扫码登录或导入 Cookie")
     if not enabled:
         reasons.append("尚未添加启用中的频道")
     if userbot_needed and not userbot_ok:
-        reasons.append("监控的频道均为 Userbot 类型，但 Userbot 未连接")
+        reasons.append("监控的频道均为 Userbot 频道，但 Userbot 未登录或已断开")
     return {
         "ok_115": bool(st.get("ok")),
         "channels": len(enabled),
@@ -152,7 +170,17 @@ def system_stop(_=Depends(require_user)):
     """停止运行：暂停监听与转存（队列与配置保留）。"""
     db.set_setting("running", False)
     db.set_setting("auto_stop_reason", "")  # 手动停止时清除自动停止标记
-    logstream.warn("system", "⏸ 系统已停止运行（配置与队列保留，可随时再次启动）")
+    logstream.warn("system", "⏸ 系统已停止运行（队列与配置已保留，任务不会丢失）")
+    return {"ok": True}
+
+
+@router.post("/system/resume")
+def system_resume(_=Depends(require_user)):
+    """恢复被暂停的转存（清除暂停标记；需系统处于运行状态）。"""
+    if not db.get_setting("running", False):
+        raise HTTPException(400, "系统未在运行，请先点击「开始运行」")
+    db.set_setting("paused", False)
+    logstream.info("system", "▶ 已恢复转存（清除暂停）")
     return {"ok": True}
 
 
@@ -161,13 +189,24 @@ def system_state(_=Depends(require_user)):
     """运行状态 + 完整就绪检查（供顶栏「开始运行」按钮门控）。
 
     复用登录缓存（不增加 115 请求压力）；前端按钮据此灰置，服务端 /system/start 仍会强制校验兜底。
+    自动停止原因在对应故障恢复后就地清除：Cookie/Userbot 恢复而停止原因与之对应时不再返回
+    （并写库清除），前端 10 秒轮询到空值即撤下红色告警，用户点「开始运行」恢复运行。
     """
     r = _readiness(strict_115=False)
+    reason = str(db.get_setting("auto_stop_reason", "") or "")
+    if reason:
+        if "Cookie 失效" in reason and r.get("ok_115"):
+            reason = ""
+        elif "Userbot 已断开" in reason and r.get("userbot_ok"):
+            reason = ""
+        if not reason:
+            db.set_setting("auto_stop_reason", "")
+            logstream.info("system", "故障已恢复，自动停止警示已清除（点击「开始运行」恢复转存）")
     return {
         "running": bool(db.get_setting("running", False)),
         "setup_completed": bool(db.get_setting("setup_completed", False)),
         "paused": bool(db.get_setting("paused", False)),
-        "auto_stop_reason": str(db.get_setting("auto_stop_reason", "") or ""),
+        "auto_stop_reason": reason,
         **r,
     }
 
@@ -201,8 +240,8 @@ def dashboard(_=Depends(require_user)):
 @router.get("/dashboard/recent")
 def recent_transfers(_=Depends(require_user)):
     return [dict(r) for r in db.query(
-        "SELECT id,title,category,target_dir,size,status,created_at,channel FROM transfers"
-        " ORDER BY id DESC LIMIT 20")]
+        "SELECT id,title,category,target_dir,size,status,created_at,channel,"
+        "kind,increment,priority FROM transfers ORDER BY id DESC LIMIT 20")]
 
 
 # ---------- channels ----------
@@ -231,8 +270,10 @@ async def add_channel(body: dict, _=Depends(require_user)):
     name = name.lstrip("@")
     if not name:
         raise HTTPException(400, "频道名不能为空")
-    if len(name) > 64:
-        raise HTTPException(400, "频道名过长（最多 64 字符）")
+    # 频道名字符集白名单：名字会内插进 t.me/s/<name> 抓取 URL，含 ?/#/空白 的名字
+    # 会污染翻页参数并造成展示与实际抓取不一致
+    if not re.fullmatch(r"[0-9A-Za-z_]{1,64}", name):
+        raise HTTPException(400, "频道名仅支持字母、数字与下划线（1-64 位）")
     if ctype not in ("polling", "userbot"):
         raise HTTPException(400, "type 必须是 polling 或 userbot")
     if db.query("SELECT 1 FROM channels WHERE type=? AND name=?", (ctype, name), one=True):
@@ -242,21 +283,28 @@ async def add_channel(body: dict, _=Depends(require_user)):
     if n >= 50:
         raise HTTPException(400, "监控频道已达上限 50 个，请先清理不需要的频道")
 
-    # 添加前校验：确认该频道当前确实可被对应方式访问（轮询→t.me/s 可打开；Userbot→账号可解析）
-    from ..tg import polling as tg_polling, userbot as tg_userbot
-    res = await (tg_userbot.check_channel(name) if ctype == "userbot"
-                 else tg_polling.check_channel(name))
+    # 添加前校验（统一入口）：确认该频道当前确实可被对应方式访问
+    # （轮询→t.me/s 可打开；Userbot→账号可解析）
+    from ..tg.validate import check_channel_access
+    res = await check_channel_access(name, ctype)
     if not res.get("ok"):
         raise HTTPException(400, f"无法添加 @{name}：{res.get('err') or '频道不可访问，请核对后重试'}")
     title = str(res.get("title") or "")
 
-    # 新频道继承全局订阅模式设置（之后可在「频道管理」按频道独立调整）
+    # 订阅模式：网页弹窗必选（与 Bot /add 的 on|off 一致）；未携带 sub_only 的调用方
+    # （如初始化向导批量添加）回退继承全局订阅模式设置
     from ..core import subscribe as _submod
-    sub_only = 1 if _submod.subscription_only() else 0
+    if body.get("sub_only") is None:
+        sub_only = 1 if _submod.subscription_only() else 0
+    else:
+        sub_only = 1 if body.get("sub_only") in (True, 1, "1", "true", "on") else 0
     db.execute("INSERT INTO channels(type,name,sub_only,created_at) VALUES(?,?,?,?)",
                (ctype, name, sub_only, time.time()))
+    mode_label = "网页轮询" if ctype == "polling" else "Userbot"
+    sub_label = "仅订阅" if sub_only else "全盘转存"
     logstream.info("channels",
-                   f"添加监控频道 @{name}（{title}，接入方式：{ctype}，已通过访问校验）")
+                   f"添加监控频道 @{name}（{title}，接入方式：{mode_label}，"
+                   f"订阅模式：{sub_label}，已通过访问校验）")
     return {"ok": True, "name": name, "title": title}
 
 
@@ -288,7 +336,7 @@ def update_channel(ch_id: int, body: dict, _=Depends(require_user)):
             raise HTTPException(404, "频道不存在")
         db.execute("UPDATE channels SET sub_only=? WHERE id=?", (1 if body["sub_only"] else 0, ch_id))
         logstream.info("channels",
-                       f"频道 @{ch['name']} 订阅模式已{'开启（仅转存命中订阅的内容）' if body['sub_only'] else '关闭（全盘转存）'}")
+                       f"频道 @{ch['name']} 订阅模式已{'开启（仅转存命中订阅关键词的内容）' if body['sub_only'] else '关闭（全盘转存）'}")
     return {"ok": True}
 
 
@@ -305,14 +353,14 @@ def delete_channel(ch_id: int, _=Depends(require_user)):
     name = ch["name"]
     n = db.execute("DELETE FROM messages WHERE channel=?", (name,))
     db.execute("DELETE FROM channels WHERE id=?", (ch_id,))
-    db.set_setting(f"poll_fail_{ch_id}", 0)  # 清理失败计数，避免残留影响健康判定
+    db.execute("DELETE FROM settings WHERE key=?", (f"poll_fail_{ch_id}",))  # 连计数行一起清理，防残留累积
     try:
         from ..tg import backfill as _backfill
         _backfill._backfill_state.pop(ch_id, None)
     except Exception:
         pass
     logstream.info("channels",
-                   f"删除监控频道 @{name}：已清除 {n} 条消息 ID 记忆（重新添加将按新频道处理）")
+                   f"删除监控频道 @{name}：已清除 {n} 条消息去重记录（重新添加将按新频道处理）")
     return {"ok": True, "cleared": n}
 
 
@@ -338,7 +386,7 @@ def reset_channel(ch_id: int, _=Depends(require_user)):
     except Exception:
         pass
     logstream.info("channels",
-                   f"重置监控频道 @{ch['name']}：清除 {n} 条消息 ID 记录，抓取游标归零，"
+                   f"重置监控频道 @{ch['name']}：清除 {n} 条消息去重记录，抓取游标归零，"
                    "下一轮从最新消息重新开始")
     return {"ok": True, "cleared": n}
 
@@ -396,7 +444,7 @@ def add_subscription(body: dict, _=Depends(require_user)):
         raise HTTPException(400, f"订阅「{kw}」已存在")
     db.execute("INSERT INTO subscriptions(keyword,note,created_at) VALUES(?,?,?)",
                (kw, (body.get("note") or "")[:200], time.time()))
-    logstream.info("subscribe", f"添加追剧订阅: {kw}")
+    logstream.info("subscribe", f"添加追剧订阅：{kw}")
     return {"ok": True}
 
 
@@ -472,8 +520,11 @@ def _tmdb_item(it: dict, kind: str) -> dict | None:
     }
 
 
-# TV 详情（季列表）缓存：季播剧的最新季基本不变，进程内缓存即可
-_TV_SEASON_CACHE: dict[int, tuple[int, str] | None] = {}
+# TV 详情（季列表）缓存：季播剧的最新季基本不变，进程内缓存即可（带 TTL 与容量上限）
+_TV_SEASON_CACHE: dict[int, tuple[float, tuple[int, str] | None]] = {}
+_TV_SEASON_LOCK = threading.Lock()  # 同步接口跑在线程池，缓存读写需互斥
+_TV_SEASON_TTL = 86400.0  # 24 小时
+_TV_SEASON_MAX = 500
 
 
 def _latest_season_of(tv_id, api_key: str, lang: str) -> tuple[int, str] | None:
@@ -486,8 +537,13 @@ def _latest_season_of(tv_id, api_key: str, lang: str) -> tuple[int, str] | None:
         tv_id = int(tv_id)
     except (TypeError, ValueError):
         return None
-    if tv_id in _TV_SEASON_CACHE:
-        return _TV_SEASON_CACHE[tv_id]
+    now = time.time()
+    with _TV_SEASON_LOCK:
+        hit = _TV_SEASON_CACHE.get(tv_id)
+        if hit and now < hit[0]:
+            return hit[1]
+        if len(_TV_SEASON_CACHE) > _TV_SEASON_MAX:
+            _TV_SEASON_CACHE.clear()  # 简单兜底：条目超限时整体重来，避免无限增长
     best = None
     try:
         resp = _tmdb_get(f"/tv/{tv_id}", {"api_key": api_key, "language": lang})
@@ -502,7 +558,8 @@ def _latest_season_of(tv_id, api_key: str, lang: str) -> tuple[int, str] | None:
                     best = (sn, ad)
     except Exception:
         pass
-    _TV_SEASON_CACHE[tv_id] = best
+    with _TV_SEASON_LOCK:
+        _TV_SEASON_CACHE[tv_id] = (time.time() + _TV_SEASON_TTL, best)
     return best
 
 
@@ -538,13 +595,28 @@ def tmdb_discover(kind: str = "on_air", page: int = 1, _=Depends(require_user)):
 
     api_key = str(db.get_setting("tmdb_api_key", "") or "").strip()
     if not api_key:
-        raise HTTPException(400, "请先填写并保存 TMDB API Key")
+        raise HTTPException(400, "请先在「订阅追剧」页填写并保存 TMDB API Key")
     page = min(max(page, 1), 500)
     today = datetime.date.today()
     lang = _tmdb_lang()
 
     items: list[dict] = []
     total_pages = 1
+
+    def _collect(path: str, params: dict, k: str) -> None:
+        nonlocal total_pages
+        try:
+            resp = _tmdb_get(path, params)
+        except Exception as e:
+            logstream.warn("system", f"TMDB {path} 请求失败: {logstream.exc(e)}")
+            return
+        if resp.status_code != 200:
+            logstream.warn("system", f"TMDB {path} 返回 {resp.status_code}: {str(resp.text)[:120]}")
+            return
+        data = resp.json()
+        total_pages = max(total_pages, min(int(data.get("total_pages") or 1), 500))
+        items.extend(x for x in (_tmdb_item(it, k)
+                                 for it in (data.get("results") or [])) if x)
 
     def _collect(path: str, params: dict, k: str) -> None:
         nonlocal total_pages
@@ -591,7 +663,7 @@ def tmdb_discover(kind: str = "on_air", page: int = 1, _=Depends(require_user)):
     else:
         raise HTTPException(400, f"未知分类: {kind}")
     if not items:
-        raise HTTPException(502, "TMDB 拉取失败，请检查 API Key 或网络/代理设置")
+        raise HTTPException(502, "TMDB 请求失败，请检查 API Key 或网络/代理设置")
     if kind == "upcoming":
         # 即将上线按开播/上映日期升序：最接近今天的排最前，符合追剧日历视角
         items.sort(key=lambda x: x.get("date") or "9999-12-31")
@@ -608,7 +680,7 @@ def tmdb_search(query: str = "", kind: str = "all", page: int = 1, _=Depends(req
     """按名称搜索 TMDB 影视（tv/movie），返回海报、年份、简介等供订阅选剧。"""
     api_key = str(db.get_setting("tmdb_api_key", "") or "").strip()
     if not api_key:
-        raise HTTPException(400, "请先在上方填写并保存 TMDB API Key")
+        raise HTTPException(400, "请先在「订阅追剧」页填写并保存 TMDB API Key")
     query = query.strip()
     if len(query) < 2:
         raise HTTPException(400, "搜索词至少 2 个字符")
@@ -655,7 +727,8 @@ def tmdb_poster(path: str = "", token: str = "",
     try:
         import httpx
         resp = httpx.get(f"{_TMDB_IMG_BASE}/w200{path}", proxy=proxy, timeout=15)
-        if resp.status_code != 200:
+        ct = (resp.headers.get("content-type") or "").lower()
+        if resp.status_code != 200 or not ct.startswith("image/"):
             raise HTTPException(404, "海报获取失败")
         return Response(content=resp.content, media_type=resp.headers.get(
             "content-type", "image/jpeg"),
@@ -704,18 +777,19 @@ def save_rules(body: dict, _=Depends(require_user)):
             category = str(r.get("category") or "").strip()
             if not pattern or not category:
                 raise HTTPException(400, f"第 {i + 1} 条规则的正则和分类不能为空")
-            try:
-                re.compile(pattern)
-            except re.error as e:
-                raise HTTPException(400, f"第 {i + 1} 条规则的正则无效（{pattern}）: {e}")
+            err = patguard.validate_pattern(pattern)
+            if err:
+                raise HTTPException(400, f"第 {i + 1} 条规则：{err}")
             try:
                 priority = int(r.get("priority", i + 1))
             except (TypeError, ValueError):
                 raise HTTPException(400, f"第 {i + 1} 条规则的优先级必须是数字")
             cleaned.append((pattern, category, priority, 1 if r.get("enabled", 1) else 0))
-        db.execute("DELETE FROM rules")
-        for item in cleaned:
-            db.execute("INSERT INTO rules(pattern,category,priority,enabled) VALUES(?,?,?,?)", item)
+        # 整批一个事务：避免删+插逐条 commit（几十次写锁获取）
+        with db.transaction() as con:
+            con.execute("DELETE FROM rules")
+            con.executemany("INSERT INTO rules(pattern,category,priority,enabled) VALUES(?,?,?,?)",
+                            cleaned)
         saved_rules = len(cleaned)
 
     if "routes" in body:
@@ -762,9 +836,10 @@ def save_rules(body: dict, _=Depends(require_user)):
 def reset_rules(_=Depends(require_user)):
     """重置为最新内置规则集；缺失的默认分类目录映射自动补齐（不覆盖已有映射）。"""
     from ..database import DEFAULT_RULES, DEFAULT_ROUTES
-    db.execute("DELETE FROM rules")
-    for pat, cat, pri in DEFAULT_RULES:
-        db.execute("INSERT INTO rules(pattern,category,priority) VALUES(?,?,?)", (pat, cat, pri))
+    with db.transaction() as con:
+        con.execute("DELETE FROM rules")
+        con.executemany("INSERT INTO rules(pattern,category,priority) VALUES(?,?,?)",
+                        [(pat, cat, pri) for pat, cat, pri in DEFAULT_RULES])
     for cat, d in DEFAULT_ROUTES:
         db.execute("INSERT OR IGNORE INTO routes(category,target_dir,offline_dir) VALUES(?,?,'')", (cat, d))
     classifier.invalidate()
@@ -793,9 +868,12 @@ async def release_hit(hit_id: int, _=Depends(require_user)):
     if not hit:
         raise HTTPException(404, "记录不存在")
     if hit["stage"] == "share_info" and hit["share_code"]:
+        # 活动任务唯一：同分享码已有排队/转存中任务时不重复入队（放行记录保留）
         changed = db.execute(
             "UPDATE transfers SET bypass_filters=1, status='queued', attempts=0, error='',"
-            " next_retry_at=NULL WHERE share_code=? AND status='blocked'",
+            " next_retry_at=NULL WHERE share_code=? AND status='blocked'"
+            " AND share_code NOT IN (SELECT share_code FROM transfers"
+            "                         WHERE status IN ('queued','running','submitted'))",
             (hit["share_code"],))
         db.execute("DELETE FROM blacklist_hits WHERE id=?", (hit_id,))
         if changed:
@@ -805,7 +883,7 @@ async def release_hit(hit_id: int, _=Depends(require_user)):
     db.execute("DELETE FROM blacklist_hits WHERE id=?", (hit_id,))
     result = pipeline.process_message(hit["channel"], hit["message_id"], hit["text"], bypass=True)
     logstream.info("blacklist",
-                   f"误杀放行: 消息 #{hit['message_id']}（{hit['rule_type']}:{hit['rule_value']}）已忽略黑名单重新处理")
+                   f"误拦放行：消息 #{hit['message_id']}（{hit['rule_type']}:{hit['rule_value']}）已忽略黑名单重新处理")
     return {"ok": True, "result": result}
 
 
@@ -826,7 +904,7 @@ def restore_blacklist_defaults(_=Depends(require_user)):
 @router.get("/blacklist/{btype}")
 def get_blacklist(btype: str, _=Depends(require_user)):
     if btype not in ("channel", "keyword", "file_pattern"):
-        raise HTTPException(404, "未知类型")
+        raise HTTPException(404, "未知黑名单类型")
     return [dict(r) for r in db.query(
         "SELECT * FROM blacklist WHERE type=? ORDER BY id DESC", (btype,))]
 
@@ -834,13 +912,18 @@ def get_blacklist(btype: str, _=Depends(require_user)):
 @router.post("/blacklist/{btype}")
 def add_blacklist(btype: str, body: dict, _=Depends(require_user)):
     if btype not in ("channel", "keyword", "file_pattern"):
-        raise HTTPException(404, "未知类型")
+        raise HTTPException(404, "未知黑名单类型")
     value = (body.get("value") or "").strip()
     if not value:
         raise HTTPException(400, "内容不能为空")
     lines = [ln.strip() for ln in value.splitlines() if ln.strip()]
     if len(lines) > 200:
         raise HTTPException(400, "单次最多添加 200 条，请分批操作")
+    if btype == "file_pattern":  # 文件名正则同样跑在不可信文件名上，保存时做安全校验
+        for line in lines:
+            err = patguard.validate_pattern(line)
+            if err:
+                raise HTTPException(400, f"「{line[:60]}」：{err}")
     # 支持批量（每行一条）
     for line in lines:
         db.execute("INSERT OR IGNORE INTO blacklist(type,value,note,created_at) VALUES(?,?,?,?)",
@@ -878,7 +961,10 @@ def list_transfers(status: str = "", category: str = "", search: str = "",
     if category:
         where.append("category=?"); params.append(category)
     if search:
-        where.append("(title LIKE ? OR share_code LIKE ?)"); params += [f"%{search}%", f"%{search}%"]
+        search = search.strip()[:100]
+        esc = _like_escape(search)
+        where.append("(title LIKE ? ESCAPE '\\' OR share_code LIKE ? ESCAPE '\\')")
+        params += [f"%{esc}%", f"%{esc}%"]
     w = " AND ".join(where)
     total = db.query(f"SELECT count(*) c FROM transfers WHERE {w}", tuple(params), one=True)["c"]
     rows = db.query(
@@ -889,13 +975,17 @@ def list_transfers(status: str = "", category: str = "", search: str = "",
 
 @router.post("/transfers/{t_id}/retry")
 def retry_transfer(t_id: int, _=Depends(require_user)):
-    row = db.query("SELECT status FROM transfers WHERE id=?", (t_id,), one=True)
+    row = db.query("SELECT status, share_code FROM transfers WHERE id=?", (t_id,), one=True)
     if not row:
         raise HTTPException(404, "记录不存在")
     # 成功/已提交下载/正在转存的任务不能重试，否则会重复转存
     if row["status"] in ("success", "submitted", "running"):
         label = {"success": "已成功", "submitted": "已提交云下载", "running": "正在转存"}[row["status"]]
-        raise HTTPException(400, f"任务{label}，不能重复重试")
+        raise HTTPException(400, f"{label}的任务不能重试")
+    # 活动任务唯一：同分享码已有排队/转存中任务时不重复入队（避免 115 生成副本）
+    if db.query("SELECT 1 FROM transfers WHERE share_code=? AND status IN ('queued','running','submitted')"
+                " AND id!=?", (row["share_code"], t_id), one=True):
+        raise HTTPException(400, "该分享已有排队/转存中的任务，无法重复入队")
     db.execute("UPDATE transfers SET status='queued', attempts=0, error='', next_retry_at=NULL WHERE id=?", (t_id,))
     logstream.info("transfer", f"手动重试任务 #{t_id}（原状态: {row['status']}）")
     return {"ok": True}
@@ -903,9 +993,18 @@ def retry_transfer(t_id: int, _=Depends(require_user)):
 
 @router.post("/transfers/retry-failed")
 def retry_all_failed(_=Depends(require_user)):
-    """批量重试全部失败任务。"""
-    n = db.execute("UPDATE transfers SET status='queued', attempts=0, error='', next_retry_at=NULL"
-                   " WHERE status='failed'")
+    """批量重试全部失败任务。
+
+    活动任务唯一约束下的安全批量：同一分享码只重试最新一条失败记录，
+    且跳过已有排队/转存中任务的分享码（避免触发唯一索引冲突）。
+    """
+    n = db.execute(
+        "UPDATE transfers SET status='queued', attempts=0, error='', next_retry_at=NULL"
+        " WHERE status='failed'"
+        " AND id=(SELECT MAX(id) FROM transfers t2"
+        "         WHERE t2.share_code=transfers.share_code AND t2.status='failed')"
+        " AND share_code NOT IN (SELECT share_code FROM transfers"
+        "                         WHERE status IN ('queued','running','submitted'))")
     logstream.info("transfer", f"批量重试 {n} 个失败任务")
     return {"ok": True, "count": n}
 
@@ -948,9 +1047,9 @@ def cancel_transfer(t_id: int, _=Depends(require_user)):
     # 正在转存或已成功的记录不允许删除，避免误删正在使用/已完成的数据。
     if row["status"] in ("running", "success"):
         label = {"running": "正在转存", "success": "已成功"}[row["status"]]
-        raise HTTPException(400, f"任务{label}，不能删除")
+        raise HTTPException(400, f"{label}的任务不能删除")
     db.execute("DELETE FROM transfers WHERE id=?", (t_id,))
-    logstream.info("transfer", f"已删除任务记录 #{t_id}（原状态: {row['status']}）")
+    logstream.info("transfer", f"已删除任务记录 #{t_id}（原状态：{row['status']}）")
     return {"ok": True}
 
 
@@ -970,6 +1069,7 @@ _INT_SETTINGS = {
 _BOOL_SETTINGS = {"enable_share_transfer", "enable_offline_download",
                   "notify_transfer_success", "schedule_enabled",
                   "subscription_only", "dedup_by_name", "organize_enabled",
+                  "share_update_enabled",
                   "digest_enabled", "auto_backup_enabled"}
 
 
@@ -1023,6 +1123,16 @@ def _norm_setting(k: str, v):
         return s
     if k == "unclassified_action":
         return str(v).strip() or "skip"
+    if k == "proxy":  # 仅接受 http(s)/socks 代理地址，防误填内网 URL 或带换行的脏值
+        s = str(v or "").strip()
+        if s and not re.match(r"^(https?|socks5h?|socks4)://[^\s]+$", s, re.IGNORECASE):
+            raise HTTPException(400, "代理地址需以 http(s):// 或 socks5:// 开头")
+        return s
+    if k in ("bark_url", "ntfy_url"):  # 推送地址必须是 http(s)，防手滑填成内网/文件地址
+        s = str(v or "").strip()
+        if s and not re.match(r"^https?://[^\s]+$", s, re.IGNORECASE):
+            raise HTTPException(400, f"{k} 需为 http(s):// 开头的完整 URL")
+        return s.rstrip("/")
     if v is None:
         return ""
     return v if isinstance(v, str) else str(v)
@@ -1038,6 +1148,7 @@ def get_settings(_=Depends(require_user)):
             "schedule_enabled", "schedule_start", "schedule_end",
             "tg_api_id", "tg_api_hash", "tg_phone",
             "subscription_only", "dedup_by_name", "organize_enabled",
+            "share_update_enabled",
             "tmdb_api_key",
             "bark_url", "pushplus_token", "pushplus_topic", "ntfy_url", "ntfy_token",
             "digest_enabled", "digest_time",
@@ -1049,7 +1160,7 @@ def get_settings(_=Depends(require_user)):
                 "notify_transfer_success": True, "schedule_enabled": False,
                 "schedule_start": "22:00", "schedule_end": "08:00",
                 "subscription_only": False, "dedup_by_name": True,
-                "organize_enabled": False,
+                "organize_enabled": False, "share_update_enabled": True,
                 "digest_enabled": True, "digest_time": "21:00",
                 "auto_backup_enabled": False, "auto_backup_days": 7}
     return {k: db.get_setting(k, defaults.get(k)) for k in keys}
@@ -1065,6 +1176,7 @@ def put_settings(body: dict, _=Depends(require_user)):
                "schedule_enabled", "schedule_start", "schedule_end",
                "tg_api_id", "tg_api_hash", "tg_phone",
                "subscription_only", "dedup_by_name", "organize_enabled",
+               "share_update_enabled",
                "tmdb_api_key",
                "bark_url", "pushplus_token", "pushplus_topic", "ntfy_url", "ntfy_token",
                "digest_enabled", "digest_time",
@@ -1081,7 +1193,7 @@ def put_settings(body: dict, _=Depends(require_user)):
             updates[lo_k], updates[hi_k] = updates[hi_k], updates[lo_k]
     for k, v in updates.items():
         db.set_setting(k, v)
-    logstream.info("system", f"系统设置已修改: {', '.join(updates) if updates else '（无变更）'}")
+    logstream.info("system", f"系统设置已更新（共 {len(updates)} 项）" if updates else "系统设置已保存（无变更）")
     return {"ok": True}
 
 
@@ -1128,6 +1240,70 @@ def digest_test(_=Depends(require_user)):
     logstream.info("system", "已手动推送每日摘要（测试）" if ok else
                    "手动推送每日摘要失败：所有通知渠道都未成功（未配置或发送失败）")
     return {"ok": ok, "detail": detail}
+
+
+# ---------- 向前补全 ----------
+@router.post("/backfill/episodes")
+async def backfill_episodes(body: dict, _=Depends(require_user)):
+    """向前补全：以某条成功转存为锚点，向前翻找频道历史里同剧的早期分集并入队。
+
+    body: {transfer_id}（锚点记录）或 {keyword}（按标题关键词找最近的成功转存）；
+          可选 base（剧名关键词，标题无剧名时手动指定）、current_ep（标题无法解析集数时手动指定）。
+    补全任务带最高队列优先级（priority=1），额度有限时优先于普通转存消耗。
+    """
+    from ..tg.episode_backfill import parse_episode, submit_backfill
+
+    keyword = str(body.get("keyword") or "").strip()
+    if len(keyword) > 100:
+        raise HTTPException(400, "剧名关键词过长（最多 100 字符）")
+    try:
+        tid = int(body.get("transfer_id"))
+    except (TypeError, ValueError):
+        tid = 0
+    row = None
+    if tid:
+        row = db.query("SELECT id, title, channel, message_id, status, kind, category, target_dir"
+                       " FROM transfers WHERE id=?", (tid,), one=True)
+        if not row:
+            raise HTTPException(404, "转存记录不存在")
+        if row["status"] != "success" or row["kind"] != "share" \
+                or not row["channel"] or not row["message_id"]:
+            raise HTTPException(400, "只能以「已成功的分享转存记录」作为锚点（需包含来源频道与消息编号）")
+    elif keyword:
+        row = db.query(
+            "SELECT id, title, channel, message_id, status, kind, category, target_dir FROM transfers"
+            " WHERE status='success' AND kind='share' AND message_id>0 AND title LIKE ? ESCAPE '\\'"
+            " ORDER BY id DESC LIMIT 1", (f"%{_like_escape(keyword)}%",), one=True)
+        if not row:
+            raise HTTPException(404, f"没有找到标题包含「{keyword}」的成功转存记录")
+    else:
+        raise HTTPException(400, "请提供 transfer_id 或 keyword（按标题关键词定位剧集）")
+
+    base = str(body.get("base") or "").strip() or keyword
+    try:
+        cur_ep = int(body.get("current_ep"))
+    except (TypeError, ValueError):
+        cur_ep = None
+    if cur_ep is not None:
+        if cur_ep < 2:
+            raise HTTPException(400, "当前集数需大于 1（第 1 集没有更早的分集可补）")
+        cur_ep = min(cur_ep, 999)  # 与标题集数解析口径一致，防极端值构造超大列表
+    parsed_season, parsed_ep = parse_episode(row["title"] or "")
+    if cur_ep is not None:
+        ep = cur_ep
+        season = parsed_season
+    else:
+        season, ep = parsed_season, parsed_ep
+    try:
+        summary = await submit_backfill(row["channel"], row["message_id"], row["title"] or "",
+                                        base=base, season=season, ep=ep,
+                                        anchor_category=row["category"] or "",
+                                        anchor_target=row["target_dir"] or "")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    logstream.info("system", f"用户发起向前补全：《{summary['base']}》{summary['episodes']}"
+                             f"（频道 @{summary['channel']}，任务将优先入队）")
+    return {"ok": True, **summary}
 
 
 # ---------- logs ----------
@@ -1211,8 +1387,9 @@ def backup_restore(body: dict, _=Depends(require_user)):
     失败自动回滚；恢复后系统回到停止状态，需手动点「开始运行」。
     """
     stats = db.restore_payload(body)
-    logstream.info("system", f"已从备份恢复数据：设置 {stats['settings']} 项、频道 {stats['channels']}、"
-                             f"规则 {stats['rules']}、订阅 {stats['subscriptions']}、转存记录 {stats['transfers']}")
+    logstream.info("system", f"已从备份恢复数据：设置 {stats['settings']} 项、频道 {stats['channels']} 个、"
+                             f"规则 {stats['rules']} 条、订阅 {stats['subscriptions']} 条、"
+                             f"转存记录 {stats['transfers']} 条")
     return {"ok": True, "stats": stats}
 
 
@@ -1236,5 +1413,6 @@ def backup_export(_=Depends(require_user)):
 
 @router.post("/backup/import")
 async def backup_import(_=Depends(require_user)):
-    """备份导入为 Phase 3 预留：当前版本请直接恢复 data 目录。"""
-    raise HTTPException(400, "请直接恢复 data 目录完成导入（备份含 cookie/session，更完整）")
+    """备份导入为预留接口：网页与 TG Bot 均支持 JSON 恢复。"""
+    raise HTTPException(400, "网页「系统设置」与 TG Bot 均支持 JSON 恢复，"
+                             "请在网页上传备份文件，或直接把备份 JSON 发送给 Bot")

@@ -3,6 +3,7 @@ import json
 import sqlite3
 import threading
 import time
+from contextlib import contextmanager
 from datetime import date
 
 from . import config
@@ -89,10 +90,15 @@ CREATE TABLE IF NOT EXISTS transfers(
     attempts INTEGER NOT NULL DEFAULT 0,
     next_retry_at REAL,
     bypass_filters INTEGER NOT NULL DEFAULT 0,
+    increment INTEGER NOT NULL DEFAULT 0,  -- 1=追更任务（同一分享新增集数，只转存新文件）
+    priority INTEGER NOT NULL DEFAULT 0,   -- 队列优先级：1=向前补全（额度有限时优先消耗）
+    running_at REAL,                       -- 领取时间：看门狗据此回收卡死的转存任务
     created_at REAL NOT NULL,
     finished_at REAL
 );
 CREATE INDEX IF NOT EXISTS idx_transfers_status ON transfers(status);
+CREATE INDEX IF NOT EXISTS idx_transfers_code ON transfers(share_code);
+CREATE INDEX IF NOT EXISTS idx_transfers_created ON transfers(created_at);
 CREATE TABLE IF NOT EXISTS daily_quota(
     day TEXT PRIMARY KEY, count INTEGER NOT NULL DEFAULT 0
 );
@@ -136,6 +142,7 @@ DEFAULT_SETTINGS = {
     "subscription_only": False,       # 开启后仅转存命中订阅关键词的内容
     # ---- 转存增强 ----
     "dedup_by_name": True,            # 转存前检查目标目录已有同名内容，命中判重跳过
+    "share_update_enabled": True,     # 分享追更：同一分享链接新增集数时自动增量转存（只存新文件）
     "organize_enabled": False,        # 转存后把剧集文件归入 Season N 子目录
     # ---- TMDB 刮削 ----
     "tmdb_api_key": "",               # TMDB API Key（订阅页搜索/分类浏览用，刮削功能已移除）
@@ -207,6 +214,7 @@ def init():
     _conn = sqlite3.connect(config.DB_PATH, check_same_thread=False)
     _conn.row_factory = sqlite3.Row
     _conn.execute("PRAGMA journal_mode=WAL")
+    _conn.execute("PRAGMA synchronous=NORMAL")  # WAL 下的安全档位：高频小事务（写日志）收益明显
     _conn.executescript(SCHEMA)
     _migrate()
     _seed()
@@ -218,6 +226,12 @@ def _migrate():
     cols = {r["name"] for r in _conn.execute("PRAGMA table_info(transfers)")}
     if "bypass_filters" not in cols:
         _conn.execute("ALTER TABLE transfers ADD COLUMN bypass_filters INTEGER NOT NULL DEFAULT 0")
+    if "increment" not in cols:
+        _conn.execute("ALTER TABLE transfers ADD COLUMN increment INTEGER NOT NULL DEFAULT 0")
+    if "priority" not in cols:
+        _conn.execute("ALTER TABLE transfers ADD COLUMN priority INTEGER NOT NULL DEFAULT 0")
+    if "running_at" not in cols:
+        _conn.execute("ALTER TABLE transfers ADD COLUMN running_at REAL")
     if "kind" not in cols:
         _conn.execute("ALTER TABLE transfers ADD COLUMN kind TEXT NOT NULL DEFAULT 'share'")
     rcols = {r["name"] for r in _conn.execute("PRAGMA table_info(routes)")}
@@ -232,6 +246,31 @@ def _migrate():
         done = _conn.execute("SELECT value FROM settings WHERE key='setup_completed'").fetchone()
         running = 'true' if (done and done[0] == 'true') else 'false'
         _conn.execute("INSERT INTO settings VALUES('running',?)", (running,))
+
+    # 活动任务唯一性：同一分享码同时最多一个 排队/转存中/已提交 任务。
+    # 先清理历史竞态产生的重复活动行（保留优先级最高、最早入队的一条），再建部分唯一索引；
+    # 运行期的并发入队冲突由 pipeline 捕获 IntegrityError 转判重兜底
+    dup = _conn.execute(
+        "SELECT share_code, count(*) c FROM transfers"
+        " WHERE status IN ('queued','running','submitted') GROUP BY share_code HAVING c > 1"
+    ).fetchall()
+    if dup:
+        from .core import logstream  # 延迟导入：core.logstream 反向依赖本模块
+    for r in dup:
+        keep = _conn.execute(
+            "SELECT id FROM transfers WHERE share_code=? AND status IN ('queued','running','submitted')"
+            " ORDER BY priority DESC, id ASC LIMIT 1", (r["share_code"],)).fetchone()
+        _conn.execute(
+            "DELETE FROM transfers WHERE share_code=? AND status IN ('queued','running','submitted')"
+            " AND id != ?", (r["share_code"], keep["id"]))
+        logstream.warn("database", f"清理同分享码的重复活动任务（share_code={r['share_code']}，"
+                                   f"保留 #{keep['id']}）")
+    try:
+        _conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_transfers_active_code ON transfers(share_code)"
+            " WHERE status IN ('queued','running','submitted')")
+    except sqlite3.Error:
+        pass  # 极端情况下仍有冲突数据：跳过索引，竞态兜底由 pipeline 捕获冲突
 
 
 def _seed():
@@ -266,6 +305,19 @@ def query(sql, params=(), one=False):
     return rows
 
 
+@contextmanager
+def transaction():
+    """批量写事务：多条语句一次提交（注意：内部不要调用 execute/query，会死锁，
+    直接用返回的连接游标操作）。异常自动回滚。"""
+    with _lock:
+        try:
+            yield _conn
+            _conn.commit()
+        except Exception:
+            _conn.rollback()
+            raise
+
+
 # ---- settings ----
 def get_setting(key, default=None):
     row = query("SELECT value FROM settings WHERE key=?", (key,), one=True)
@@ -298,33 +350,95 @@ def add_log(level: str, module: str, message: str):
             (level, module, message[:2000], time.time()))
 
 
-# 备份不含登录密码哈希：备份文件可能被转发/共享，不应携带可用于离线爆破的凭据
-BACKUP_EXCLUDE_SETTINGS = {"web_password_hash"}
+# 备份不含任何可被直接利用的凭据：备份文件可能被转发/共享（或作为文件躺在 TG 对话里），
+# 不应携带登录密码哈希、Bot Token、代理凭据等敏感值。恢复时这些项保留当前值不变。
+BACKUP_EXCLUDE_SETTINGS = {
+    "web_password_hash",   # 登录密码哈希（可离线爆破）
+    "web_username",        # 与密码同属登录凭据，一并保留当前值
+    "notify_token",        # TG Bot Token（等于 Bot 控制权）
+    "tg_api_hash",         # TG API 凭据
+    "tg_phone",            # 手机号（PII）
+    "proxy",               # 代理地址可能内嵌账号密码
+    "bark_url",            # URL 内嵌推送 key
+    "pushplus_token",
+    "ntfy_token",
+    "api_token",           # 对外 API Token
+    "tmdb_api_key",
+    "tg_admin_id",         # TG Bot 授权用户绑定（auth 类配置，随登录凭据一并保留）
+}
 
 
 def restore_payload(data: dict) -> dict:
     """从备份字典恢复全部业务数据（整体覆盖，事务内完成）。
 
-    校验通过后按备份内容重建 7 张表；恢复完成后强制 running=0（停止状态），
-    避免带着旧快照里的运行标记直接启动。返回各表恢复条数。
+    校验通过后按备份内容重建 6 张业务表；settings 按「整体覆盖但保留
+    BACKUP_EXCLUDE_SETTINGS 中的当前值」处理（备份里本来就没有这些项，
+    保留是为了恢复后登录态与通知/代理等密钥配置不丢，避免恢复后被锁在门外）；
+    恢复完成后强制 running=false（停止状态），避免带着旧快照里的运行标记直接启动。
+    返回各表恢复条数。
+
+    与运行中 worker 的竞态防护：恢复前要求系统处于停止状态且无转存中任务；
+    transfers 中同分享码的多条活动行（旧版竞态遗留）自动降级为 duplicate，
+    避免触发活动任务唯一索引导致恢复被整单拒绝。
     """
     if not isinstance(data, dict) or not isinstance(data.get("_meta"), dict):
         raise ValueError("不是有效的备份文件（缺少 _meta 段）")
     tables = ("channels", "rules", "routes", "blacklist", "subscriptions", "transfers")
     if "settings" not in data:
         raise ValueError("备份缺少 settings 段")
+    if not isinstance(data["settings"], dict):
+        raise ValueError("备份 settings 段格式不正确")
     for t in tables:
         if t not in data:
             raise ValueError(f"备份缺少 {t} 段")
+        if not isinstance(data[t], list):
+            raise ValueError(f"备份 {t} 段格式不正确")
+
+    # 与运行中 worker 的竞态防护：恢复前要求系统停止且无转存中任务
+    if get_setting("running", False):
+        raise ValueError("系统正在运行，请先点击顶栏「停止」再恢复备份")
+    if _conn is not None:
+        running_rows = _conn.execute(
+            "SELECT count(*) c FROM transfers WHERE status='running'").fetchone()["c"]
+        if running_rows:
+            raise ValueError("有转存中的任务，请等待其完成（或重启程序）后再恢复备份")
+
+    # 列名白名单：备份行的 key 直接拼进 SQL，必须先按真实表结构校验（防恶意备份注入）
+    allowed_cols = {t: {r["name"] for r in _conn.execute(f"PRAGMA table_info({t})")}
+                    for t in tables}
+    for t in tables:
+        for r in (data[t] or []):
+            if not isinstance(r, dict):
+                raise ValueError(f"{t} 中存在非对象行")
+            unknown = set(r.keys()) - allowed_cols[t]
+            if unknown:
+                raise ValueError(f"备份 {t} 段包含未知列: {', '.join(sorted(unknown))}")
 
     with _lock:
         try:
             cur = _conn.cursor()
             cur.execute("BEGIN")
+            # 先记下需要保留的当前设置（备份不含这些项，恢复后原样带回来）
+            keep = {}
+            for k in BACKUP_EXCLUDE_SETTINGS:
+                row = cur.execute("SELECT value FROM settings WHERE key=?", (k,)).fetchone()
+                if row is not None:
+                    keep[k] = row["value"]
+            seen_active: set[str] = set()
             for t in tables:
                 rows = data[t] or []
                 cur.execute(f"DELETE FROM {t}")
                 for r in rows:
+                    if t == "transfers":
+                        r = dict(r)
+                        # 同分享码的多条活动行（旧版竞态遗留）只保留第一条，
+                        # 其余降级为 duplicate，避免触发活动任务唯一索引
+                        if str(r.get("status")) in ("queued", "running", "submitted"):
+                            sc = str(r.get("share_code") or "")
+                            if sc in seen_active:
+                                r["status"] = "duplicate"
+                            else:
+                                seen_active.add(sc)
                     cols = ",".join(r.keys())
                     qs = ",".join("?" * len(r))
                     cur.execute(f"INSERT INTO {t}({cols}) VALUES({qs})", tuple(r.values()))
@@ -340,7 +454,13 @@ def restore_payload(data: dict) -> dict:
             cur.execute("DELETE FROM settings")
             for k, v in (data["settings"] or {}).items():
                 cur.execute("INSERT INTO settings VALUES(?,?)", (k, str(v)))
-            cur.execute("INSERT OR REPLACE INTO settings VALUES('running','0')")
+            for k, v in keep.items():
+                cur.execute("INSERT OR REPLACE INTO settings VALUES(?,?)", (k, v))
+            cur.execute("INSERT OR REPLACE INTO settings VALUES('running','false')")
+            # 内部运行态不随备份恢复：避免恢复出「暂停中/带自动停止原因/待补全请求」的旧状态
+            for k in ("paused", "auto_stop_reason", "backfill_pending"):
+                cur.execute("DELETE FROM settings WHERE key=?", (k,))
+            cur.execute("DELETE FROM settings WHERE key LIKE 'poll_fail_%'")
             _conn.commit()
             stats = {"settings": len(data["settings"] or {})}
             stats.update({t: len(data[t] or []) for t in tables})

@@ -1,4 +1,5 @@
 """消息处理管道：去重 → 黑名单 → 提取链接 → 分类 → 订阅过滤 → 生成转存任务入队。"""
+import sqlite3
 import time
 
 from .. import database as db
@@ -8,8 +9,17 @@ from ..core import classifier, extractor, filters, logstream, subscribe
 _runtime_flags: dict[str, bool] = {}
 
 
-def process_message(channel: str, message_id: int, text: str, bypass: bool = False) -> dict:
-    """处理一条 TG 消息，返回处理摘要（供测试与调试）。bypass=True 时跳过消息级黑名单。"""
+def process_message(channel: str, message_id: int, text: str,
+                    bypass: bool = False, increment: bool = False,
+                    priority: int = 0, anchor: dict | None = None) -> dict:
+    """处理一条 TG 消息，返回处理摘要（供测试与调试）。
+
+    bypass=True 时跳过消息级黑名单；increment=True 时生成的转存任务带增量标记
+    （只转存目标目录里没有的文件，已存过的不重复）；priority>0 的任务在队列中
+    优先领取（向前补全用：额度有限时优先补全剧集）；
+    anchor={category, target_dir} 时（向前补全的历史分集帖），沿用锚点任务的分类
+    与目标目录（同剧不同帖标题格式不一，各自分类会漂移），并绕过订阅过滤。
+    """
     result = {"channel": channel, "message_id": message_id, "links": 0, "queued": 0,
               "duplicates": 0, "blocked": False}
 
@@ -41,8 +51,9 @@ def process_message(channel: str, message_id: int, text: str, bypass: bool = Fal
             _runtime_flags[key] = True
             logstream.info(
                 "pipeline",
-                f"[{channel}] 首批消息未发现可转存的资源链接（115 分享/磁力/电驴/迅雷）——"
-                "此类消息会正常记录但不转存；若该频道应包含资源链接，请到「频道管理→消息预览」核对消息原文")
+                f"[{channel}] 该频道首条消息未发现可转存的资源链接（115 分享/磁力/电驴/迅雷），"
+                "此类消息仅记录不转存；若该频道应包含资源链接，"
+                "请到「频道管理」的「消息预览」核对消息原文")
     if not links:
         return result
 
@@ -63,15 +74,23 @@ def process_message(channel: str, message_id: int, text: str, bypass: bool = Fal
             return result
 
     # 4. 分类（优先采用频道消息自带标签），名称取频道消息首个有效行
-    category, matched = classifier.classify(text or "")
+    #    向前补全的历史分集帖（anchor）沿用锚点任务的分类与目标目录：
+    #    同剧不同帖的标题格式不一，各自分类会漂移到不同目录或被「未分类=跳过」拦下
+    anchor_cat = str((anchor or {}).get("category") or "")
+    anchor_dir = str((anchor or {}).get("target_dir") or "")
+    if anchor_cat:
+        category, matched = anchor_cat, "锚点沿用"
+    else:
+        category, matched = classifier.classify(text or "")
     display_title = classifier.headline(text or "") or (text or "")[:300]
 
     # 4.5 订阅追剧：命中订阅 → 记录进度；该频道开了「仅订阅」→ 未命中的消息不转存
     # 判断优先级：频道自己的 sub_only 开关 > 全局 subscription_only 设置（频道不存在时兜底）
+    # 向前补全帖（anchor）不受订阅过滤拦截——用户显式要求补全该剧，跳过与意图冲突
     sub = subscribe.match(f"{display_title}\n{text or ''}")
     ch_row = db.query("SELECT sub_only FROM channels WHERE name=?", (channel,), one=True)
     sub_only = bool(ch_row["sub_only"]) if ch_row else subscribe.subscription_only()
-    if sub_only and sub is None:
+    if sub_only and sub is None and anchor is None:
         key = f"_sub_skip_logged_{channel}"
         if not _runtime_flags.get(key):
             _runtime_flags[key] = True
@@ -85,17 +104,37 @@ def process_message(channel: str, message_id: int, text: str, bypass: bool = Fal
         code = link["share_code"]
         kind = link.get("kind", "share")
 
-        # 按链接类型路由目录（分享/云下载可分别指定）
-        target = classifier.resolve_target(category, kind=kind) if category else ""
-        if not category:
-            action = db.get_setting("unclassified_action", "skip")
-            target = "" if action == "skip" else str(action)
+        # 5.5 追更：此前已成功的分享取回其分类与目标目录——同剧不同帖的标题格式
+        # 不一，各自分类会漂移到不同目录，导致增量比对失真（整包重存）。
+        # 该取值须在判重之前完成：判重留痕也要用到正确的分类与目录
+        prev_row = None
+        if kind == "share" and db.get_setting("share_update_enabled", True):
+            r = db.query(
+                "SELECT category, target_dir FROM transfers WHERE share_code=? AND kind='share'"
+                " AND status='success' ORDER BY id DESC LIMIT 1", (code,), one=True)
+            if r:
+                prev_row = dict(r)
+        cat_i = anchor_cat or (str((prev_row or {}).get("category") or "") if prev_row else "") \
+            or category
+        if anchor_dir:
+            base_dir = anchor_dir
+        elif prev_row and str((prev_row or {}).get("target_dir") or ""):
+            base_dir = str(prev_row["target_dir"])
+        else:
+            base_dir = classifier.resolve_target(cat_i, kind=kind) if cat_i else ""
+            if not cat_i:
+                action = db.get_setting("unclassified_action", "skip")
+                base_dir = "" if action == "skip" else str(action)
+        target = (classifier.resolve_target(cat_i, kind="offline") or base_dir) \
+            if kind == "offline" else base_dir
+        prev_done = prev_row is not None
 
-        # 5. 分享码去重：已排队/处理中/已成功的不重复入队；
-        #    被跳过的重复链接也落一条 duplicate 记录，便于追溯来源频道与时间
+        # 5. 分享码去重：
+        #    - 活动任务（排队/转存中/已提交）→ 判重留痕，便于追溯来源频道与时间
+        #    - 此前已成功的分享 → 转为「追更」任务（上面已取回其分类/目录）
         row = db.query(
             "SELECT id, status, channel FROM transfers WHERE share_code=?"
-            " AND status IN ('queued','running','submitted','success') ORDER BY id LIMIT 1",
+            " AND status IN ('queued','running','submitted') ORDER BY id LIMIT 1",
             (code,), one=True,
         )
         if row:
@@ -106,26 +145,52 @@ def process_message(channel: str, message_id: int, text: str, bypass: bool = Fal
                 "category,target_dir,status,error,bypass_filters,created_at)"
                 " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (kind, code, link["receive_code"], link["share_url"], display_title,
-                 channel, message_id, category, target, "duplicate", err,
+                 channel, message_id, cat_i, target, "duplicate", err,
                  1 if bypass else 0, time.time()),
             )
             result["duplicates"] += 1
             logstream.info("pipeline", f"[{channel}] 跳过重复链接 {code}：{err}")
             continue
 
+        flag = 1 if (increment or prev_done) else 0
         status = "queued" if target else "skipped"
-        db.execute(
-            "INSERT INTO transfers(kind,share_code,receive_code,share_url,title,channel,message_id,"
-            "category,target_dir,status,bypass_filters,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-            (kind, code, link["receive_code"], link["share_url"], display_title,
-             channel, message_id, category, target, status, 1 if bypass else 0, time.time()),
-        )
+        try:
+            db.execute(
+                "INSERT INTO transfers(kind,share_code,receive_code,share_url,title,channel,message_id,"
+                "category,target_dir,status,bypass_filters,increment,priority,created_at)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (kind, code, link["receive_code"], link["share_url"], display_title,
+                 channel, message_id, cat_i, target, status, 1 if bypass else 0,
+                 flag, priority, time.time()),
+            )
+        except sqlite3.IntegrityError:
+            # 并发竞态兜底：部分唯一索引保证同分享码同时只有一个活动任务，
+            # 查询与插入之间的毫秒级窗口被其他来源（轮询/Userbot/补漏）抢先时在此拦截。
+            # 先确认确为"同码活动任务"冲突，其他完整性错误原样抛出，不伪装成判重
+            if not db.query(
+                "SELECT 1 FROM transfers WHERE share_code=? AND status IN"
+                " ('queued','running','submitted') LIMIT 1", (code,), one=True):
+                raise
+            err = "重复链接：已存在同分享码的活动任务（并发入队被拦截）"
+            db.execute(
+                "INSERT INTO transfers(kind,share_code,receive_code,share_url,title,channel,message_id,"
+                "category,target_dir,status,error,bypass_filters,created_at)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (kind, code, link["receive_code"], link["share_url"], display_title,
+                 channel, message_id, cat_i, target, "duplicate", err,
+                 1 if bypass else 0, time.time()),
+            )
+            result["duplicates"] += 1
+            logstream.info("pipeline", f"[{channel}] 并发竞态：跳过重复链接 {code}（已并入队任务）")
+            continue
         if status == "queued":
             result["queued"] += 1
+            label = "追更转存" if prev_done else ("补全转存" if increment else "入队转存")
+            suffix = "（将只转存目标目录里没有的新文件）" if flag else ""
             logstream.info("pipeline",
-                           f"[{channel}] 入队转存: {code} → {category or '未分类'} → {target}")
+                           f"[{channel}] {label}: {code} → {cat_i or '未分类'} → {target}{suffix}")
         else:
-            reason = "未分类且动作为 skip" if not category else f"{category} 的此类型目录为 skip"
+            reason = "未分类，且动作设为「跳过」" if not cat_i else f"「{cat_i}」的目录设为「跳过」"
             logstream.info("pipeline", f"[{channel}] 跳过 {code}（{reason}）")
 
     # 4.7 订阅进度：命中订阅且本次有真实处理（入队/重复记录）→ 记录追更进度并按需通知

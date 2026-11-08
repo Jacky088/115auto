@@ -19,3 +19,41 @@ WEB_PASSWORD = os.environ.get("WEB_PASSWORD", "admin123")
 
 for d in (DATA_DIR, LOG_DIR):
     d.mkdir(parents=True, exist_ok=True)
+
+
+def _ensure_writable_home(posix: bool | None = None) -> None:
+    """HOME 兜底（仅 POSIX/容器场景）：p115client 在模块 import 时就会往
+    ~/.p115client.cache.d 写缓存目录（const.py 硬编码 ~ 展开，无法用参数改路径）。
+    若进程 HOME 指向不可写目录（如容器降权后残留 root 的 /root），115 客户端会整体
+    初始化失败，表现为 Cookie「失效」、重新导入也报 Permission denied。
+    这里在所有模块导入 p115client 之前检查 HOME：不可写则改指 DATA_DIR/home 并建目录。
+    """
+    import os
+    if posix is None:
+        posix = os.name == "posix"
+    if not posix:
+        return  # Windows 开发环境权限模型不同，不做处理
+    home = os.environ.get("HOME", "")
+    if home:
+        try:
+            (Path(home) / ".p115client.cache.d").mkdir(parents=True, exist_ok=True)
+            return  # HOME 可写，维持原状
+        except OSError:
+            pass
+    fallback = DATA_DIR / "home"
+    try:
+        fallback.mkdir(parents=True, exist_ok=True)
+        os.environ["HOME"] = str(fallback)
+    except OSError:
+        pass  # 数据卷也不可写：维持原状，让后续错误保持原样便于排查
+
+
+_ensure_writable_home()
+
+
+def secure_file(p: "Path") -> None:
+    """收紧凭据文件权限（Linux 下 600）；Windows 文件权限模型不同，尽力而为不报错。"""
+    try:
+        os.chmod(p, 0o600)
+    except OSError:
+        pass

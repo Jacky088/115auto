@@ -57,11 +57,15 @@
           <el-tag type="info" effect="plain" closable class="clip-tag" @close="clipboard = null">
             剪贴板：{{ clipboard.mode === 'copy' ? '复制' : '移动' }} {{ clipboard.items.length }} 项
           </el-tag>
-          <el-button type="primary" :loading="busy"
-                    :disabled="isSearching || !clipboard.items.length" @click="paste">
-            <el-icon><DocumentCopy /></el-icon>
-            粘贴到「{{ isSearching ? '请先退出搜索' : currentName }}」
-          </el-button>
+          <el-tooltip :disabled="!isSearching" content="请先退出搜索后再粘贴" placement="top">
+            <span>
+              <el-button type="primary" :loading="busy"
+                        :disabled="isSearching || !clipboard.items.length" @click="paste">
+                <el-icon><DocumentCopy /></el-icon>
+                粘贴到「{{ currentName }}」
+              </el-button>
+            </span>
+          </el-tooltip>
         </template>
       </div>
 
@@ -390,7 +394,7 @@ const paste = async () => {
   const ids = clipboard.value.items.map((i) => i.id).filter(Boolean)
   if (!ids.length) return
   if (clipboard.value.items.some((i) => i.is_dir && String(i.id) === String(cid.value))) {
-    ElMessage.warning('不能粘贴到被操作的目录自身')
+    ElMessage.warning('不能将目录粘贴到其自身内部')
     return
   }
   busy.value = true
@@ -437,7 +441,7 @@ const saveMkdir = async () => {
   busy.value = true
   try {
     await api.post('/api/files/mkdir', { pid: cid.value, name })
-    saveOk('文件夹已创建', `「${name}」已创建在当前目录`)
+    saveOk('文件夹已创建', `「${name}」，位于当前目录`)
     mkdirVisible.value = false
     mkdirName.value = ''
     load()
@@ -482,7 +486,7 @@ const copyText = async (text) => {
     await navigator.clipboard.writeText(String(text || ''))
     ElMessage.success('已复制到剪贴板')
   } catch {
-    ElMessage.warning('当前浏览器不支持自动复制，请手动选择复制')
+    ElMessage.warning('复制失败，请手动选择复制')
   }
 }
 

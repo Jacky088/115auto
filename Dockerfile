@@ -4,8 +4,18 @@
 FROM python:3.12-slim
 WORKDIR /app
 ENV TZ=Asia/Shanghai PYTHONUNBUFFERED=1
+
+# 非 root 运行：setpriv 来自 util-linux（slim 自带），入口脚本负责数据卷属主修复后降权
+RUN useradd --uid 1000 --create-home app \
+    && mkdir -p /app/data \
+    && chown -R app:app /app
+
 COPY backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY backend/ ./backend/
+
+COPY --chown=app:app backend/ ./backend/
+COPY --chown=app:app docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
 EXPOSE 8000
-CMD ["python", "-m", "uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
+ENTRYPOINT ["docker-entrypoint.sh"]

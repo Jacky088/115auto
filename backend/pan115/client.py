@@ -76,10 +76,10 @@ def _get_client():
         if _client is not None:
             return _client
         if not config.COOKIE_FILE.exists():
-            raise Pan115Error("尚未登录 115，请先扫码")
+            raise Pan115Error("115 未登录，请到「账号管理」重新扫码登录或导入 Cookie")
         cookie = config.COOKIE_FILE.read_text().strip()
         if not cookie:
-            raise Pan115Error("115 cookie 为空，请重新扫码")
+            raise Pan115Error("115 Cookie 为空，请到「账号管理」重新扫码登录或导入 Cookie")
         from p115client import P115Client
         _client = P115Client(cookie)
         return _client
@@ -133,7 +133,7 @@ _finish_lock = threading.Lock()  # 串行化取 cookie：并发调用会触发 1
 # 115 登录风控的已知错误 → 给用户的可操作指引（海外/机房 IP 最常触发）
 _LOGIN_RISK_HINT = {
     "40101017": "115 风控拦截了本次登录（常见于海外/机房 IP）。可稍后重试或更换网络出口，"
-                "或点「手动导入 Cookie」——在本地电脑浏览器登录 115.com 后复制 Cookie 粘贴进来。",
+                "或使用「导入 Cookie」：在本地浏览器登录 115.com 后复制 Cookie 粘贴。",
 }
 
 
@@ -165,6 +165,7 @@ def qrcode_finish(uid: str, app: str) -> dict:
                 cookie = (resp.get("data") or {}).get("cookie", "") or resp.get("cookie", "")
                 if cookie:
                     config.COOKIE_FILE.write_text(cookie)
+                    config.secure_file(config.COOKIE_FILE)
                     reset_client()
                     db.set_setting("cookie_ok", True)
                     logstream.info("115", "扫码登录成功")
@@ -182,31 +183,43 @@ def qrcode_finish(uid: str, app: str) -> dict:
     raise last_err or Pan115Error("获取 cookie 失败")
 
 
-def import_cookie(cookie: str) -> dict:
-    """手动导入 cookie（海外 VPS 扫码被风控时的替代方案）：校验有效后保存。"""
+def validate_cookie(cookie: str) -> dict:
+    """Cookie 有效性校验统一入口：项目里所有「新增 Cookie」的地方（手动导入及
+    未来其他方式）都必须经此校验通过后才能落盘。
+    返回 {ok, name, cookie(归一化后), err}。"""
     from p115client import P115Client
     cookie = cookie.strip().strip('"').strip("'")
     if cookie.lower().startswith("cookie:"):
         cookie = cookie.split(":", 1)[1].strip()
     if not cookie:
-        raise Pan115Error("Cookie 为空")
+        return {"ok": False, "name": "", "cookie": "", "err": "Cookie 为空"}
     if not all(k in cookie for k in ("UID=", "CID=", "SEID=")):
-        raise Pan115Error("Cookie 里缺少 UID/CID/SEID 字段：请复制完整的 115 登录 Cookie"
-                          "（形如 UID=xxx;CID=xxx;SEID=xxx）")
+        return {"ok": False, "name": "", "cookie": "",
+                "err": "Cookie 里缺少 UID/CID/SEID 字段：请复制完整的 115 登录 Cookie"
+                       "（形如 UID=xxx;CID=xxx;SEID=xxx）"}
     try:
         client = P115Client(cookie)
         resp = client.user_my_info()
     except Exception as e:
-        raise Pan115Error(f"Cookie 无法使用: {e}")
+        return {"ok": False, "name": "", "cookie": cookie, "err": f"Cookie 无法使用: {e}"}
     if not resp.get("state"):
-        raise Pan115Error(f"Cookie 校验失败: {str(resp)[:200]}")
+        return {"ok": False, "name": "", "cookie": cookie, "err": f"Cookie 校验失败: {str(resp)[:200]}"}
     data = resp.get("data", {}) or {}
     name = data.get("user_name", "") or data.get("uname", "")
-    config.COOKIE_FILE.write_text(cookie)
+    return {"ok": True, "name": name, "cookie": cookie, "err": ""}
+
+
+def import_cookie(cookie: str) -> dict:
+    """手动导入 cookie（海外 VPS 扫码被风控时的替代方案）：经统一校验入口通过后保存。"""
+    v = validate_cookie(cookie)
+    if not v["ok"]:
+        raise Pan115Error(v["err"])
+    config.COOKIE_FILE.write_text(v["cookie"])  # 落盘用校验时归一化后的同一份
+    config.secure_file(config.COOKIE_FILE)
     reset_client()
     db.set_setting("cookie_ok", True)
-    logstream.info("115", f"手动导入 cookie 成功（账号: {name}）")
-    return {"ok": True, "name": name}
+    logstream.info("115", f"手动导入 Cookie 成功（账号：{v['name']}）")
+    return {"ok": True, "name": v["name"]}
 
 
 # ---------- 账号 ----------
@@ -363,14 +376,54 @@ def _list_dir(pid: int = 0) -> dict[str, int]:
     return dirs
 
 
+# 目录路径 → cid 缓存：同一目标目录每个任务都会 mkdirs（去重检查 + 正式转存各一次），
+# 逐层 _list_dir 还要每层 sleep 0.5s，缓存后命中直接返回，省 115 请求与等待。
+# 带 TTL：用户在网页里改了目录结构时最多滞后 cache_ttl 过期一次，出错自动清空。
+_dir_cache: dict[str, tuple[float, int]] = {}
+_dir_cache_lock = threading.Lock()
+_DIR_CACHE_TTL = 600.0  # 10 分钟
+
+
+def _dir_cache_get(path: str) -> int:
+    with _dir_cache_lock:
+        hit = _dir_cache.get(path)
+        if hit and time.time() < hit[0]:
+            return hit[1]
+        if hit:
+            _dir_cache.pop(path, None)
+    return 0
+
+
+def _dir_cache_put(path: str, cid: int) -> None:
+    with _dir_cache_lock:
+        if len(_dir_cache) > 200:
+            _dir_cache.clear()  # 简单兜底防无限增长
+        _dir_cache[path] = (time.time() + _DIR_CACHE_TTL, cid)
+
+
+def clear_dir_cache():
+    """目录失效（转存/云下载报目录不存在等）时调用：下次重新逐级解析。"""
+    with _dir_cache_lock:
+        _dir_cache.clear()
+
+
 def mkdirs(path: str) -> int:
     """逐级确保目录存在，返回最深层 cid。path 形如 /媒体库/电影。"""
+    if not path or not path.strip("/"):
+        return 0
+    path = path.rstrip("/") or "/"
+    cached = _dir_cache_get(path)
+    if cached:
+        return cached
     client = _get_client()
     parts = [p for p in path.strip("/").split("/") if p]
-    if not parts:
-        return 0
     pid = 0
+    walked = ""  # 已解析到的前缀，逐级写入缓存
     for name in parts:
+        walked += "/" + name
+        if (hit := _dir_cache_get(walked)):
+            pid = hit
+            continue
         dirs = _list_dir(pid)
         if name in dirs:
             pid = dirs[name]
@@ -384,6 +437,7 @@ def mkdirs(path: str) -> int:
                 new_cid = _list_dir(pid).get(name, 0)  # 响应缺 id 时回查上级目录
             pid = new_cid
             logstream.info("115", f"已创建目录 {name} (cid={pid})")
+        _dir_cache_put(walked, pid)
         time.sleep(0.5)
     return pid
 
@@ -433,6 +487,7 @@ def share_snap_all(share_code: str, receive_code: str, max_files: int = 5000) ->
     stack = [0]
     seen_dirs: set[int] = set()
     seen_files: set[str] = set()  # 文件 fid 去重：服务端异常返回重复页时不重复计数
+    truncated = False
     while stack and len(files) < max_files:
         cid = stack.pop(0)
         if cid in seen_dirs:
@@ -468,10 +523,15 @@ def share_snap_all(share_code: str, receive_code: str, max_files: int = 5000) ->
                 total_size += size
             offset += len(items)  # 按实际返回条数翻页：固定 1150 在服务端少返回时会漏项
             if offset >= int(total or 0) or not items or len(files) >= max_files:
+                if len(files) >= max_files and (int(total or 0) > max_files or stack):
+                    truncated = True  # 超大分享达到遍历上限，超出部分不会转存
                 break
             time.sleep(0.5)
         time.sleep(0.5)  # 目录之间也留间隔：多目录分享逐页轰炸易触发风控
-    return {"title": title, "files": files, "total_size": total_size,
+    if truncated:
+        logstream.warn("115", f"分享 {share_code} 文件数达到 {max_files} 上限，"
+                              f"仅遍历前 {max_files} 个文件，超出部分不会转存")
+    return {"title": title, "files": files, "total_size": total_size, "truncated": truncated,
             "top_names": top_names, "top_ids": top_ids}
 
 
@@ -495,9 +555,11 @@ def receive(share_code: str, receive_code: str, cid: int, file_ids: list[str]) -
         pass
     resp = client.share_receive(payload)
     if not resp.get("state"):
-        code = resp.get("error_code", "")
+        code = str(resp.get("error_code") or "").strip()
         msg = resp.get("error", "") or str(resp)[:200]
-        raise Pan115Error(f"{msg} (error_code={code})")
+        if "目录" in msg or "cid" in msg.lower():
+            clear_dir_cache()  # 目标目录可能已被删除/重命名：缓存失效，下次重新逐级解析
+        raise Pan115Error(f"{msg}（error_code={code}）" if code else msg)
     return resp
 
 
@@ -507,13 +569,17 @@ def offline_download(url: str, cid: int) -> dict:
     resp = client.clouddownload_task_add_url({"url": url, "wp_path_id": cid})
     if not resp.get("state"):
         msg = resp.get("error", "") or str(resp)[:200]
+        if "目录" in msg or "cid" in msg.lower() or "wp_path" in msg.lower():
+            clear_dir_cache()
         raise Pan115Error(f"云下载任务提交失败: {msg}")
     return resp
 
 
-def task_list_all(max_pages: int = 5) -> list[dict]:
+def task_list_all(max_pages: int = 20) -> list[dict]:
     """拉取 115 云下载任务列表（含 url/name/percent/status 字段）。
 
+    全量分页（每页 100，最多 20 页 = 2000 条）：offline_check_loop 靠它在任务
+    列表里核对云下载结果——列表不全会把仍在进行的旧任务误判为「任务不存在 → 失败」。
     任一页接口失败都会抛出 Pan115Error（而不是返回不完整/空列表），
     调用方据此跳过本轮判定，避免把「接口异常」误判成「任务不存在 → 下载失败」。
     """
@@ -531,7 +597,7 @@ def task_list_all(max_pages: int = 5) -> list[dict]:
         out.extend(tasks)
         if len(tasks) < 100:
             break
-        time.sleep(0.5)
+        time.sleep(0.3)
     return out
 
 
@@ -605,6 +671,35 @@ def organize_seasons(cid: int, min_files: int = 2) -> int:
         moved += len(items)
         time.sleep(0.5)
     return moved
+
+
+def search_file(name: str, limit: int = 20) -> list[dict]:
+    """按文件名全盘搜索，返回 [{id, name, parent}]（找回误落其他目录的文件用）。"""
+    client = _get_client()
+    resp = client.fs_search({"search_value": name, "limit": limit})
+    if not resp.get("state"):
+        raise Pan115Error(f"搜索失败: {str(resp)[:200]}")
+    out: list[dict] = []
+    for f in (resp.get("data") or []):
+        if not isinstance(f, dict):
+            continue
+        fname = _file_name(f)
+        fid = _file_id(f)
+        if not fname or not fid or _is_dir_item(f):
+            continue
+        parent = f.get("pid") or f.get("parent_id") or ""
+        out.append({"id": str(fid), "name": fname, "parent": str(parent)})
+    return out
+
+
+def copy_files_to(ids: list[str], cid: int) -> dict:
+    """把文件复制到目标目录（115 服务端秒复制，不动原位置）。"""
+    client = _get_client()
+    resp = client.fs_copy(ids, pid=cid)
+    if not resp.get("state"):
+        msg = resp.get("error", "") or str(resp)[:200]
+        raise Pan115Error(f"复制失败: {msg}")
+    return resp
 
 
 def list_file_names(cid: int, limit: int = 500) -> set[str]:

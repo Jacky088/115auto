@@ -6,7 +6,7 @@
         <el-button type="primary" @click="addVisible = true">添加频道</el-button>
       </div>
     </template>
-    <el-table :data="channels" empty-text="还没有频道，点右上角添加">
+    <el-table :data="channels" empty-text="还没有频道，点击右上角「添加频道」">
       <el-table-column prop="name" label="频道" min-width="160">
         <template #default="{ row }"><span class="mono">@{{ row.name }}</span></template>
       </el-table-column>
@@ -51,12 +51,12 @@
           <div class="ch-actions">
             <el-button @click="preview(row)">消息预览</el-button>
             <el-popconfirm
-              title="重置后该频道将清除已处理消息 ID 记忆，从最新消息重新获取；已成功的分享不会重复转存。确认重置？"
+              title="重置后该频道将清除已处理的消息去重记录，从最新消息重新获取；已成功的分享不会重复转存。确认重置？"
               confirm-button-text="重置" cancel-button-text="取消" confirm-button-type="warning"
               width="300" @confirm="reset(row)">
               <template #reference><el-button type="warning" text>重置</el-button></template>
             </el-popconfirm>
-            <el-popconfirm title="删除后将不再监控该频道，并清除其消息 ID 记忆；重新添加会按新频道重新抓取。确认删除？"
+            <el-popconfirm title="删除后将不再监控该频道，并清除其消息去重记录；重新添加会按新频道重新抓取。确认删除？"
                            confirm-button-text="删除" cancel-button-text="取消" confirm-button-type="danger"
                            width="300" @confirm="del(row)">
               <template #reference><el-button type="danger" text>删除</el-button></template>
@@ -78,10 +78,26 @@
           <el-radio value="userbot">Userbot</el-radio>
         </el-radio-group>
       </el-form-item>
+      <el-form-item label="订阅模式">
+        <div style="width: 100%">
+          <el-radio-group v-model="addForm.subOnly">
+            <el-radio :value="false">全盘转存</el-radio>
+            <el-radio :value="true">仅订阅</el-radio>
+          </el-radio-group>
+          <div class="tip" style="margin-top: 4px">
+            全盘转存 = 该频道的所有资源链接都转存；仅订阅 = 只转存命中订阅关键词的内容
+            （与 Bot 指令 /add 的 on|off 一致）
+          </div>
+          <div v-if="addForm.subOnly === null" class="warn-text" style="font-size: 12px; margin-top: 4px">
+            ⚠️ 必须选择订阅模式（全盘转存 或 仅订阅），选择后才能确定
+          </div>
+        </div>
+      </el-form-item>
     </el-form>
     <template #footer>
       <el-button @click="addVisible = false">取消</el-button>
-      <el-button type="primary" :loading="adding" @click="add">确定</el-button>
+      <el-button type="primary" :loading="adding" :disabled="addForm.subOnly === null"
+                 @click="add">确定</el-button>
     </template>
   </el-dialog>
 
@@ -110,7 +126,7 @@ import { api, errMsg, fmtTime, highlightLinks, statusLabel, statusTagType } from
 
 const channels = ref([])
 const addVisible = ref(false)
-const addForm = reactive({ name: '', type: 'polling' })
+const addForm = reactive({ name: '', type: 'polling', subOnly: null })  // subOnly 必选（与 Bot /add 的 on|off 一致）
 const previewVisible = ref(false)
 const previewCh = ref('')
 const previewChId = ref('')
@@ -133,12 +149,18 @@ const loadUb = async () => {
 const adding = ref(false)
 const add = async () => {
   if (adding.value) return
+  if (addForm.subOnly === null) { ElMessage.warning('请先选择订阅模式（全盘转存 / 仅订阅）'); return }
   adding.value = true
   try {
-    const { data } = await api.post('/api/channels', addForm)
+    const { data } = await api.post('/api/channels', {
+      name: addForm.name,
+      type: addForm.type,
+      sub_only: addForm.subOnly,
+    })
     ElMessage.success(data.title ? `已添加 @${data.name}（${data.title}）` : `已添加 @${data.name}`)
     addVisible.value = false
     addForm.name = ''
+    addForm.subOnly = null  // 下一次添加必须重新选择（与 Bot /add 每次都要带 on|off 一致）
     load()
   } catch (e) { ElMessage.error(errMsg(e)) }
   finally { adding.value = false }
@@ -173,8 +195,8 @@ const changeType = async (row, v) => {
     await loadUb()  // 取最新登录状态再判定
     if (!ubConnected.value) {
       ElMessageBox.alert(
-        '尚未登录 Telegram Userbot，无法使用 Userbot 接入方式，已为你回退到「网页轮询」。<br/>' +
-        '如需实时监听私有频道，请先到「账号管理」完成 Userbot 登录，再回来修改接入方式。',
+        '尚未登录 Telegram Userbot，无法使用 Userbot 接入方式，已回退到「网页轮询」。<br/>' +
+        '如需实时监听私密频道，请先到「账号管理」完成 Userbot 登录，再回来修改接入方式。',
         'Userbot 未登录',
         { dangerouslyUseHTMLString: true, confirmButtonText: '知道了', type: 'warning' },
       ).catch(() => {})
@@ -197,7 +219,7 @@ const changeType = async (row, v) => {
     if (!st.running) return doSave()
     ElMessageBox.confirm(
       `系统正在运行中，修改「@${row.name}」的接入方式需要停止后再启动才能完全生效。` +
-      `是否保存修改？（保存后请到顶栏「停止」再「开始运行」）`,
+      `是否保存修改？（保存后请点击顶栏「停止」，再点击「开始运行」）`,
       '修改接入方式',
       { confirmButtonText: '保存并稍后重启', cancelButtonText: '取消', type: 'warning' }
     ).then(doSave).catch(() => {})
@@ -213,7 +235,7 @@ const reset = async (row) => {
 const del = async (row) => {
   try {
     const { data } = await api.delete(`/api/channels/${row.id}`)
-    ElMessage.success(`已删除频道 @${row.name}，并清除 ${data.cleared ?? 0} 条消息 ID 记忆`)
+    ElMessage.success(`已删除频道 @${row.name}，并清除 ${data.cleared ?? 0} 条消息去重记录`)
     load()
   } catch (e) { ElMessage.error(errMsg(e)) }
 }

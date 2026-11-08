@@ -2,7 +2,7 @@
   <el-card shadow="never" class="page-card">
     <template #header>
       <div class="toolbar" style="margin-bottom: 0">
-        <span>历史日志 <span class="tip">保留 7 天，到期自动永久删除；「清屏」不影响已保存日志</span></span>
+        <span>历史日志 <span class="tip">保留 7 天，到期自动删除；「清屏」不影响已保存日志</span></span>
         <el-button @click="exportTxt">导出选中日志</el-button>
       </div>
     </template>
@@ -107,6 +107,8 @@ const loadDays = async () => {
     if (!selDate.value && days.value.length) {
       selDate.value = days.value[0].d
     }
+  } catch (e) {
+    ElMessage.error(errMsg(e))
   } finally {
     daysLoading.value = false
   }
@@ -127,6 +129,8 @@ const load = async () => {
     })
     items.value = data.items
     total.value = data.total
+  } catch (e) {
+    ElMessage.error(errMsg(e))
   } finally {
     loading.value = false
   }

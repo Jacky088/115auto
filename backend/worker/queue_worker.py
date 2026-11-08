@@ -23,6 +23,13 @@ class PermanentTransferError(Exception):
     """确定性失败（如链接格式不支持），不重试，直接失败并通知。"""
 
 
+# 分享/链接已死亡的 115 错误特征：确定性失败，重试无意义也不计入熔断。
+# 覆盖 snap（读取分享）与 receive（转存提交）两个阶段可能返回的文案
+_DEAD_SHARE_MARKERS = ("链接已失效", "链接已过期", "链接不存在",
+                       "分享不存在", "分享已取消", "分享已删除", "分享已过期",
+                       "分享已屏蔽", "分享已被取消", "分享链接已失效")
+
+
 def validate_link(kind: str, share_code: str, share_url: str) -> str:
     """校验链接是否符合 115 支持范围，返回错误原因；合法返回空串。"""
     if kind == "share":
@@ -68,7 +75,7 @@ def _interval() -> float:
     return random.uniform(lo, max(hi, lo)) * pan.pace_factor()
 
 
-def _space_preflight(total_size: int) -> bool:
+def _space_preflight(total_size: int, title: str = "") -> bool:
     """空间预检：115 剩余空间不足时跳过任务并告警（转存前拦截，而不是失败后被动发现）。
 
     返回 True = 空间足够（或无法判定，放行）；False = 明显不足，任务打 skipped。
@@ -81,9 +88,9 @@ def _space_preflight(total_size: int) -> bool:
         return True  # 容量接口失败不阻塞转存
     free = sp.get("free", 0)
     if free and total_size > free:
-        jobs.notify_failure("share", "空间不足", "", "", "",
-                            retry_info=f"💡 115 剩余空间不足（剩 {_fmt_gb(free)}，"
-                                       f"本次需 {_fmt_gb(total_size)}），任务已保留为跳过状态，"
+        jobs.notify_failure("share", title, "", "", "",
+                            retry_info=f"💡 115 剩余空间不足（剩余 {_fmt_gb(free)}，"
+                                       f"需要 {_fmt_gb(total_size)}），任务已标记为「跳过」，"
                                        "清理空间后可手动重试")
         return False
     return True
@@ -93,18 +100,23 @@ def _fmt_gb(b: int) -> str:
     return f"{b / (1 << 30):.2f}GB"
 
 
-def _dedup_by_name(target: str, title: str) -> str:
-    """同名去重：目标目录（或其下的「名称 (年份)」子目录）已存在时返回原因，否则空串。"""
+def _dedup_by_name(cid: int, title: str) -> str:
+    """同名去重：目标目录（或其下的「名称 (年份)」子目录）已存在时返回原因，否则空串。
+
+    cid 由调用方传入（转存前解析目录时顺带完成，避免为去重单独再列一遍目录）。
+    """
     if not db.get_setting("dedup_by_name", True):
         return ""
+    if not cid:
+        return ""
     try:
-        names = pan.list_file_names(pan.mkdirs(target), limit=500)
+        names = pan.list_file_names(cid, limit=500)
     except Exception:
         return ""  # 检查失败不阻塞转存
     # 目标目录里直接有同名条目
     for n in names:
         if n == title or n.startswith(title):
-            return f"目标目录已存在「{n}」（同名去重），如需强制转存请在转存记录中关闭该开关后重试"
+            return f"目标目录已存在「{n}」（同名去重），如需强制转存请在「系统设置」关闭「同名去重」后重试"
     return ""
 
 
@@ -124,45 +136,119 @@ def _process_one(job: dict):
         cid = pan.mkdirs(target)
         if not cid:
             raise PermanentTransferError(f"目标目录无效: {target}")
+        # 重试防重：上次提交可能已被 115 受理（响应超时/丢失），再提交会生成双任务
+        if job.get("attempts", 0):
+            try:
+                key = jobs._offline_key(job["share_url"])
+                tasks = pan.task_list_all()
+                if any(jobs._offline_key(t.get("url") or "") == key for t in tasks):
+                    logstream.info("transfer", "云下载任务已存在于 115（此前提交已受理），跳过重复提交")
+                    db.execute("UPDATE transfers SET status='submitted', finished_at=NULL"
+                               " WHERE id=?", (job["id"],))
+                    display = classifier.headline(job["title"]) or job["title"][:80]
+                    jobs.notify_transfer(display, job.get("category", ""), job.get("channel", ""),
+                                         target, kind="offline")
+                    return
+            except Exception:
+                pass  # 查询失败按原流程重新提交
         pan.offline_download(job["share_url"], cid)
         # 提交成功 ≠ 下载完成：标记 submitted，由 offline_check_loop 跟踪真实结果
-        db.execute("UPDATE transfers SET status='submitted', finished_at=NULL WHERE id=?",
-                   (job["id"],))
+        db.execute("UPDATE transfers SET status='submitted', finished_at=NULL"
+                   " WHERE id=?", (job["id"],))
         display = classifier.headline(job["title"]) or job["title"][:80]
         logstream.info("transfer",
-                       f"☁️ 云下载任务已添加（①）: {display[:60]} → {target}（已提交 115，下载完成后推送第②条通知）")
+                       f"☁️ 云下载任务已添加：{display[:60]} → {target}（下载完成后推送完成通知）")
         jobs.notify_transfer(display, job.get("category", ""), job.get("channel", ""),
                              target, kind="offline")
         return
 
     # ---- 分享转存任务 ----
-    snap = pan.share_snap_all(code, rc)
+    try:
+        snap = pan.share_snap_all(code, rc)
+    except pan.Pan115Error as e:
+        # 分享已被取消/删除/不存在：确定性失败——重试无意义，也不计入连续失败熔断
+        #（否则一批失效补全链接会把普通转存一起拖停 30 分钟）
+        if any(m in str(e) for m in _DEAD_SHARE_MARKERS):
+            raise PermanentTransferError(f"分享链接已失效（{str(e)[:120]}）") from e
+        raise
+
+    # 1.45 超大分享截断透明化：超过 5000 文件的部分不会转存，任务与日志必须留痕
+    if snap.get("truncated"):
+        db.execute("UPDATE transfers SET error=? WHERE id=?",
+                   ("分享文件数超过 5000 上限，仅转存前 5000 个文件", job["id"]))
+        logstream.warn("transfer", f"分享 {code} 文件数超过 5000 上限，仅转存前 5000 个文件")
     # 名称优先取频道消息里的标题（已可能是 TMDB 官方名），分享内的文件夹名仅兜底
     title = (classifier.headline(job["title"]) or snap["title"] or job["title"][:100] or code)
 
     # 1.5 分享内没有任何文件（空目录/链接空壳）：无法转存，直接跳过而不是反复重试
     if not snap["files"]:
         reason = "分享内没有可转存的文件（可能为空目录或分享内容已失效）"
-        db.execute("UPDATE transfers SET status='skipped', title=?, error=? WHERE id=?",
-                   (title, reason, job["id"]))
+        db.execute("UPDATE transfers SET status='skipped', title=?, error=?"
+                   " WHERE id=?", (title, reason, job["id"]))
         logstream.warn("transfer", f"分享 {code} 跳过：{reason}")
         return
 
+    # 1.55 增量追更：同一分享此前已成功转存，分享方常往同一链接里持续加更集数
+    #（今天 E01、明天 E01-E03）。本次按真实文件名与目标目录比对，只转存新增的文件，
+    # 已存过的集数不重复提交（实测 115 对重复提交会生成 "(1)" 副本）。
+    incr = bool(job.get("increment"))
+    if incr and target:
+        tops = [t for t in (snap.get("top_names") or []) if t]
+        # 单顶层文件夹的分集分享：此前整包转存落在 target/<文件夹名>/ 下，
+        # 新集数也应存回同一文件夹，保持目录结构一致
+        if len(tops) == 1 and len(snap["files"]) > len(tops):
+            target = f"{target.rstrip('/')}/{tops[0]}"
+        existing: set[str] = set()
+        try:
+            dest_cid = pan.mkdirs(target)
+            existing = pan.list_file_names(dest_cid)
+        except Exception as e:
+            logstream.warn("transfer", f"追更预检目标目录失败（本次全量提交，宁多勿漏）: {e}")
+        existing_n = {_norm_filename(n) for n in existing}
+        new_files = [f for f in snap["files"]
+                     if f.get("fn") and f.get("fid")
+                     and _norm_filename(f["fn"]) not in existing_n]
+        new_size = sum(int(f.get("fs") or 0) for f in new_files)
+        if not new_files:
+            db.execute("UPDATE transfers SET status='skipped', title=?, size=0, error=?"
+                       " WHERE id=?",
+                       (title, "追更检查：分享无新增文件（已存过的集数不重复转存）", job["id"]))
+            logstream.info("transfer", f"分享 {code} 追更检查完成：无新增文件，跳过")
+            return
+        total_count = len(snap["files"])
+        # 用「仅新增文件」替换快照：后续空间预检/黑名单/提交/反查都只针对新增部分
+        snap["files"] = new_files
+        snap["total_size"] = new_size
+        snap["top_names"] = []
+        snap["top_ids"] = []
+        logstream.info("transfer",
+                       f"分享 {code} 追更检查：分享共 {total_count} 个文件，"
+                       f"检测到新增 {len(new_files)} 个（{new_size / (1 << 30):.2f} GB）")
+
     # 1.6 空间预检：115 剩余空间不足时跳过（转存前拦截）
-    if not _space_preflight(snap["total_size"]):
+    if not _space_preflight(snap["total_size"], title):
         db.execute("UPDATE transfers SET status='skipped', title=?, size=?, file_count=?, "
                    "error=? WHERE id=?",
                    (title, snap["total_size"], len(snap["files"]),
-                    f"115 空间不足（需 {_fmt_gb(snap['total_size'])}）", job["id"]))
+                    f"115 剩余空间不足（需要 {_fmt_gb(snap['total_size'])}）", job["id"]))
         logstream.warn("transfer",
                        f"分享 {code} 跳过：115 剩余空间不足"
-                       f"（需 {_fmt_gb(snap['total_size'])}），任务保留为跳过状态")
+                       f"（需要 {_fmt_gb(snap['total_size'])}），任务已标记为「跳过」")
         return
 
     # 1.7 同名去重（可关）：目标目录已有同名内容时不重复占空间
-    dedup_reason = _dedup_by_name(target, title) if target else ""
+    # 目录在这里解析一次（cid 供去重与转存两用），解析失败留给第 3 步正式报错走重试
+    cid = 0
+    if target:
+        try:
+            cid = pan.mkdirs(target)
+        except Exception:
+            cid = 0
+    dedup_reason = "" if incr else _dedup_by_name(cid, title)
+    # 追更任务不做同名去重：增量分支已按真实文件名比对过，标题前缀匹配反而可能误拦
     if dedup_reason:
-        db.execute("UPDATE transfers SET status='duplicate', title=?, size=?, error=? WHERE id=?",
+        db.execute("UPDATE transfers SET status='duplicate', title=?, size=?, error=?"
+                   " WHERE id=?",
                    (title, snap["total_size"], dedup_reason, job["id"]))
         logstream.info("transfer", f"分享 {code} 跳过：{dedup_reason}")
         return
@@ -181,8 +267,9 @@ def _process_one(job: dict):
             logstream.warn("transfer", f"分享 {code} 被内容黑名单拦截（{rule_type}:{rule_value}）")
             return
 
-    # 3. 确保目标目录存在
-    cid = pan.mkdirs(target)
+    # 3. 确保目标目录存在（上面解析成功则直接复用）
+    if not cid:
+        cid = pan.mkdirs(target)
     if not cid:
         raise RuntimeError(f"目标目录无效: {target}")
 
@@ -198,22 +285,63 @@ def _process_one(job: dict):
     file_ids = top_ids or flat_ids
     if not file_ids:
         raise RuntimeError("分享内文件缺少有效的文件 id（115 接口返回字段异常），需要重试")
-    try:
-        pan.receive(code, rc, cid, file_ids)
-    except pan.Pan115Error as e:
-        if "存在" in str(e):
-            logstream.info("transfer", f"分享 {code} 文件已存在于目标目录，视为已转存")
-        elif top_ids and flat_ids and set(flat_ids) != set(top_ids):
-            # 极少数接口形态不接受目录 id：退回逐文件提交
-            logstream.warn("transfer",
-                           f"分享 {code} 顶层整包转存被拒（{str(e)[:120]}），改为逐文件提交")
-            pan.receive(code, rc, cid, flat_ids)
-        else:
-            raise
+    # 3.8 重试防重：此前尝试可能已实际落盘（接口成功但反查超时/落库延迟）。
+    # 按分享的真实文件名预检目标目录，命中则跳过提交——实测 115 对重试任务的
+    # 再接收会放行并生成 "(1)" 副本，浪费空间；文件已在即视为成功，不再提交。
+    skip_receive = False
+    if job.get("attempts", 0):
+        try:
+            existing = pan.list_file_names(cid)
+        except Exception as e:
+            logstream.warn("transfer", f"重试预检目标目录失败（继续正常提交）: {e}")
+            existing = set()
+        existing_n = {_norm_filename(n) for n in existing}
+        pre = [f.get("fn") for f in snap["files"][:10] if f.get("fn")]
+        pre += (snap.get("top_names") or [])[:10]
+        pre = [n for n in dict.fromkeys(pre) if n]
+        if pre and any(_norm_filename(n) in existing_n for n in pre):
+            skip_receive = True
+            logstream.info("transfer",
+                           f"分享 {code} 目标目录已存在本次分享的文件（此前尝试已落盘），跳过重复提交")
 
-    # 5. 双重确认：反查目标目录，确认文件真实到达（防接口误报）
-    if not _verify_receive(cid, snap):
-        raise RuntimeError("转存接口返回成功，但目标目录未查到文件，需要复核后重试")
+    confirmed = skip_receive  # 预检命中 = 已确认文件就在目标目录
+    received_before = False
+    if not skip_receive:
+        try:
+            pan.receive(code, rc, cid, file_ids)
+        except pan.Pan115Error as e:
+            msg = str(e)
+            if any(m in msg for m in _DEAD_SHARE_MARKERS):
+                # 提交阶段也可能报链接失效/过期：确定性失败，不重试不计熔断
+                raise PermanentTransferError(f"分享链接已失效（{msg[:120]}）") from e
+            if "已接收" in msg:
+                # 115 幂等信号："文件已接收，无需重复接收"——本账号此前已接收过该分享，
+                # 文件已在网盘中。直接按成功处理：不反查、不找回、不重试。
+                received_before = True
+                confirmed = True
+                logstream.info("transfer", f"分享 {code} 115 提示此前已接收，文件已在网盘中，按成功处理")
+            elif "存在" in msg:
+                # "文件已存在"：目标目录已有同名文件 → 走反查确认
+                logstream.info("transfer", f"分享 {code} 文件已存在于目标目录，视为已转存")
+            elif top_ids and flat_ids and set(flat_ids) != set(top_ids):
+                # 极少数接口形态不接受目录 id：退回逐文件提交
+                logstream.warn("transfer",
+                               f"分享 {code} 顶层整包转存被拒（{msg[:120]}），改为逐文件提交")
+                pan.receive(code, rc, cid, flat_ids)
+            else:
+                raise
+
+    # 5. 双重确认：反查目标目录，确认文件真实到达（防接口误报）。
+    # 已确认文件在目标目录的（重试预检命中 / 已接收信号）除外。
+    if not confirmed and not _verify_receive(cid, snap):
+        # 「必须要存进去」兜底：文件可能被接收到了网盘其他位置（如早前用其他方式
+        # 转存过同一分享、或分类调整过）。全盘搜索后用「复制」找回到目标目录——
+        # 不动原文件，多一份也无妨。
+        _recover_misplaced(cid, snap)
+        if not _verify_receive(cid, snap):
+            raise RuntimeError("转存接口已返回成功，但反查目标目录未查到文件（多为 115 落库延迟，"
+                               "已尝试全盘找回，将自动重试）；多次重试仍失败时，"
+                               "请到 115 网页搜索文件名或检查回收站")
 
     db.execute("UPDATE transfers SET status='success', title=?, size=?, file_count=?, "
                "finished_at=? WHERE id=?",
@@ -236,6 +364,47 @@ def _process_one(job: dict):
             logstream.warn("transfer", f"转存后整理失败（不影响转存结果）: {e}")
 
 
+def _recover_misplaced(cid: int, snap: dict) -> int:
+    """反查失败后的兜底（「必须要存进去」的最后手段）。
+
+    按文件名全盘搜索本分享的文件：若被接收到了其他目录（早前转存过同一分享、
+    手动操作移动等），用「复制」找回到目标目录——不移动、不删除原文件，
+    允许重复，只求文件必须出现在目标目录。返回复制的文件数。
+    搜索/复制之间留小间隔，与库内其他 115 调用的防风控口径一致。
+    """
+    sample = [f.get("fn") for f in snap["files"][:5] if f.get("fn")]
+    sample += (snap.get("top_names") or [])[:3]
+    sample = [n for n in dict.fromkeys(sample) if n][:5]
+    copied = 0
+    seen_ids: set[str] = set()
+    searched = False
+    for name in sample:
+        if searched:
+            time.sleep(0.5)  # 多次搜索之间留间隔，防风控
+        searched = True
+        try:
+            hits = pan.search_file(name)
+        except Exception as e:
+            logstream.warn("transfer", f"全盘搜索「{name[:40]}」失败，跳过找回: {e}")
+            continue
+        for h in hits:
+            if h["parent"] == str(cid) or h["id"] in seen_ids:
+                continue  # 已在目标目录（多为列表延迟）或已处理过
+            if copied:
+                time.sleep(0.3)  # 多次复制之间留间隔，防风控
+            try:
+                pan.copy_files_to([h["id"]], cid)
+                seen_ids.add(h["id"])
+                copied += 1
+                logstream.info("transfer",
+                               f"在网盘其他位置找到「{h['name'][:50]}」，已复制一份到目标目录")
+            except Exception as e:
+                logstream.warn("transfer", f"复制「{h['name'][:50]}」到目标目录失败: {e}")
+        if copied >= 50:
+            break  # 单次找回上限，防异常数据触发海量复制；剩余交给下一轮重试
+    return copied
+
+
 def _verify_receive(cid: int, snap: dict) -> bool:
     """反查目标目录：抽查分享条目是否真实到达。
 
@@ -245,6 +414,7 @@ def _verify_receive(cid: int, snap: dict) -> bool:
     """
     names = [f.get("fn") for f in snap["files"][:10] if f.get("fn")]
     names += [n for n in (snap.get("top_names") or [])[:10] if n]
+    names = list(dict.fromkeys(names))  # 去重：同一文件可能同时出现在文件列表与顶层条目里
     if not names:
         return True
     delays = (2, 4, 8)
@@ -256,8 +426,10 @@ def _verify_receive(cid: int, snap: dict) -> bool:
                 return True
             if i == len(delays) - 1:
                 logstream.warn("transfer",
-                               f"目标目录反查未命中（目录条目示例: {list(got)[:5] or '空'}），"
-                               f"抽查名示例: {names[:3]}")
+                               f"转存接口已返回成功，但目标目录里暂时还没看到本次分享的文件"
+                               f"（多为 115 落库延迟，将自动重试确认，无需处理）；"
+                               f"目录现有条目示例: {list(got)[:5] or '（空目录）'}；"
+                               f"正在查找的文件名: {names[:3]}")
     except Exception as e:
         logstream.warn("transfer", f"目录反查失败（按 API 成功处理）: {e}")
         return True
@@ -290,7 +462,8 @@ def _backoff(attempts: int) -> float:
 def _fail(job: dict, err: str):
     attempts = job["attempts"] + 1
     if attempts >= MAX_ATTEMPTS:
-        db.execute("UPDATE transfers SET status='failed', attempts=?, error=? WHERE id=?",
+        db.execute("UPDATE transfers SET status='failed', attempts=?, error=? WHERE id=?"
+                   " AND status='running'",
                    (attempts, err[:500], job["id"]))
         logstream.error("transfer", f"分享 {job['share_code']} 转存失败（已达最大重试）: {err}")
         kind = job.get("kind", "share")
@@ -301,16 +474,32 @@ def _fail(job: dict, err: str):
             retry_info=f"💡 已自动重试 {attempts} 次仍未成功，请检查分享链接是否失效")
     else:
         delay = _backoff(attempts)
-        db.execute("UPDATE transfers SET status='queued', attempts=?, error=?, next_retry_at=? WHERE id=?",
+        db.execute("UPDATE transfers SET status='queued', attempts=?, error=?, next_retry_at=?"
+                   " WHERE id=?",
                    (attempts, err[:500], time.time() + delay, job["id"]))
         logstream.warn("transfer",
-                       f"分享 {job['share_code']} 第 {attempts} 次失败，{delay}s 后重试: {err}")
+                       f"分享 {job['share_code']} 第 {attempts} 次失败，{delay} 秒后重试：{err}")
 
 
 def _retry_scan():
     """把到期的重试任务重新置为可执行（由 fetch 领取）。"""
     db.execute("UPDATE transfers SET next_retry_at=NULL WHERE status='queued' AND next_retry_at<=?",
                (time.time(),))
+
+
+def _norm_filename(s: str) -> str:
+    """文件名比对归一化（去空白 + 小写）：115 入库可能微调文件名，
+    精确比对会把已落盘的文件误判成新文件导致重复转存。"""
+    return re.sub(r"\s+", "", (s or "")).lower()
+
+
+def _fetch_next():
+    """领取下一个转存任务：优先级高的先跑（向前补全 priority=1，优先消耗每日额度），
+    同级按入队先后（FIFO）。"""
+    _retry_scan()
+    return db.query(
+        "SELECT * FROM transfers WHERE status='queued' AND (next_retry_at IS NULL OR next_retry_at<=?)"
+        " ORDER BY priority DESC, id ASC LIMIT 1", (time.time(),), one=True)
 
 
 def skip_if_disabled(job: dict) -> bool:
@@ -321,7 +510,8 @@ def skip_if_disabled(job: dict) -> bool:
     if enabled:
         return False
     label = "云下载功能已关闭" if kind == "offline" else "分享转存功能已关闭"
-    db.execute("UPDATE transfers SET status='skipped', error=? WHERE id=?", (label, job["id"]))
+    db.execute("UPDATE transfers SET status='skipped', error=? WHERE id=?",
+               (label, job["id"]))
     logstream.info("transfer", f"任务 {job['share_code']} 跳过：{label}")
     return True
 
@@ -350,7 +540,7 @@ async def queue_worker():
             # 总开关：用户未点击「开始运行」前不消费队列
             if not db.get_setting("running", False):
                 if not stopped_logged:
-                    logstream.info("transfer", "系统未启动（向导完成或账号就绪后点「开始运行」）")
+                    logstream.info("transfer", "系统未启动（向导完成后点击网页顶栏「开始运行」）")
                     stopped_logged = True
                 await asyncio.sleep(5)
                 continue
@@ -359,7 +549,7 @@ async def queue_worker():
             # 全局暂停（TG /pause 或设置）
             if db.get_setting("paused", False):
                 if not pause_logged:
-                    logstream.warn("transfer", "转存已暂停（发送 /resume 恢复）")
+                    logstream.warn("transfer", "转存已暂停（TG 发送 /resume 恢复）")
                     pause_logged = True
                 await asyncio.sleep(10)
                 continue
@@ -368,8 +558,8 @@ async def queue_worker():
             # 定时计划窗口检查
             if not _in_schedule_window():
                 if not schedule_logged:
-                    logstream.info("transfer", "当前不在允许转存时段内，任务暂停排队"
-                                               "（设置页可调整或关闭定时计划）")
+                    logstream.info("transfer", "当前不在允许转存时段，新任务暂不入队"
+                                               "（可在设置页调整或关闭定时计划）")
                     schedule_logged = True
                 await asyncio.sleep(60)
                 continue
@@ -386,9 +576,7 @@ async def queue_worker():
                 continue
 
             _retry_scan()
-            job = db.query(
-                "SELECT * FROM transfers WHERE status='queued' AND (next_retry_at IS NULL OR next_retry_at<=?)"
-                " ORDER BY id ASC LIMIT 1", (time.time(),), one=True)
+            job = _fetch_next()
             if not job:
                 await asyncio.sleep(5)
                 continue
@@ -398,9 +586,10 @@ async def queue_worker():
             if skip_if_disabled(job):
                 await asyncio.sleep(1)
                 continue
-            # 与其他 queued 抢占：置 running
-            changed = db.execute("UPDATE transfers SET status='running', error='' WHERE id=? AND status='queued'",
-                                 (job["id"],))
+            # 与其他 queued 抢占：置 running 并记录领取时间（看门狗据此回收卡死任务）
+            changed = db.execute(
+                "UPDATE transfers SET status='running', running_at=?, error=''"
+                " WHERE id=?", (time.time(), job["id"]))
             if changed == 0:
                 await asyncio.sleep(0.5)
                 continue
@@ -409,11 +598,12 @@ async def queue_worker():
             # cookie 检查（不消耗重试次数：长时间失效不应把排队任务打成 failed）
             st = await asyncio.to_thread(pan.check_login)
             if not st.get("ok"):
-                err = f"115 未登录或 cookie 失效: {st.get('err', '')}"
-                db.execute("UPDATE transfers SET status='queued', error=?, next_retry_at=? WHERE id=?",
+                err = f"115 未登录或 Cookie 失效：{st.get('err', '')}"
+                db.execute("UPDATE transfers SET status='queued', error=?, next_retry_at=?"
+                           " WHERE id=?",
                            (err[:500], time.time() + 60, job["id"]))
                 logstream.warn("transfer",
-                               f"115 cookie 失效，任务 #{job['id']} 暂缓 60s（不计入重试次数）")
+                               f"115 Cookie 失效，任务 #{job['id']} 暂缓 60 秒（不计入重试次数）")
                 await asyncio.sleep(60)
                 continue
 
@@ -422,7 +612,8 @@ async def queue_worker():
                 consecutive_fails = 0
             except PermanentTransferError as e:
                 # 确定性失败（格式不支持/地址无效等）：不重试，立即失败并通知
-                db.execute("UPDATE transfers SET status='failed', attempts=?, error=? WHERE id=?",
+                db.execute("UPDATE transfers SET status='failed', attempts=?, error=? WHERE id=?"
+                           " AND status='running'",
                            (job["attempts"] + 1, str(e)[:500], job["id"]))
                 logstream.error("transfer", f"任务永久失败: {str(e)}")
                 pan.note_115_error(str(e))

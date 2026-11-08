@@ -45,7 +45,7 @@
         </el-table-column>
       </el-table>
       <div class="btn-row end" style="margin-top: 14px">
-        <span v-if="dirtyRules" class="tip-text">修改需点击保存后才生效</span>
+        <span v-if="dirtyRules" class="tip-text">修改需点击「保存规则」后生效</span>
         <el-button type="primary" :disabled="!dirtyRules" @click="saveRules">保存规则</el-button>
       </div>
     </el-card>
@@ -79,7 +79,7 @@
             <span>{{ testResult.offline_target_dir }}</span>
             <el-tag size="small" type="warning" style="margin-left: 6px">云下载目录</el-tag>
           </template>
-          <template v-else>{{ testResult.target_dir || '跳过不转存' }}</template>
+          <template v-else>{{ testResult.target_dir || '跳过（不转存）' }}</template>
         </el-descriptions-item>
       </el-descriptions>
     </el-card>
@@ -137,7 +137,7 @@
 
       <template v-else>
         <p style="color:#999; font-size:12px; margin-top: 0; margin-bottom: 10px">
-          被黑名单拦截的消息记录。点击内容可查看完整消息（分享链接已高亮），确认误拦可放行重新处理。
+          被黑名单拦截的消息记录。点击内容可查看完整消息（分享链接已高亮）；若确认为误拦，可点击「放行」重新处理。
         </p>
         <el-table :data="blHits" size="small" empty-text="暂无拦截记录" v-loading="blHitsLoading">
           <el-table-column prop="created_at" label="时间" width="150">
@@ -182,12 +182,12 @@
         <h4>一、工作原理</h4>
         <p>每条消息进来后，系统按以下流程处理：</p>
         <ol>
-          <li><b>提取链接</b>：从消息正文（含"查看资源"按钮指向的页面）提取 115 分享链接或云下载链接（电驴/磁力）；</li>
+          <li><b>提取链接</b>：从消息正文（含「查看资源」按钮指向的页面）提取 115 分享链接或云下载链接（电驴/磁力）；</li>
           <li><b>规则匹配</b>：用消息标题从上到下逐条尝试匹配规则，<b>第一条命中的规则决定分类</b>（优先级数字越小越靠前）；</li>
           <li><b>目录路由</b>：按分类查「转存目录」页的映射表——<b>分享转存进「分享转存目录」，云下载进「云下载目录」</b>（云下载目录留空则与分享转存相同）；</li>
           <li><b>黑名单检查</b>：命中本页黑名单的丢弃，其余入队转存。</li>
         </ol>
-        <p class="eg">例：某资源命中"全N集"规则 → 分类<b>电视剧</b> → 分享转存进
+        <p class="eg">例：某资源命中「全N集」规则 → 分类<b>电视剧</b> → 分享转存进
           <code>/媒体库/电视剧</code>；同一资源若是 ED2K 云下载链接，且该分类的云下载目录填了
           <code>/云下载/电视剧</code>，则进云下载目录（留空则与分享转存同目录）。</p>
 
@@ -204,7 +204,7 @@
         <p class="tip">字幕组列表无法穷举所有组名；未覆盖的资源可按下方方法自定义。</p>
 
         <h4>三、不够用时：添加自定义规则</h4>
-        <p>点击「添加规则」→ 填写正则 → 选择（或输入）分类 → 设置优先级 → <b>点「保存规则」</b>。用下方测试器验证后再投入运行。</p>
+        <p>点击「添加规则」→ 填写正则 → 选择（或输入）分类 → 设置优先级 → <b>点击「保存规则」</b>。用下方测试器验证后再投入运行。</p>
         <el-table :data="regexTips" size="small" border>
           <el-table-column prop="frag" label="正则片段" width="180">
             <template #default="{ row }"><code>{{ row.frag }}</code></template>
@@ -212,23 +212,23 @@
           <el-table-column prop="meaning" label="含义" />
           <el-table-column prop="demo" label="示例" width="200" />
         </el-table>
-        <p class="eg">自定义示例：想识别微短剧 → 添加规则 <code>(短剧|微短剧|精品短剧)</code> → 分类选"电视剧"；
-          想让某个发布组的作品全部归动漫 → 添加 <code>\[该发布组名\]</code> → 分类选"动漫" → 优先级设 9（排在内置字幕组规则之前）。</p>
+        <p class="eg">自定义示例：想识别微短剧 → 添加规则 <code>(短剧|微短剧|精品短剧)</code> → 分类选「电视剧」；
+          想让某个发布组的作品全部归动漫 → 添加 <code>\[该发布组名\]</code> → 分类选「动漫」 → 优先级设 9（排在内置字幕组规则之前）。</p>
 
         <h4>四、识别不了的资源怎么办（未分类兜底）</h4>
         <p>所有规则都没命中的资源按「未分类动作」处理（「转存目录」页右上角）：</p>
         <ul>
-          <li><b>跳过</b>（默认）：不转存，转存记录里标记为"已跳过"，不会弄乱你的目录；</li>
+          <li><b>跳过</b>（默认）：不转存，转存记录里标记为「已跳过」，不会打乱已整理的目录结构；</li>
           <li><b>转入指定目录</b>：在下拉框直接输入一个路径（如 <code>/待整理</code>），无法识别的资源统一进这里，
-            之后你在 115 网盘里手动归档；也可以为它添加自定义规则（如 <code>短剧|微短剧</code> → 分类"电视剧"）让它以后自动分类。</li>
+            之后你在 115 网盘里手动归档；也可以为它添加自定义规则（如 <code>短剧|微短剧</code> → 分类「电视剧」）让它以后自动分类。</li>
         </ul>
 
         <h4>五、注意事项</h4>
         <ul>
           <li>规则只决定<b>分类</b>；分类 → 具体目录的映射在「转存目录」页配置，两类链接各自生效；</li>
-          <li>优先级数字越小越先匹配；新增自定义规则建议从 50 开始，想"抢在内置规则前"就设得更小；</li>
+          <li>优先级数字越小越先匹配；新增自定义规则建议从 50 开始，想「抢在内置规则前」就设得更小；</li>
           <li>正则默认忽略大小写；写错语法的规则会被自动跳过，不会影响其他规则；</li>
-          <li>改完规则记得点「保存规则」，并用测试器实际验证；</li>
+          <li>修改规则后需点击「保存规则」生效，并用测试器实际验证；</li>
           <li>「恢复默认」会把匹配规则重置为最新内置规则集（不影响你配置的目录映射），升级后内置规则有更新时可用它一键升级。</li>
         </ul>
       </div>
@@ -274,7 +274,7 @@
       <div class="help-body">
         <h4>一、作用机制</h4>
         <p>转存前会先读取分享内的<b>文件列表</b>：只要任意一个文件名命中你设置的正则，
-          <b>整个分享就会被跳过</b>（记录为"黑名单"状态，可到命中记录里放行）。适合过滤广告文件、样本、垃圾附件等。</p>
+          <b>整个分享就会被跳过</b>（记录为「黑名单」状态，可到命中记录里放行）。适合过滤广告文件、样本、垃圾附件等。</p>
         <p class="eg">例：设置 <code>\.url$</code> 后，分享内含有「更多资源点这里.url」这类广告文件的分享会被整体拦截。</p>
 
         <h4>二、语法要点</h4>
@@ -296,7 +296,7 @@
         <h4>四、注意事项</h4>
         <ul>
           <li>正则默认<b>忽略大小写</b>；一条正则写错语法不影响其他规则；</li>
-          <li>拦截粒度是<b>整个分享</b>——正则越宽松，误杀越多。建议从具体后缀（如 <code>\.url$</code>）起步，观察命中记录后再逐步放宽；</li>
+          <li>拦截粒度是<b>整个分享</b>——正则越宽松，误拦越多。建议从具体后缀（如 <code>\.url$</code>）起步，观察命中记录后再逐步放宽；</li>
           <li>确认误拦后，到「命中记录」里点「放行」即可重新转存该分享。</li>
         </ul>
       </div>
@@ -378,7 +378,7 @@ const resetRules = async () => {
   try {
     const { data } = await api.post('/api/rules/reset')
     await loadRules()
-    saveOk('已恢复默认规则', `已载入 ${data.count} 条最新内置规则，缺失的默认分类目录已补齐`)
+    saveOk('已恢复默认', `已载入 ${data.count} 条最新内置规则，缺失的默认分类目录已补齐`)
   } catch (e) { ElMessage.error(errMsg(e)) }
 }
 
@@ -455,7 +455,7 @@ const addBlacklistItem = async () => {
 const blRestoreDefaults = async () => {
   try {
     const { data } = await api.post('/api/blacklist/restore-defaults')
-    ElMessage.success(`已恢复默认，补齐了 ${data.added} 条缺失的默认关键词`)
+    saveOk('已恢复默认', `已补齐 ${data.added} 条缺失的默认关键词`)
     loadBlacklist()
   } catch (e) { ElMessage.error(errMsg(e)) }
 }
@@ -469,7 +469,7 @@ const delBlacklistItem = async (row) => {
 const releaseHit = async (row) => {
   try {
     await api.post(`/api/blacklist/hits/${row.id}/release`)
-    ElMessage.success('已放行，已忽略黑名单并重新处理该消息')
+    ElMessage.success('已放行，将忽略黑名单并重新处理该消息')
     loadBlacklist()
   } catch (e) { ElMessage.error(errMsg(e)) }
 }
@@ -494,7 +494,7 @@ const copyLinks = async () => {
     await navigator.clipboard.writeText(links.join('\n'))
     ElMessage.success(`已复制 ${links.length} 条链接`)
   } catch {
-    ElMessage.error('复制失败，请手动选择复制')
+    ElMessage.warning('复制失败，请手动选择复制')
   }
 }
 

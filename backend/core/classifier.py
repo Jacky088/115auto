@@ -66,6 +66,12 @@ def invalidate():
     _cache = ([], 0.0)
 
 
+# 单次参与正则匹配的最大文本长度：频道正文（≤4KB）足够，telegra.ph 解析回灌的长文
+# 截断后再匹配——分类特征（标签/年份/集数/画质）都在开头，截断不影响结果，
+# 同时避免超长输入放大坏规则的回溯耗时
+MAX_MATCH_LEN = 4000
+
+
 def classify(text: str) -> tuple[str, str]:
     """返回 (category, matched_pattern)。未命中返回 ("", "")。
 
@@ -73,6 +79,7 @@ def classify(text: str) -> tuple[str, str]:
     """
     if not text:
         return "", ""
+    text = text[:MAX_MATCH_LEN]
     cat, tag = _tag_category(text)
     if cat:
         return cat, tag

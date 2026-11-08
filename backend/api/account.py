@@ -98,7 +98,7 @@ def import_115_cookie(body: dict, _=Depends(require_user)):
     if not cookie.strip():
         raise HTTPException(400, "请粘贴 Cookie 字符串")
     if len(cookie) > 4000:
-        raise HTTPException(400, "Cookie 内容过长，请只粘贴完整的 UID/CID/SEID 段")
+        raise HTTPException(400, "Cookie 内容过长，请只粘贴 UID/CID/SEID 部分")
     try:
         return pan.import_cookie(cookie)
     except Exception as e:

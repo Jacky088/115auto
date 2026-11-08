@@ -55,6 +55,15 @@
         </el-table-column>
         <el-table-column prop="title" label="标题" min-width="260" show-overflow-tooltip />
         <el-table-column prop="category" label="分类" width="90" />
+        <el-table-column prop="kind" label="类型" width="80">
+          <template #default="{ row }">
+            <el-tag :type="row.kind === 'offline' ? 'warning'
+                            : (row.priority > 0 ? 'danger' : 'primary')" size="small">
+              {{ row.kind === 'offline' ? '云下载'
+                 : (row.priority > 0 ? '补全' : (row.increment ? '追更' : '分享')) }}
+            </el-tag>
+          </template>
+        </el-table-column>
         <el-table-column prop="target_dir" label="目标目录" min-width="150" show-overflow-tooltip />
         <el-table-column prop="size" label="大小" width="90">
           <template #default="{ row }">{{ row.size ? fmtSize(row.size) : '-' }}</template>
@@ -72,7 +81,7 @@
         <div class="toolbar" style="margin-bottom: 0">
           <span>实时日志</span>
           <el-button @click="autoScroll = !autoScroll">{{ autoScroll ? '暂停滚动' : '自动滚动' }}</el-button>
-          <el-tooltip content="仅清空当前显示内容，不影响已保存的历史日志（可在「日志查询」页面查看）">
+          <el-tooltip content="仅清空当前显示，不影响「日志查询」中的历史日志">
             <el-button @click="lines = []">清屏</el-button>
           </el-tooltip>
           <el-tag size="small" :type="wsOk ? 'success' : 'danger'">{{ wsOk ? '已连接' : '未连接' }}</el-tag>
@@ -237,7 +246,7 @@ const renderPie = () => {
       itemStyle: { borderRadius: 6, borderColor: chartCardBorder(), borderWidth: 2 },
       label: { show: false },
       data,
-      color: ['#2f6bff', '#5d8bff', '#22c1dc', '#f59e0b', '#ef4444', '#8b5cf6', '#10b981'],
+      color: ['#4f6bff', '#8b5cf6', '#22c1dc', '#f59e0b', '#ef4444', '#5d8bff', '#10b981'],
     }],
   }, true)
 }
@@ -332,20 +341,25 @@ const onResize = () => { if (pieChart) pieChart.resize(); if (spaceChart) spaceC
 .stat-card :deep(.el-card__body) { padding: 18px; }
 .stat-top { display: flex; align-items: center; gap: 10px; }
 .stat-icon {
-  width: 36px; height: 36px; border-radius: 10px; flex: none;
+  width: 36px; height: 36px; border-radius: 12px; flex: none;
   display: flex; align-items: center; justify-content: center;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .35), 0 3px 10px rgba(31, 45, 90, .08);
 }
 .stat-label { color: var(--saas-text-sub); font-size: 13px; }
-.stat-value { font-size: 26px; font-weight: 700; margin-top: 10px; letter-spacing: .3px; }
+.stat-value {
+  font-size: 26px; font-weight: 700; margin-top: 10px; letter-spacing: .3px;
+  font-variant-numeric: tabular-nums;
+}
 .module-chips { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
 .m-chip {
   padding: 3px 14px; border-radius: 999px; font-size: 12px; cursor: pointer; user-select: none;
   border: 1px solid var(--saas-line); color: var(--saas-text-sub);
-  background: var(--el-bg-color); transition: all .15s ease;
+  background: var(--glass-bg-strong); transition: all .15s ease;
 }
 .m-chip:hover { border-color: var(--el-color-primary-light-5); color: var(--el-color-primary); }
 .m-chip.active {
-  background: var(--el-color-primary); border-color: var(--el-color-primary); color: #fff;
+  background: var(--grad-brand); border-color: transparent; color: #fff;
+  box-shadow: 0 3px 10px rgba(79, 107, 255, .35);
 }
 .space-bar { height: 10px; border-radius: 5px; background: #e9eefb; margin-top: 16px; overflow: hidden; }
 .space-used { height: 100%; border-radius: 5px; transition: width .6s ease; min-width: 3%; }

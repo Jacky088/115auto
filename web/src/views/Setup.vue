@@ -13,7 +13,7 @@
       <div v-if="step === 0">
         <p class="step-desc">
           国内服务器：直接用手机 115 App 扫码登录（推荐）。<br />
-          海外 VPS：扫码易被 115 风控拦截，请点下方「手动导入 Cookie」。
+          海外 VPS：扫码易被 115 风控拦截，请点击下方「手动导入 Cookie」。
         </p>
         <div style="text-align: center; min-height: 220px">
           <template v-if="qr.loading"><el-skeleton style="width: 180px; margin: 0 auto" animated /></template>
@@ -38,18 +38,18 @@
         <el-radio-group v-model="tgMode" style="display: block; margin: 16px 0">
           <el-radio value="polling" size="large" border style="display: block; margin: 10px 0; height: auto; padding: 12px">
             <b>网页轮询（推荐）</b><br />
-            <span style="color: #999; font-size: 12px">只支持公开频道；不需要 TG 账号，零风控，延迟分钟级</span>
+            <span style="color: #999; font-size: 12px">只支持公开频道；不需要 TG 账号，风控风险低，延迟分钟级</span>
           </el-radio>
           <el-radio value="userbot" size="large" border style="display: block; margin: 10px 0; height: auto; padding: 12px">
             <b>Userbot 账号监听</b><br />
-            <span style="color: #999; font-size: 12px">实时、支持私有频道；需要 TG api_id/api_hash，建议用小号</span>
+            <span style="color: #999; font-size: 12px">实时、支持私密频道；需要 TG api_id/api_hash，建议用小号</span>
           </el-radio>
           <el-radio value="both" size="large" border style="display: block; margin: 10px 0; height: auto; padding: 12px">
             <b>两者都启用</b>
           </el-radio>
         </el-radio-group>
         <div v-if="tgMode !== 'polling'" class="ub-wizard">
-          <p class="ub-wizard-tip">Userbot 模式必须登录 TG 账号后才能进入下一步：</p>
+          <p class="ub-wizard-tip">Userbot 模式需登录 TG 账号：</p>
           <div class="ub-row">
             <span>连接状态：</span>
             <el-tag :type="ub.connected ? 'success' : 'danger'" size="small">
@@ -83,9 +83,24 @@
         </p>
         <el-input v-model="channelText" type="textarea" :rows="5"
                   placeholder="https://t.me/s/regeng115&#10;@some_channel" />
-        <!-- both 模式：逐行指定接入方式（默认网页轮询；私有频道请选 Userbot） -->
+        <!-- 订阅模式必选：与 Bot /add 的 on|off 一致，本项目所有新增频道入口统一要求 -->
+        <div class="sub-mode-box">
+          <p class="ch-type-tip" style="margin: 0 0 8px"><b>订阅模式（必选，本次添加的所有频道适用）：</b></p>
+          <el-radio-group v-model="wizardSubOnly">
+            <el-radio :value="false">全盘转存</el-radio>
+            <el-radio :value="true">仅订阅</el-radio>
+          </el-radio-group>
+          <p class="ch-type-tip" style="margin: 8px 0 0">
+            全盘转存 = 所有资源链接都转存；仅订阅 = 只转存命中订阅关键词的内容。
+            之后可在「频道管理」按频道独立调整
+          </p>
+          <p v-if="wizardSubOnly === null" class="warn-text" style="font-size: 12px; margin: 6px 0 0">
+            ⚠️ 必须选择订阅模式（全盘转存 或 仅订阅），选择后才能进入下一步
+          </p>
+        </div>
+        <!-- both 模式：逐行指定接入方式（默认网页轮询；私密频道请选 Userbot） -->
         <div v-if="tgMode === 'both' && channelLines.length" class="ch-type-box">
-          <p class="ch-type-tip">为每个频道选择接入方式（公开频道用网页轮询即可；私有频道必须选 Userbot）：</p>
+          <p class="ch-type-tip">为每个频道选择接入方式（公开频道用网页轮询即可；私密频道必须选 Userbot）：</p>
           <div v-for="ln in channelLines" :key="ln" class="ch-type-row">
             <span class="ch-type-name mono">@{{ ln }}</span>
             <el-radio-group v-model="chTypes[ln]" size="small">
@@ -96,7 +111,8 @@
         </div>
         <div class="btn-row end" style="margin-top: 16px">
           <el-button @click="step = 1">上一步</el-button>
-          <el-button type="primary" :loading="adding" @click="addChannels">下一步</el-button>
+          <el-button type="primary" :loading="adding" :disabled="wizardSubOnly === null"
+                     @click="addChannels">下一步</el-button>
         </div>
       </div>
 
@@ -128,14 +144,14 @@
                   <el-icon :size="16" :class="ready.data?.userbot_ok ? 'ok' : 'bad'">
                     <CircleCheckFilled v-if="ready.data?.userbot_ok" /><CircleCloseFilled v-else />
                   </el-icon>
-                  <span>Userbot 已连接（频道均为私有类型）</span>
+                  <span>Userbot 已连接（监控的均为私密频道）</span>
                   <el-button v-if="!ready.data?.userbot_ok" text type="primary" size="small"
                              @click="step = 1">去连接 →</el-button>
                 </div>
               </div>
               <el-button type="primary" size="large" :loading="starting"
-                         :disabled="!ready.data?.ready" @click="startNow">🚀 开始运行</el-button>
-              <el-button plain @click="skipFinish">稍后再启动（顶栏可随时点「开始运行」）</el-button>
+                         :disabled="!ready.data?.ready" @click="startNow">开始运行</el-button>
+              <el-button plain @click="skipFinish">稍后再启动（顶栏可随时点击「开始运行」）</el-button>
             </div>
           </template>
         </el-result>
@@ -169,6 +185,7 @@ const step = ref(0)
 const tgMode = ref('polling')
 const channelText = ref('')
 const adding = ref(false)
+const wizardSubOnly = ref(null)  // 订阅模式必选（与 Bot /add 的 on|off 一致），null = 未选择
 
 // ---- 115 扫码 ----
 const qr = reactive({ loading: false, svg: '', token: null, app: '', ok: false, scanned: false, err: '' })
@@ -278,7 +295,7 @@ const skipFinish = async () => {
   if (ready.data?.ready) return finish()
   const reasons = (ready.data?.reasons || []).map((r) => `· ${r}`).join('<br/>')
   ElMessageBox.alert(
-    `<b>必须设置 115 和 TG 频道才能正常运行本程序！</b><br/><br/>当前还缺：<br/>${reasons}` +
+    `<b>必须完成 115 登录并添加频道，才能正常运行本程序。</b><br/><br/>当前还缺：<br/>${reasons}` +
     `<br/><br/>可继续在向导中补全，或稍后到「账号管理」「频道管理」配置后再启动。`,
     '配置尚未完成',
     { dangerouslyUseHTMLString: true, confirmButtonText: '知道了', type: 'warning' },
@@ -307,6 +324,7 @@ const channelLines = computed(() => {
   return out
 })
 const addChannels = async () => {
+  if (wizardSubOnly.value === null) { ElMessage.warning('请先选择订阅模式（全盘转存 / 仅订阅）'); return }
   adding.value = true
   let ok = 0
   const fails = []
@@ -318,7 +336,7 @@ const addChannels = async () => {
       const type = tgMode.value === 'userbot' ? 'userbot'
         : tgMode.value === 'both' ? (chTypes[name] || 'polling') : 'polling'
       try {
-        await api.post('/api/channels', { name, type })
+        await api.post('/api/channels', { name, type, sub_only: wizardSubOnly.value })
         ok++
       } catch (e) {
         const msg = errMsg(e)
@@ -355,7 +373,7 @@ const startNow = async () => {
   }
   try {
     await api.post('/api/system/start')
-    ElMessage.success('🚀 系统已开始运行')
+    ElMessage.success('系统已开始运行')
   } catch (e) {
     ElMessage.error(errMsg(e))
   } finally {
@@ -389,6 +407,10 @@ const finish = async () => {
 .ch-type-box {
   margin-top: 12px; border: 1px solid var(--el-border-color-lighter);
   border-radius: 10px; padding: 12px 14px; max-height: 220px; overflow-y: auto;
+}
+.sub-mode-box {
+  margin-top: 12px; border: 1px solid var(--el-color-primary-light-7);
+  background: var(--el-color-primary-light-9); border-radius: 10px; padding: 12px 14px;
 }
 .ch-type-tip { margin: 0 0 10px; font-size: 12px; color: #909399; }
 .ch-type-row { display: flex; align-items: center; gap: 10px; padding: 4px 0; }

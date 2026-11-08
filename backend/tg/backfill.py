@@ -141,7 +141,9 @@ async def backfill_channel(client: httpx.AsyncClient, ch: dict, newest_min_id: i
                     full_text = await resolver.resolve_message(m["text"], m.get("buttons") or [])
                     if full_text:
                         from ..core import pipeline
-                        pipeline.process_message(name, m["id"], full_text)
+                        # 与 polling/userbot 一致：管道含多条 DB 读写，放线程池防阻塞事件循环
+                        await asyncio.to_thread(
+                            pipeline.process_message, name, m["id"], full_text)
                     else:
                         _remember_message(name, m)
                 except Exception as e:

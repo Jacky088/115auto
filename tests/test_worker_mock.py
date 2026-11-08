@@ -17,6 +17,16 @@ from backend.core import pipeline  # noqa: E402
 from backend.worker import queue_worker  # noqa: E402
 from backend.pan115 import client as pan  # noqa: E402
 
+# 消息 ID 用严格递增计数器：原来的 int(time.time()*1000)%1e9 在相邻两条消息
+# 落同毫秒时会生成相同 id，被消息级去重判重，用例偶发假失败
+_MID = [int(time.time() * 1000) % 10**9]
+
+
+def next_mid() -> int:
+    _MID[0] += 1
+    return _MID[0]
+
+
 PASS = []
 FAIL = []
 SKIP = []
@@ -64,7 +74,7 @@ pan.check_login = lambda: {"ok": True, "name": "测试账号"}
 
 
 def mkjob(share_code="testcode1"):
-    r = pipeline.process_message("test_ch", int(time.time() * 1000) % 10**9,
+    r = pipeline.process_message("test_ch", next_mid(),
                                  f"https://115.com/s/{share_code}?password=ab12 某某电影.2023.1080p")
     assert r["queued"] == 1, f"入队失败: {r}"
     return dict(db.query("SELECT * FROM transfers WHERE share_code=? ORDER BY id DESC LIMIT 1",
@@ -118,6 +128,8 @@ print("\n=== 5. 转存失败重试退避 ===")
 FakePan.files = [{"fid": "1", "fn": "ok.mkv", "fs": 2 * (1 << 30)}]
 FakePan.fail_receive = True
 job = mkjob("fail001")
+# 与真实路径一致：工作器先把任务置为 running 再调用 _process_one/_fail
+db.execute("UPDATE transfers SET status='running' WHERE id=?", (job["id"],))
 try:
     queue_worker._process_one(job)  # 真实路径中由工作器循环 try/except 捕获
     raised = False
@@ -661,7 +673,7 @@ notified = [str(s) for s in sent]
 check("阶段①: 添加通知发出（仅 1 条）", len(notified) == 1 and "云下载任务已添加" in notified[0]
       and "①" in notified[0] and "第②条" in notified[0], str(notified))
 logs_now = [l["message"] for l in logstream.recent(10)]
-check("阶段①: 实时日志打印添加", any("云下载任务已添加（①）" in m for m in logs_now), str(logs_now[-3:]))
+check("阶段①: 实时日志打印添加", any("云下载任务已添加：" in m for m in logs_now), str(logs_now[-3:]))
 # 阶段②：115 下载完成
 sent.clear()
 sub3 = dict(db.query("SELECT * FROM transfers WHERE id=987703", one=True))
@@ -674,7 +686,7 @@ notified2 = [str(s) for s in sent]
 check("阶段②: 完成通知发出", len(notified2) == 1 and "云下载任务完成" in notified2[0]
       and "②" in notified2[0], str(notified2))
 logs_now = [l["message"] for l in logstream.recent(10)]
-check("阶段②: 实时日志打印完成", any("云下载任务完成（②）" in m for m in logs_now), str(logs_now[-2:]))
+check("阶段②: 实时日志打印完成", any("云下载任务完成：" in m for m in logs_now), str(logs_now[-2:]))
 
 print("\n=== 18. 登录限速 ===")
 from backend import auth as _auth  # noqa: E402
@@ -687,7 +699,11 @@ check("清零后恢复正常", _auth.login_throttled() is False)
 db.set_setting("web_password_hash", "")
 _auth.ensure_initial_password()
 logs_now = [l["message"] for l in logstream.recent(10)]
-check("弱初始密码产生警告日志", any("弱初始密码" in m for m in logs_now), str(logs_now[-2:]))
+check("弱初始密码已替换为随机密码（提示文件 + 旧密码失效）",
+      any("随机初始密码" in m for m in logs_now)
+      and _auth.INITIAL_PASSWORD_FILE.exists()
+      and not _auth.verify_password("admin123", db.get_setting("web_password_hash", "")),
+      str(logs_now[-2:]))
 _auth.change_password("admin123")
 
 print("\n=== 19. 历史消息补漏（backfill）===")
@@ -1047,10 +1063,10 @@ db.set_setting("subscription_only", True)
 db.execute("INSERT OR IGNORE INTO subscriptions(keyword,created_at) VALUES('某某电影',?)",
            (time.time(),))
 try:
-    r = pipeline.process_message("test_ch", int(time.time() * 1000) % 10**9,
+    r = pipeline.process_message("test_ch", next_mid(),
                                  f"别的剧集分享 https://115.com/s/sub0000?password=ab12")
     check("订阅模式下未命中 → 不入队", r.get("sub_skipped") is True and r["queued"] == 0, str(r))
-    r = pipeline.process_message("test_ch", int(time.time() * 1000) % 10**9,
+    r = pipeline.process_message("test_ch", next_mid(),
                                  f"某某电影.2023.1080p https://115.com/s/sub0001?password=ab12")
     check("命中订阅 → 正常入队", r["queued"] == 1, str(r))
     sub_row = dict(db.query("SELECT * FROM subscriptions WHERE keyword='某某电影'", one=True))
@@ -1059,7 +1075,7 @@ finally:
     db.set_setting("subscription_only", False)
 
 print("\n=== 28. （已移除）TMDB 刮削 → 确认模块删除后转存不受影响 ===")
-r = pipeline.process_message("test_ch", int(time.time() * 1000) % 10**9,
+r = pipeline.process_message("test_ch", next_mid(),
                              f"某某电影.2023.1080p https://115.com/s/tmdb001?password=ab12")
 row = dict(db.query("SELECT * FROM transfers WHERE share_code='tmdb001'", one=True))
 check("无刮削：标题保留原始解析结果", "某某电影" in row["title"], row["title"])
@@ -1069,7 +1085,7 @@ check("无刮削：目标目录为分类目录", row["target_dir"] and "(2023)" 
 print("\n=== 29. TG Bot 新指令（/quota /sub /ls /space）===")
 from backend.worker import bot_commands as bc  # noqa: E402
 
-check("/quota 已移除", "不再支持" in bc._handle_command("/quota 20", "x"))
+check("/quota 已移除", "暂不支持" in bc._handle_command("/quota 20", "x"))
 check("限额保持默认", db.get_setting("daily_limit") == 50, str(db.get_setting("daily_limit")))
 check("/sub 搜索提示", "搜索" in bc._handle_command("/sub 权力的游戏", "x")
       and "点选" in bc._handle_command("/sub 权力的游戏", "x"))
@@ -1118,6 +1134,396 @@ try:
         check("非法链接拒绝", e.status_code == 400, str(e.status_code))
 finally:
     db.set_setting("api_token", "")
+
+print("\n=== 32. 「文件已接收」幂等错误直接按成功处理（bug 修复回归）===")
+# 线上 bug：115 返回"文件已接收，无需重复接收！"（文件已在网盘中），旧代码只匹配
+# "存在"，把该幂等信号当真错误无限重试直至 failed。现在：直接按成功处理，
+# 不反查、不找回、不重试。
+_orig_snap_all5, _orig_mkdirs5, _orig_receive5 = pan.share_snap_all, pan.mkdirs, pan.receive
+_orig_list_names5 = pan.list_file_names
+try:
+    pan.share_snap_all = fake_share_snap_all
+    pan.mkdirs = lambda p: 12345
+
+    def _already_received(code, rc, cid, fids):
+        raise pan.Pan115Error("文件已接收，无需重复接收！ (error_code=)")
+
+    pan.receive = _already_received
+    _verify_calls = {"n": 0}
+
+    def _no_verify(cid, limit=500):
+        _verify_calls["n"] += 1
+        return {f.get("fn") for f in FakePan.files}
+
+    pan.list_file_names = _no_verify
+    db.set_setting("dedup_by_name", False)  # 本用例关注幂等链路，关掉同名去重避免撞车
+    job = mkjob("already001")
+    queue_worker._process_one(job)
+    row = dict(db.query("SELECT * FROM transfers WHERE id=?", (job["id"],), one=True))
+    check("「文件已接收」→ 直接按成功处理（无反查/无重试）",
+          row["status"] == "success" and _verify_calls["n"] == 0,
+          f"status={row['status']}, 反查调用={_verify_calls['n']}")
+finally:
+    pan.share_snap_all, pan.mkdirs, pan.receive = _orig_snap_all5, _orig_mkdirs5, _orig_receive5
+    pan.list_file_names = _orig_list_names5
+    db.set_setting("dedup_by_name", True)
+
+print("\n=== 33. 反查失败 → 全盘找回「复制」到目标目录（必须要存进去）===")
+# 文件被接收到了其他位置时：搜索定位 → 复制（不动原文件）→ 再反查 → success
+_orig_snap_all6, _orig_mkdirs6, _orig_receive6 = pan.share_snap_all, pan.mkdirs, pan.receive
+_orig_list_names6, _orig_search6, _orig_copy6 = pan.list_file_names, pan.search_file, pan.copy_files_to
+try:
+    pan.share_snap_all = fake_share_snap_all
+    pan.mkdirs = lambda p: 12345
+    pan.receive = lambda code, rc, cid, fids: {"state": True}
+    _copied = {}
+
+    def _list_names_recover(cid, limit=500):
+        # 复制发生前：目录里始终没有（模拟整轮反查落库延迟/文件落在别处）；
+        # 找回复制后：能查到
+        return {"别的文件.mkv"} if not _copied else {FakePan.files[0]["fn"]}
+
+    pan.list_file_names = _list_names_recover
+    pan.search_file = lambda name, limit=20: [
+        {"id": "999", "name": FakePan.files[0]["fn"], "parent": "888"}]  # 在其他目录找到
+    pan.copy_files_to = lambda ids, cid: _copied.update({"ids": list(ids), "cid": cid}) or {"state": True}
+    db.set_setting("dedup_by_name", False)
+    job = mkjob("recover001")
+    queue_worker._process_one(job)
+    row = dict(db.query("SELECT * FROM transfers WHERE id=?", (job["id"],), one=True))
+    check("反查失败 → 全盘找回复制 → 再反查 → success", row["status"] == "success", row["status"])
+    check("复制到了目标目录且不动原文件",
+          _copied.get("cid") == 12345 and _copied.get("ids") == ["999"], str(_copied))
+finally:
+    pan.share_snap_all, pan.mkdirs, pan.receive = _orig_snap_all6, _orig_mkdirs6, _orig_receive6
+    pan.list_file_names, pan.search_file, pan.copy_files_to = _orig_list_names6, _orig_search6, _orig_copy6
+    db.set_setting("dedup_by_name", True)
+
+print("\n=== 34. 重试防重：此前已落盘 → 跳过提交（避免 115 生成 (1) 副本）===")
+# 实测：重试任务的再接收会被 115 放行并生成 "(1)" 副本。修复：重试前先按分享
+# 真实文件名预检目标目录，文件已在则跳过提交，直接按成功处理。
+_orig_snap_all7, _orig_mkdirs7, _orig_receive7 = pan.share_snap_all, pan.mkdirs, pan.receive
+_orig_list_names7 = pan.list_file_names
+try:
+    pan.share_snap_all = fake_share_snap_all
+    pan.mkdirs = lambda p: 12345
+    _recv_calls = {"n": 0}
+
+    def _recv(code, rc, cid, fids):
+        _recv_calls["n"] += 1
+        return {"state": True}
+
+    pan.receive = _recv
+    pan.list_file_names = lambda cid, limit=500: {FakePan.files[0]["fn"]}  # 目录里已有该文件
+    db.set_setting("dedup_by_name", False)
+    job = mkjob("retrydup001")
+    db.execute("UPDATE transfers SET attempts=1 WHERE id=?", (job["id"],))  # 模拟重试任务
+    job = dict(db.query("SELECT * FROM transfers WHERE id=?", (job["id"],), one=True))
+    queue_worker._process_one(job)
+    row = dict(db.query("SELECT * FROM transfers WHERE id=?", (job["id"],), one=True))
+    check("重试时目标目录已有文件 → 跳过提交 → success",
+          row["status"] == "success" and _recv_calls["n"] == 0,
+          f"status={row['status']}, 提交次数={_recv_calls['n']}")
+finally:
+    pan.share_snap_all, pan.mkdirs, pan.receive = _orig_snap_all7, _orig_mkdirs7, _orig_receive7
+    pan.list_file_names = _orig_list_names7
+    db.set_setting("dedup_by_name", True)
+
+print("\n=== 35. 分享追更：同一链接新增集数 → 只转存新增文件 ===")
+# 场景：E01 已成功转存；分享方往同一链接加了 E02。旧逻辑直接判重跳过（E02 永远存不到）；
+# 新逻辑转为追更任务，按真实文件名比对目标目录，只提交新增的 file_id。
+db.execute("INSERT INTO transfers(kind,share_code,status,title,category,target_dir,file_count,"
+           "increment,created_at) VALUES('share','upd001','success','伟大的长征 (2026) S01E01',"
+           "'电视剧','/媒体库/电视剧',1,0,?)", (time.time(),))
+_orig_snap_all8, _orig_mkdirs8, _orig_receive8 = pan.share_snap_all, pan.mkdirs, pan.receive
+_orig_list_names8 = pan.list_file_names
+try:
+    pan.share_snap_all = lambda code, rc, max_files=5000: {
+        "title": "伟大的长征 (2026)",
+        "files": [{"fid": "1", "fn": "伟大的长征.S01E01.mkv", "fs": 1 << 30},
+                  {"fid": "2", "fn": "伟大的长征.S01E02.mkv", "fs": 1 << 30}],
+        "total_size": 2 << 30}
+    pan.mkdirs = lambda p: 12345
+    _state = {"received": False}
+
+    def _list_names_incr(cid, limit=500):
+        # 提交前：目录里只有 E01（追更比对用）；提交后：E02 落地（反查确认用）
+        return {"伟大的长征.S01E01.mkv"} if not _state["received"] else {
+            "伟大的长征.S01E01.mkv", "伟大的长征.S01E02.mkv"}
+
+    pan.list_file_names = _list_names_incr
+
+    def _recv_incr(code, rc, cid, fids):
+        _state["received"] = True
+        assert fids == ["2"], f"追更应只提交新增文件 E02，实际: {fids}"
+        return {"state": True}
+
+    pan.receive = _recv_incr
+    db.set_setting("dedup_by_name", False)
+    r = pipeline.process_message("ch", next_mid(),
+                                 "https://115.com/s/upd001?password=ab12 伟大的长征 S01E02")
+    check("已成功分享的新消息 → 转为追更任务入队", r["queued"] == 1, str(r))
+    row = dict(db.query("SELECT * FROM transfers WHERE share_code='upd001' AND increment=1", one=True))
+    check("追更任务已标记 increment=1", bool(row) and row["increment"] == 1, str(row))
+    queue_worker._process_one(row)
+    row2 = dict(db.query("SELECT * FROM transfers WHERE id=?", (row["id"],), one=True))
+    check("追更只提交新增文件 → success", row2["status"] == "success", row2["status"])
+    check("追更记录文件数为新增数", row2["file_count"] == 1, str(row2["file_count"]))
+finally:
+    pan.share_snap_all, pan.mkdirs, pan.receive = _orig_snap_all8, _orig_mkdirs8, _orig_receive8
+    pan.list_file_names = _orig_list_names8
+    db.set_setting("dedup_by_name", True)
+
+print("\n=== 36. 分集向前补全：集数解析 / 同剧匹配 / 增量入队 ===")
+from backend.tg.episode_backfill import base_title, parse_episode, should_backfill  # noqa: E402
+
+check("S01E52 解析 (季, 集)", parse_episode("伟大的长征 (2026) S01E52") == (1, 52),
+      str(parse_episode("伟大的长征 (2026) S01E52")))
+check("第52集 解析", parse_episode("伟大的长征 第52集") == (None, 52))
+check("EP52 解析", parse_episode("伟大的长征 EP52") == (None, 52))
+check("无集数 解析为 None", parse_episode("某某电影 (2023)") == (None, None))
+b1 = base_title("伟大的长征 (2026) S01E52")
+b2 = base_title("伟大的长征 (2026) S01E53")
+check("同剧不同集 → 剧名一致", b1 == b2 and b1, b1)
+check("不同剧 → 剧名不一致", b1 != base_title("尚公主 (2026) S01E31"))
+check("S01E52 → 需要补全", should_backfill("伟大的长征 (2026) S01E52") == ("伟大的长征", 1, 52),
+      str(should_backfill("伟大的长征 (2026) S01E52")))
+check("S01E01 → 无需补全", should_backfill("伟大的长征 (2026) S01E01") is None)
+check("无集数 → 无需补全", should_backfill("某某电影 (2023)") is None)
+
+# pipeline 增量参数：补全入队的任务带 increment=1（已存过的集数由工作器比对跳过）
+_orig_snap_all9, _orig_mkdirs9, _orig_receive9 = pan.share_snap_all, pan.mkdirs, pan.receive
+_orig_list_names9 = pan.list_file_names
+try:
+    pan.share_snap_all = lambda code, rc, max_files=5000: {
+        "title": "伟大的长征 (2026)",
+        "files": [{"fid": "1", "fn": "伟大的长征.S01E01.mkv", "fs": 1 << 30}],
+        "total_size": 1 << 30}
+    pan.mkdirs = lambda p: 12345
+    pan.receive = lambda code, rc, cid, fids: {"state": True}
+    pan.list_file_names = lambda cid, limit=500: set()  # 目标目录还没有 → 正常提交
+    db.set_setting("dedup_by_name", False)
+    r = pipeline.process_message("ch", next_mid(),
+                                 "https://115.com/s/bf0001?password=ab12 伟大的长征 (2026) S01E01",
+                                 False, True)  # increment=True：向前补全入队
+    check("补全入队 → increment=1", r["queued"] == 1, str(r))
+    row = dict(db.query("SELECT * FROM transfers WHERE share_code='bf0001'", one=True))
+    check("补全任务带增量标记", row["increment"] == 1, str(row["increment"]))
+finally:
+    pan.share_snap_all, pan.mkdirs, pan.receive = _orig_snap_all9, _orig_mkdirs9, _orig_receive9
+    pan.list_file_names = _orig_list_names9
+    db.set_setting("dedup_by_name", True)
+
+print("\n=== 37. 补全任务优先级：额度有限时优先领取 ===")
+time.sleep(0.01)
+db.execute("INSERT INTO transfers(kind,share_code,status,created_at,priority)"
+           " VALUES('share','prio_norm','queued',?,0)", (time.time(),))
+db.execute("INSERT INTO transfers(kind,share_code,status,created_at,priority)"
+           " VALUES('share','prio_bf','queued',?+0.001,1)", (time.time(),))
+nxt = queue_worker._fetch_next()
+check("优先领取向前补全任务（priority=1）", nxt["share_code"] == "prio_bf", nxt["share_code"])
+check("补全任务带最高优先级标记", nxt["priority"] == 1, str(nxt["priority"]))
+db.execute("DELETE FROM transfers WHERE share_code IN ('prio_norm','prio_bf')")
+
+print("\n=== 38. 向前补全 API（锚点解析 + 手动剧名/集数兜底）===")
+import asyncio  # noqa: E402
+from backend.api import manage as manage_mod  # noqa: E402
+from fastapi import HTTPException as _HTTPException  # noqa: E402
+
+db.execute("INSERT INTO transfers(kind,share_code,status,title,channel,message_id,created_at)"
+           " VALUES('share','bfapi001','success','伟大的长征 (2026) S01E05',"
+           "'QukanMovie',12500,?)", (time.time(),))
+db.execute("INSERT INTO transfers(kind,share_code,status,title,channel,message_id,created_at)"
+           " VALUES('share','bfapi002','success','某某电影 (2023)','QukanMovie',12501,?)",
+           (time.time(),))
+aid = db.query("SELECT id FROM transfers WHERE share_code='bfapi001'", one=True)["id"]
+res = asyncio.run(manage_mod.backfill_episodes({"transfer_id": aid}))
+check("API 返回补全范围 S01 E01~E04",
+      res["episodes"] == "S01 E01~E04" and res["channel"] == "QukanMovie", str(res))
+check("剧名自动解析", res["base"] == "伟大的长征", res["base"])
+
+aid2 = db.query("SELECT id FROM transfers WHERE share_code='bfapi002'", one=True)["id"]
+try:
+    asyncio.run(manage_mod.backfill_episodes({"transfer_id": aid2}))
+    check("无集数且未手动指定 → 400", False, "未拦截")
+except _HTTPException as e:
+    check("无集数且未手动指定 → 400", e.status_code == 400, str(e.status_code))
+
+res2 = asyncio.run(manage_mod.backfill_episodes(
+    {"transfer_id": aid2, "keyword": "某某电影", "current_ep": 7}))
+check("手动剧名 + 手动集数 → E01~E06", res2["episodes"] == "E01~E06", str(res2))
+
+try:
+    asyncio.run(manage_mod.backfill_episodes({"keyword": "不存在的剧xyz"}))
+    check("关键词找不到锚点 → 404", False, "未拦截")
+except _HTTPException as e:
+    check("关键词找不到锚点 → 404", e.status_code == 404, str(e.status_code))
+
+db.execute("DELETE FROM transfers WHERE share_code IN ('bfapi001','bfapi002')")
+
+print("\n=== 42. 备份恢复与唯一索引/运行态竞态（P0 回归）===")
+# 场景 1：旧备份里同分享码有两条活动行（历史竞态遗留）→ 恢复自动降级为 duplicate，不再被索引拒绝
+payload = {"_meta": {"version": 1}, "settings": {"digest_enabled": True},
+           "channels": [], "rules": [], "routes": [], "blacklist": [], "subscriptions": [],
+           "transfers": [
+               {"kind": "share", "share_code": "dup001", "status": "queued", "title": "a",
+                "channel": "c", "message_id": 1, "created_at": 1, "increment": 0, "priority": 1},
+               {"kind": "share", "share_code": "dup001", "status": "queued", "title": "b",
+                "channel": "c", "message_id": 2, "created_at": 2, "increment": 0, "priority": 0}]}
+res = db.restore_payload(payload)
+statuses = [r["status"] for r in db.query(
+    "SELECT status FROM transfers WHERE share_code='dup001' ORDER BY id")]
+check("恢复含重复活动行的旧备份 → 成功且自动降级",
+      sorted(statuses) == ["duplicate", "queued"], str(statuses))
+# 场景 2：系统运行中 → 恢复被拒绝
+db.set_setting("running", True)
+try:
+    db.restore_payload({"_meta": {"version": 1}, "settings": {}, "channels": [], "rules": [],
+                        "routes": [], "blacklist": [], "subscriptions": [], "transfers": []})
+    check("运行中恢复被拒绝", False, "未拦截")
+except ValueError as e:
+    check("运行中恢复被拒绝", "停止" in str(e), str(e))
+db.set_setting("running", False)
+# 场景 3：有转存中任务 → 恢复被拒绝
+db.execute("INSERT INTO transfers(kind,share_code,status,running_at,created_at)"
+           " VALUES('share','running001','running',?,?)", (time.time(), time.time()))
+try:
+    db.restore_payload({"_meta": {"version": 1}, "settings": {}, "channels": [], "rules": [],
+                        "routes": [], "blacklist": [], "subscriptions": [], "transfers": []})
+    check("转存中恢复被拒绝", False, "未拦截")
+except ValueError as e:
+    check("转存中恢复被拒绝", "转存中" in str(e), str(e))
+db.execute("DELETE FROM transfers WHERE share_code='running001'")
+
+print("\n=== 43. 提取码前置写法识别 ===")
+from backend.core import extractor  # noqa: E402
+r = extractor.extract("提取码：ab12 https://115.com/s/pwpre01")
+check("提取码在链接前 → 识别", bool(r) and r[0]["receive_code"] == "ab12", str(r))
+r = extractor.extract("https://115.com/s/pwpre02?password=cd34")
+check("密码内嵌 → 识别", bool(r) and r[0]["receive_code"] == "cd34", str(r))
+
+print(f"\n{'='*40}\n结果: {len(PASS)} 通过, {len(FAIL)} 失败, {len(SKIP)} 跳过（外网不可达）")
+# 用户在 E08 点向前补全；E06/E07 此前已转存成功（消息已处理过、网盘有文件）
+time.sleep(0.01)
+for mid, code, ep in ((606, "ep006", 6), (607, "ep007", 7)):
+    db.execute("INSERT OR IGNORE INTO messages(channel,message_id,text,processed_at)"
+               " VALUES('ch',?,?,?)", (mid, f"https://115.com/s/{code}?password=ab12", time.time()))
+    db.execute("INSERT INTO transfers(kind,share_code,status,title,channel,message_id,created_at)"
+               " VALUES('share',?,'success',?,'ch',?,?)",
+               (code, f"某剧 (2026) S01E{ep:02d}", mid, time.time()))
+db.execute("INSERT INTO transfers(kind,share_code,status,title,channel,message_id,created_at)"
+           " VALUES('share','ep008','success','某剧 (2026) S01E08','ch',608,?)", (time.time(),))
+
+_orig_snap_all10, _orig_mkdirs10, _orig_receive10 = pan.share_snap_all, pan.mkdirs, pan.receive
+_orig_list_names10 = pan.list_file_names
+try:
+    pan.mkdirs = lambda p: 12345
+    _state = {"received": False}
+
+    def _snap10(code, rc, max_files=5000):
+        eps = {"ep006": 6, "ep007": 7, "ep005": 5}[code]
+        return {"title": "某剧 (2026)",
+                "files": [{"fid": "1", "fn": f"某剧 (2026) S01E{eps:02d}.mkv", "fs": 1 << 30}],
+                "total_size": 1 << 30}
+
+    pan.share_snap_all = _snap10
+
+    def _list10(cid, limit=500):
+        names = {"某剧 (2026) S01E06.mkv", "某剧 (2026) S01E07.mkv"}  # 网盘已有 E06/E07
+        if _state["received"]:
+            names.add("某剧 (2026) S01E05.mkv")  # E05 提交后落地
+        return names
+
+    pan.list_file_names = _list10
+
+    def _recv10(code, rc, cid, fids):
+        _state["received"] = True
+        return {"state": True}
+
+    pan.receive = _recv10
+    db.set_setting("dedup_by_name", False)
+
+    # 向前补全把找到的历史帖重新喂给管道：E06/E07 已处理过 → 消息级去重直接跳过
+    r6 = pipeline.process_message("ch", 606,
+                                  "https://115.com/s/ep006?password=ab12 某剧 (2026) S01E06",
+                                  False, True, 1)
+    r7 = pipeline.process_message("ch", 607,
+                                  "https://115.com/s/ep007?password=ab12 某剧 (2026) S01E07",
+                                  False, True, 1)
+    check("E06 帖已处理过 → 消息级去重跳过（不生成任务）",
+          r6.get("duplicate") is True and r6["queued"] == 0, str(r6))
+    check("E07 帖已处理过 → 消息级去重跳过（不生成任务）",
+          r7.get("duplicate") is True and r7["queued"] == 0, str(r7))
+    check("E06/E07 无新增任务记录",
+          db.query("SELECT count(*) c FROM transfers WHERE share_code IN ('ep006','ep007')",
+                   one=True)["c"] == 2)
+    # 缺失的 E05 → 正常入队（increment=1）并转存成功
+    r5 = pipeline.process_message("ch", 605,
+                                  "https://115.com/s/ep005?password=ab12 某剧 (2026) S01E05",
+                                  False, True, 1)
+    check("缺失的 E05 → 入队（带增量标记）", r5["queued"] == 1, str(r5))
+    row = dict(db.query("SELECT * FROM transfers WHERE share_code='ep005'", one=True))
+    queue_worker._process_one(row)
+    row = dict(db.query("SELECT * FROM transfers WHERE id=?", (row["id"],), one=True))
+    check("E05 转存成功", row["status"] == "success", row["status"])
+finally:
+    pan.share_snap_all, pan.mkdirs, pan.receive = _orig_snap_all10, _orig_mkdirs10, _orig_receive10
+    pan.list_file_names = _orig_list_names10
+    db.set_setting("dedup_by_name", True)
+
+print("\n=== 40. 失效分享 → 确定性失败（不重试、不计熔断）===")
+# 实测场景：补全的早期链接已失效，115 返回"分享不存在"。旧逻辑当普通失败
+# 重试 5 次并累计熔断，把普通转存一起拖停 30 分钟
+job = mkjob("deadshare001")
+
+
+def _dead_share(code, rc, max_files=5000):
+    raise pan.Pan115Error("读取分享失败: 分享不存在")
+
+
+pan.share_snap_all = _dead_share
+try:
+    queue_worker._process_one(job)
+    check("失效分享 → 确定性失败", False, "未抛出 PermanentTransferError")
+except queue_worker.PermanentTransferError as e:
+    check("失效分享 → 确定性失败（不再重试）", "已失效" in str(e), str(e))
+    # 与队列循环一致：确定性失败直接落 failed（真实循环还不计连续失败熔断）
+    db.execute("UPDATE transfers SET status='failed', attempts=?, error=? WHERE id=?",
+               (job["attempts"] + 1, str(e)[:500], job["id"]))
+row = dict(db.query("SELECT * FROM transfers WHERE id=?", (job["id"],), one=True))
+check("失败原因注明链接已失效", row["status"] == "failed" and "已失效" in (row["error"] or ""),
+      f"{row['status']} / {row['error']}")
+pan.share_snap_all = fake_share_snap_all
+
+print("\n=== 41. 补全帖：沿用锚点分类/目录 + 绕过订阅过滤 ===")
+# 场景：帖子无剧名/无集数标记（10.mp4），正常分类会落「未分类」并被订阅模式拦下；
+# 向前补全帖应沿用锚点任务的分类与目标目录，并绕过订阅过滤
+db.set_setting("subscription_only", True)
+_orig_snap_all11, _orig_mkdirs11, _orig_receive11 = pan.share_snap_all, pan.mkdirs, pan.receive
+_orig_list_names11 = pan.list_file_names
+try:
+    pan.share_snap_all = lambda code, rc, max_files=5000: {
+        "title": "某剧 (2026)",
+        "files": [{"fid": "1", "fn": "10.mp4", "fs": 1 << 30}],
+        "total_size": 1 << 30}
+    pan.mkdirs = lambda p: 12345
+    pan.receive = lambda code, rc, cid, fids: {"state": True}
+    pan.list_file_names = lambda cid, limit=500: set()
+    db.set_setting("dedup_by_name", False)
+    r = pipeline.process_message("ch", next_mid(),
+                                 "https://115.com/s/anc001?password=ab12 10.mp4",
+                                 False, True, 1,
+                                 {"category": "电视剧", "target_dir": "/媒体库/电视剧"})
+    row = dict(db.query("SELECT * FROM transfers WHERE share_code='anc001'", one=True))
+    check("补全帖沿用锚点分类/目录（不被订阅模式拦截）",
+          row["status"] == "queued" and row["category"] == "电视剧"
+          and row["target_dir"] == "/媒体库/电视剧" and row["increment"] == 1, str(row))
+    check("补全帖为高优先级", row["priority"] == 1, str(row["priority"]))
+finally:
+    pan.share_snap_all, pan.mkdirs, pan.receive = _orig_snap_all11, _orig_mkdirs11, _orig_receive11
+    pan.list_file_names = _orig_list_names11
+    db.set_setting("dedup_by_name", True)
+    db.set_setting("subscription_only", False)
 
 print(f"\n{'='*40}\n结果: {len(PASS)} 通过, {len(FAIL)} 失败, {len(SKIP)} 跳过（外网不可达）")
 if FAIL:

@@ -9,7 +9,7 @@
             <el-tag v-else type="danger" size="small">未登录 / 失效</el-tag>
           </el-descriptions-item>
           <el-descriptions-item label="账号">{{ s115.name || '-' }}</el-descriptions-item>
-          <el-descriptions-item label="说明">转存使用 Cookie 接口；国内服务器推荐扫码登录，海外 VPS 扫码被风控时用「手动导入 Cookie」。系统每 10 分钟自动巡检</el-descriptions-item>
+          <el-descriptions-item label="说明">转存通过 Cookie 完成，系统每 10 分钟自动巡检有效性。国内服务器推荐扫码登录；海外服务器扫码易被风控，可点击「手动导入 Cookie」</el-descriptions-item>
         </el-descriptions>
         <div class="btn-row" style="margin-top: 14px">
           <el-button type="primary" @click="openQr">扫码登录 / 重新登录</el-button>
@@ -32,7 +32,7 @@
               {{ tg.connected ? '已连接' : '未连接' }}
             </el-tag>
           </el-descriptions-item>
-          <el-descriptions-item label="说明">用于实时监听频道（含私有频道）。建议使用小号；api_id/api_hash 从 my.telegram.org 申请</el-descriptions-item>
+          <el-descriptions-item label="说明">用于实时监听频道（含私密频道）。建议使用小号；api_id/api_hash 从 my.telegram.org 申请</el-descriptions-item>
         </el-descriptions>
         <div class="btn-row" style="margin-top: 14px">
           <el-button type="primary" @click="tgVisible = true">登录 / 重新登录</el-button>
@@ -42,7 +42,7 @@
           <el-alert v-if="!tgTestResult.ok && tgTestResult.err" :title="tgTestResult.err"
                     type="error" :closable="false" show-icon />
           <template v-else>
-            <el-alert :title="tgTestResult.ok ? `✅ 连接与授权正常${tgTestResult.me ? '（' + tgTestResult.me + '）' : ''}${tgTestResult.channels.length ? '，已启用频道全部可访问' : ''}` : '⚠️ 部分频道无法访问，请检查账号是否已加入'"
+            <el-alert :title="tgTestResult.ok ? `连接与授权正常${tgTestResult.me ? '（' + tgTestResult.me + '）' : ''}${tgTestResult.channels.length ? '，已启用频道全部可访问' : ''}` : '部分频道无法访问，请检查账号是否已加入'"
                       :type="tgTestResult.ok ? 'success' : 'warning'" :closable="false" show-icon />
             <div v-for="c in tgTestResult.channels" :key="c.name" class="tg-ch">
               <el-icon :size="14" :class="c.ok ? 'ok' : 'bad'">
@@ -64,7 +64,7 @@
         <div class="qr-box" v-html="qr.svg" @click="createQr"></div>
         <p v-if="qr.err" class="qr-err">❌ {{ qr.err }}</p>
         <p v-else-if="qr.scanned" style="color: #67c23a; margin: 4px">✅ 已扫描，请在手机上确认</p>
-        <p v-else style="color: #999; font-size: 12px">请用 115 App 扫码（点击可刷新）</p>
+        <p v-else style="color: #999; font-size: 12px">请用 115 App 扫码，点击二维码可刷新</p>
       </template>
       <el-button v-else type="primary" :loading="qr.loading" @click="createQr">生成二维码</el-button>
     </div>

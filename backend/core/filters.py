@@ -33,6 +33,7 @@ def check_message(text: str, channel: str | None = None) -> tuple[bool, str, str
         for ch in _blacklist()["channel"]:
             if ch.lower() in channel.lower():
                 return True, "channel", ch
+    text = (text or "")[:4000]  # 与 classifier 同口径：截断超长文本再匹配
     for kw in _blacklist()["keyword"]:
         if kw and kw.lower() in text.lower():
             return True, "keyword", kw

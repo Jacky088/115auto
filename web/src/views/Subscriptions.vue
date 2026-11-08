@@ -11,7 +11,7 @@
     <div class="tmdb-section">
       <div class="tmdb-title">
         🔍 从 TMDB 选剧订阅
-        <span class="tip">API Key 在 themoviedb.org 免费申请（项目设置 → TMDB 刮削 共用此 Key）</span>
+        <span class="tip">API Key 在 themoviedb.org 免费申请</span>
         <!-- 搜索框固定在右上角：未配置 Key 时置灰 -->
         <el-tooltip :disabled="!!tmdbKey" content="先填写并保存 TMDB API Key" placement="top">
           <el-input v-model="searchWord" maxlength="80" :disabled="!tmdbKey"
@@ -32,7 +32,7 @@
         </template>
         <template v-else>
           <el-input v-model="tmdbKeyInput" type="password" show-password
-                    :placeholder="tmdbKey ? '输入新 Key 后点保存' : 'TMDB API Key (v3)'"
+                    :placeholder="tmdbKey ? '输入新 Key 后点击「保存 Key」' : 'TMDB API Key (v3)'"
                     style="width: 280px" clearable />
           <el-button :loading="savingKey" @click="saveTmdbKey">保存 Key</el-button>
           <el-button v-if="tmdbKey" text @click="editingKey = false">取消</el-button>
@@ -58,6 +58,7 @@
                     :class="{ active: kindFilter === k.value }"
                     @click="kindFilter = k.value">{{ k.label }}</span>
             </span>
+
           </template>
         </div>
       </template>
@@ -65,7 +66,7 @@
       <template v-if="tmdbKey">
         <div v-if="gridLoading && !filteredItems.length" class="tmdb-empty">加载中…</div>
         <div v-else-if="!filteredItems.length" class="tmdb-empty">
-          {{ mode === 'search' ? '没有找到相关内容，试试换个名称' : (kindFilter ? '该筛选条件下暂时没有内容' : '该分类暂时没有内容') }}
+          {{ mode === 'search' ? '没有找到相关内容，请尝试其他片名' : (kindFilter ? '该筛选条件下暂时没有内容' : '该分类暂时没有内容') }}
         </div>
         <div v-if="filteredItems.length" class="tmdb-grid">
           <div v-for="it in filteredItems" :key="it.kind + it.id" class="tmdb-card">
@@ -107,7 +108,7 @@
 
     <el-divider />
 
-    <el-table :data="items" empty-text="还没有订阅，在上方浏览/搜索点「订阅」即可添加">
+    <el-table :data="items" empty-text="还没有订阅，可在上方浏览或搜索后点击「订阅」添加">
       <el-table-column prop="keyword" label="关键词" min-width="150" show-overflow-tooltip>
         <template #default="{ row }"><span class="mono">{{ row.keyword }}</span></template>
       </el-table-column>
@@ -134,7 +135,8 @@
       <el-table-column label="操作" width="190">
         <template #default="{ row }">
           <div class="sub-actions">
-            <el-popconfirm title="重置后将清除该订阅的追更进度记忆，下次命中重新记录。确认重置？"
+            <el-button type="primary" text @click="openBackfill(row)">向前补全</el-button>
+            <el-popconfirm title="重置后将清除该订阅的追更进度记录，下次命中重新记录。确认重置？"
                            confirm-button-text="重置" cancel-button-text="取消" confirm-button-type="warning"
                            width="280" @confirm="resetProgress(row)">
               <template #reference><el-button type="warning" text>重置进度</el-button></template>
@@ -149,10 +151,30 @@
       </el-table-column>
     </el-table>
   </el-card>
+
+  <el-dialog v-model="bfVisible" title="向前补全早期分集" width="460px">
+    <el-form label-width="90px">
+      <el-form-item label="剧名关键词">
+        <el-input v-model="bfForm.keyword" placeholder="用于匹配频道历史帖子的剧名" />
+      </el-form-item>
+      <el-form-item label="锚点记录">
+        <span class="bf-line">将自动查找该剧最近一次成功转存，以其来源频道与消息为向前翻页起点</span>
+      </el-form-item>
+    </el-form>
+    <div class="bf-tip">
+      将向前翻找频道历史里同一剧集的早期分集（最多 50 页）并加入转存队列；
+      补全任务优先消耗每日额度，已存过的集数不会重复。
+      早期链接已失效的集数会失败并注明原因，之后补发的新链接会照常转存。
+    </div>
+    <template #footer>
+      <el-button @click="bfVisible = false">取消</el-button>
+      <el-button type="primary" :loading="bfLoading" @click="doBackfill">开始补全</el-button>
+    </template>
+  </el-dialog>
 </template>
 
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Search, Close } from '@element-plus/icons-vue'
 import { api, errMsg, fmtTime, saveOk } from '../api'
@@ -196,13 +218,18 @@ const kindFilter = ref('')
 const showKindFilter = computed(() =>
   mode.value === 'browse' && ['on_air', 'upcoming'].includes(activeCat.value))
 
-// 网格统一展示：浏览模式展示分类数据，搜索模式展示搜索结果；叠加类型筛选
+
+// 网格统一展示：浏览模式展示分类数据，搜索模式展示搜索结果；叠加类型/地区筛选
 const results = ref([])
 const gridItems = computed(() => (mode.value === 'search' ? results.value : browseItems.value))
-const filteredItems = computed(() =>
-  kindFilter.value && mode.value === 'browse'
-    ? gridItems.value.filter((it) => it.kind === kindFilter.value)
-    : gridItems.value)
+const filteredItems = computed(() => {
+  let items = gridItems.value
+  if (kindFilter.value && mode.value === 'browse') {
+    items = items.filter((it) => it.kind === kindFilter.value)
+  }
+
+  return items
+})
 
 const startEditKey = () => {
   tmdbKeyInput.value = ''
@@ -276,7 +303,7 @@ const saveTmdbKey = async () => {
     tmdbKey.value = key
     tmdbKeyInput.value = ''
     editingKey.value = false // 保存成功回到已配置态（输入框收起）
-    saveOk('TMDB API Key 已保存', '已为你拉取正在播出 / 即将上线的影视，点卡片即可订阅')
+    saveOk('TMDB API Key 已保存', '已拉取近期影视，点击卡片即可订阅')
     loadBrowse(true)
   } catch (e) { ElMessage.error(errMsg(e)) } finally { savingKey.value = false }
 }
@@ -327,6 +354,23 @@ const resetProgress = async (row) => {
     ElMessage.success(`已重置「${row.keyword}」的追更进度`)
     load()
   } catch (e) { ElMessage.error(errMsg(e)) }
+}
+// ---- 向前补全：以该订阅对应剧的最近一次成功转存为锚点，补全早期分集 ----
+const bfVisible = ref(false)
+const bfLoading = ref(false)
+const bfForm = reactive({ keyword: '' })
+const openBackfill = (row) => {
+  bfForm.keyword = row.keyword || ''
+  bfVisible.value = true
+}
+const doBackfill = async () => {
+  if (!bfForm.keyword.trim()) { ElMessage.warning('请填写剧名关键词'); return }
+  bfLoading.value = true
+  try {
+    const { data } = await api.post('/api/backfill/episodes', { keyword: bfForm.keyword.trim() })
+    saveOk('已开始向前补全', `《${data.base}》${data.episodes}，任务将优先入队`)
+    bfVisible.value = false
+  } catch (e) { ElMessage.error(errMsg(e)) } finally { bfLoading.value = false }
 }
 
 const del = async (row) => {
