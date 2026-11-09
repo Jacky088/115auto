@@ -1,6 +1,7 @@
 """定时巡检：115 cookie 有效性（10 分钟一次）+ 日志 7 天自动清理 + TG 通知。"""
 import asyncio
 import re
+import threading
 import time
 from urllib.parse import unquote
 
@@ -119,14 +120,31 @@ CHANNEL_EMPTY_HINT = {
 
 
 def notify_detail(message: str) -> dict[str, bool]:
-    """向所有已配置渠道推送，返回每个渠道的成功情况（用于日志与摘要重试判断）。"""
+    """向所有已配置渠道推送，返回每个渠道的成功情况（用于日志与摘要重试判断）。
+
+    各渠道并发发送并设 20 秒总超时：串行时 4 渠道 × 15 秒会长时间占用调用线程
+   （部分调用发生在事件循环/队列循环中，会拖慢转存消费）。
+    """
     out: dict[str, bool] = {}
-    for ch, fn in CHANNEL_FNS.items():
+    lock = threading.Lock()
+
+    def _run(ch: str, fn) -> None:
         try:
-            out[ch] = bool(fn(message))
+            ok = bool(fn(message))
         except Exception:
-            out[ch] = False
-    return out
+            ok = False
+        with lock:
+            out[ch] = ok
+
+    threads = [threading.Thread(target=_run, args=(ch, fn), daemon=True)
+               for ch, fn in CHANNEL_FNS.items()]
+    for t in threads:
+        t.start()
+    deadline = time.time() + 20
+    for t in threads:
+        t.join(max(0.0, deadline - time.time()))
+    # 未在总超时内返回的渠道按失败记，避免个别渠道拖住整体
+    return {ch: bool(out.get(ch, False)) for ch in CHANNEL_FNS}
 
 
 def test_channel(channel: str) -> tuple[bool, str]:
@@ -190,13 +208,15 @@ def send_test(token: str, chat_id: str) -> tuple[bool, str]:
                        "国内服务器请在「TG 代理」处填写代理地址")
 
 
-_EP_RE = re.compile(r"[Ss]\d{1,2}\s?[Ee]\d{1,3}|第\s?\d+\s?[集话話期]")
-
-
 def extract_episode(title: str) -> str:
-    """从标题提取集数标识（S01E40 / 第495集 / 第3期），提取不到返回空。"""
-    m = _EP_RE.search(title or "")
-    return m.group(0).replace(" ", "") if m else ""
+    """从标题提取并规范化集数标识（S01E40 / 第495集 / 第3期），提取不到返回空。
+
+    解析口径与订阅追更、向前补全共用 backend/core/episode.py：
+    S01E05 / s1e5 / EP5 / 第5集 / 5集 会归一到同一种写法。
+    """
+    from ..core import episode
+
+    return episode.display(title)
 
 
 def _fmt_size(size: int) -> str:
@@ -313,6 +333,15 @@ def _polling_all_failed(chans: list[dict]) -> bool:
 POLL_FAIL_THRESHOLD = 5  # 连续失败 5 轮（按最小间隔 30s 计约 2.5 分钟）视为通道失效
 
 
+def _running_timeout_secs() -> int:
+    """看门狗阈值（分钟）：默认 60 分钟，限制在 15-720 之间，避免误配。"""
+    try:
+        minutes = int(db.get_setting("running_timeout_min", 60) or 60)
+    except (TypeError, ValueError):
+        minutes = 60
+    return max(15, min(720, minutes)) * 60
+
+
 async def health_check_loop():
     """运行期健康监控（每 2 分钟）：115 Cookie 与 TG 状态任一失效 → 自动终止运行。
 
@@ -329,17 +358,19 @@ async def health_check_loop():
                 fail_streak = {"115": 0, "tg": 0}
                 continue
 
-            # --- 看门狗：转存任务卡在 running 超过 30 分钟（115 请求无响应，
+            # --- 看门狗：转存任务卡在 running 超过阈值（115 请求无响应，
             # p115client 的 HTTP 栈无默认超时）→ 自动重新排队，避免队列永久停摆。
-            # 卡死的 worker 线程无法终止，但会被后续完成任务的状态守卫自然作废。
+            # 执行中的任务每 60 秒心跳刷新 running_at；真正卡死才会超过阈值。
+            # 旧线程若迟到返回，状态守卫（AND status='running'）会拒绝其回写，不会重复计额。
+            timeout_secs = _running_timeout_secs()
             requeued = db.execute(
                 "UPDATE transfers SET status='queued', running_at=NULL,"
                 " error='转存超时：115 请求长时间无响应，已自动重新排队'"
                 " WHERE status='running' AND running_at IS NOT NULL AND running_at < ?",
-                (time.time() - 1800,))
+                (time.time() - timeout_secs,))
             if requeued:
                 logstream.warn("transfer", f"看门狗：{requeued} 个任务转存超时"
-                                           "（请求无响应），已重新排队")
+                                           f"（>{timeout_secs // 60} 分钟无心跳），已重新排队")
 
             # --- 115 Cookie ---
             st = await asyncio.to_thread(pan.check_login, True)
@@ -387,15 +418,16 @@ async def health_check_loop():
 
 MSG_RETENTION_SECONDS = 30 * 86400   # 消息去重记录保留 30 天（防重复转存的依据，需长于日志）
 HITS_RETENTION_SECONDS = 90 * 86400  # 黑名单命中记录保留 90 天（低频数据，留足复核期）
+DUP_RETENTION_SECONDS = 7 * 86400    # 重复/跳过任务记录保留 7 天（失败的正片内容成功/失败台账长期保留）
 
 
-def _cleanup_once() -> tuple[int, int, int]:
-    """执行一轮过期数据清理，返回 (日志, 消息, 命中记录) 删除条数。
+def _cleanup_once():
+    """执行一轮过期数据清理，返回各类删除条数。
 
     分批删除（每批 2000 条）：单事务删几十万行会长时间持有 SQLite 写锁，
     把整个应用（页面接口、WS 心跳、日志写入）全部卡住；分批把每次持锁时间压到毫秒级。
     """
-    total = [0, 0, 0, 0]
+    total = [0, 0, 0, 0, 0, 0]
     # messages 表是 (channel, message_id) 复合主键没有 id 列，统一用 SQLite 隐式 rowid
     from datetime import date, timedelta
     cutoff_day = (date.today() - timedelta(days=30)).isoformat()
@@ -408,6 +440,14 @@ def _cleanup_once() -> tuple[int, int, int]:
          time.time() - HITS_RETENTION_SECONDS, 2),
         ("DELETE FROM daily_quota WHERE day < ?",
          cutoff_day, 3),
+        # 同一分享被反复命中会持续写入 duplicate/skipped 记录：只清理这两类，
+        # success/failed 是用户核心台账，继续永久保留
+        ("DELETE FROM transfers WHERE rowid IN (SELECT rowid FROM transfers WHERE status='duplicate'"
+         " AND created_at<? LIMIT 2000)",
+         time.time() - DUP_RETENTION_SECONDS, 4),
+        ("DELETE FROM transfers WHERE rowid IN (SELECT rowid FROM transfers WHERE status='skipped'"
+         " AND created_at<? LIMIT 2000)",
+         time.time() - DUP_RETENTION_SECONDS, 5),
     )
     for sql, cutoff, idx in jobs:
         while True:
@@ -424,13 +464,14 @@ async def log_cleanup_loop():
     - 消息去重记录：保留 30 天（超过后该消息若再出现会被重新处理——30 天前的资源重转风险可忽略）
     - 黑名单命中记录：保留 90 天（低频写入，留足人工复核期）
     - 每日额度记录：保留 30 天
-    转存记录永久保留：体积极小（无正文），且是用户的核心操作台账。
+    - 重复/跳过任务：保留 7 天（success/failed 台账永久保留）
     """
-    logstream.info("system", "数据自动清理任务启动（日志 7 天 / 消息 30 天 / 命中记录 90 天 / 每日额度 30 天）")
+    logstream.info("system", "数据自动清理任务启动（日志 7 天 / 消息 30 天 / 命中记录 90 天 / 重复与跳过 7 天）")
     while True:
         try:
             # 清理是批量 DB 写操作：放线程池执行，不阻塞事件循环
-            deleted, stale_msgs, stale_hits, stale_quota = await asyncio.to_thread(_cleanup_once)
+            deleted, stale_msgs, stale_hits, stale_quota, stale_dup, stale_skip = \
+                await asyncio.to_thread(_cleanup_once)
             if deleted:
                 logstream.info("system", f"已清理 {deleted} 条过期日志（超过 7 天）")
             if stale_msgs:
@@ -439,6 +480,8 @@ async def log_cleanup_loop():
                 logstream.info("system", f"已清理 {stale_hits} 条过期黑名单命中记录（超过 90 天）")
             if stale_quota:
                 logstream.info("system", f"已清理 {stale_quota} 条过期每日额度记录（超过 30 天）")
+            if stale_dup or stale_skip:
+                logstream.info("system", f"已清理 {stale_dup + stale_skip} 条过期重复/跳过任务记录（超过 7 天）")
         except Exception as e:
             logstream.error("system", f"数据清理失败: {logstream.exc(e)}")
         await asyncio.sleep(3600)
@@ -524,17 +567,22 @@ def _finish_offline(job: dict, ok: bool, name: str = "", reason: str = ""):
     if ok:
         # 名称优先取频道消息标题，115 返回的文件名仅兜底
         shown = classifier.headline(job.get("title", "")) or name or job["title"]
-        db.execute("UPDATE transfers SET status='success', title=?, finished_at=?"
-                   " WHERE id=?",
-                   (shown[:200], time.time(), job["id"]))
+        changed = db.execute("UPDATE transfers SET status='success', title=?, finished_at=?"
+                             " WHERE id=? AND status='submitted'",
+                             (shown[:200], time.time(), job["id"]))
+        if changed == 0:
+            return  # 已被其他核对轮次/看门狗处理，避免重复计额与重复通知
         db.quota_incr()
         logstream.info("transfer",
                        f"✅ 云下载任务完成：{shown[:60]} → {job['target_dir']}，文件已保存至目标目录")
         notify_transfer(shown, job.get("category", ""), job.get("channel", ""),
                         job["target_dir"], kind="offline_done")
     else:
-        db.execute("UPDATE transfers SET status='failed', error=? WHERE id=?",
-                   (reason[:500], job["id"]))
+        changed = db.execute("UPDATE transfers SET status='failed', error=?"
+                             " WHERE id=? AND status='submitted'",
+                             (reason[:500], job["id"]))
+        if changed == 0:
+            return
         logstream.error("transfer", f"❌ 云下载任务失败: {job['title'][:60]} — {reason}")
         notify_failure("offline", job["title"], job.get("category", ""),
                        job.get("channel", ""), reason,

@@ -166,12 +166,12 @@ const needLogin = computed(() => !!loginErr.value && !dirs.value.length)
 <style scoped>
 .dp-crumbs {
   display: flex; align-items: center; flex-wrap: wrap; gap: 2px;
-  padding: 8px 10px; background: #f5f7fa; border-radius: 6px; font-size: 13px;
+  padding: 8px 10px; background: #f5f7fa; border-radius: 6px; font-size: var(--fs-body);
 }
 .dp-root-icon { color: #e6a23c; margin-right: 4px; }
 .dp-crumb {
   border: none; background: none; cursor: pointer; color: #409eff;
-  padding: 2px 4px; font-size: 13px; max-width: 180px;
+  padding: 2px 4px; font-size: var(--fs-body); max-width: 180px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .dp-crumb.current { color: #303133; font-weight: 600; cursor: default; }
@@ -182,7 +182,7 @@ const needLogin = computed(() => !!loginErr.value && !dirs.value.length)
 }
 .dp-row {
   display: flex; align-items: center; gap: 8px; padding: 7px 12px;
-  cursor: pointer; border-bottom: 1px solid #f5f7fa; font-size: 13px;
+  cursor: pointer; border-bottom: 1px solid #f5f7fa; font-size: var(--fs-body);
 }
 .dp-row:last-child { border-bottom: none; }
 .dp-row:hover { background: #f5f7fa; }
@@ -194,7 +194,7 @@ const needLogin = computed(() => !!loginErr.value && !dirs.value.length)
 }
 .dp-folder { color: #e6a23c; flex: none; }
 .dp-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.dp-empty { padding: 40px 0; text-align: center; color: #999; font-size: 13px; }
-.dp-picked { margin-top: 10px; font-size: 13px; color: #606266; }
+.dp-empty { padding: 40px 0; text-align: center; color: #999; font-size: var(--fs-body); }
+.dp-picked { margin-top: 10px; font-size: var(--fs-body); color: #606266; }
 .dp-footer { display: flex; justify-content: space-between; align-items: center; width: 100%; gap: 8px; flex-wrap: wrap; }
 </style>

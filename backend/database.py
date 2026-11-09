@@ -59,7 +59,12 @@ CREATE TABLE IF NOT EXISTS subscriptions(
     keyword TEXT NOT NULL UNIQUE,      -- 匹配关键词（对消息标题/正文做不区分大小写的子串匹配）
     note TEXT DEFAULT '',
     enabled INTEGER NOT NULL DEFAULT 1,
+    aliases TEXT DEFAULT '',           -- 别名（JSON 数组）：TMDB 原始名等，任一命中即算命中
+    tmdb_id INTEGER,                   -- TMDB 条目 ID（仅用于展示/追溯）
+    kind TEXT DEFAULT '',              -- tv | movie | ''
     last_ep TEXT DEFAULT '',           -- 最近一次命中的集数标识（S01E48 / 第495集）
+    last_season INTEGER,               -- 最近命中的季号（结构化进度，用于数值比较）
+    last_episode INTEGER,              -- 最近命中的集号
     last_title TEXT DEFAULT '',        -- 最近一次命中的标题
     last_match_at REAL,                -- 最近命中时间
     created_at REAL NOT NULL
@@ -122,6 +127,7 @@ DEFAULT_SETTINGS = {
     "poll_interval_max": 120,
     "transfer_interval_min": 30,
     "transfer_interval_max": 90,
+    "running_timeout_min": 60,        # 看门狗阈值：running 任务超过该分钟数无心跳才重新排队
     "daily_limit": 50,
     "retry_backoff": [60, 300, 1800],
     "min_size_gb": 0.2,
@@ -139,7 +145,7 @@ DEFAULT_SETTINGS = {
     "cookie_ok": None,                # 115 cookie 状态
     "userbot_ok": None,               # userbot 登录状态
     # ---- 订阅追剧 ----
-    "subscription_only": False,       # 开启后仅转存命中订阅关键词的内容
+    "subscription_only": False,       # 全局兜底：仅频道不存在时使用，正常以频道级 sub_only 为准
     # ---- 转存增强 ----
     "dedup_by_name": True,            # 转存前检查目标目录已有同名内容，命中判重跳过
     "share_update_enabled": True,     # 分享追更：同一分享链接新增集数时自动增量转存（只存新文件）
@@ -241,6 +247,15 @@ def _migrate():
     ccols = {r["name"] for r in _conn.execute("PRAGMA table_info(channels)")}
     if "sub_only" not in ccols:
         _conn.execute("ALTER TABLE channels ADD COLUMN sub_only INTEGER NOT NULL DEFAULT 0")
+    # 订阅别名与结构化追更进度（旧库无这些列，默认空值即可兼容）
+    scols = {r["name"] for r in _conn.execute("PRAGMA table_info(subscriptions)")}
+    for col, ddl in (("aliases", "TEXT DEFAULT ''"),
+                     ("tmdb_id", "INTEGER"),
+                     ("kind", "TEXT DEFAULT ''"),
+                     ("last_season", "INTEGER"),
+                     ("last_episode", "INTEGER")):
+        if col not in scols:
+            _conn.execute(f"ALTER TABLE subscriptions ADD COLUMN {col} {ddl}")
     # 老库迁移：向导已完成的部署视为已启动，保持原有运行行为
     if not _conn.execute("SELECT value FROM settings WHERE key='running'").fetchone():
         done = _conn.execute("SELECT value FROM settings WHERE key='setup_completed'").fetchone()
@@ -295,6 +310,14 @@ def execute(sql, params=()) -> int:
         cur = _conn.execute(sql, params)
         _conn.commit()
         return cur.rowcount
+
+
+def insert(sql, params=()) -> int:
+    """执行 INSERT 并返回自增 id（与 execute 同一把锁，避免再查 last row 时被其他线程插入抢走）。"""
+    with _lock:
+        cur = _conn.execute(sql, params)
+        _conn.commit()
+        return int(cur.lastrowid or 0)
 
 
 def query(sql, params=(), one=False):
@@ -453,6 +476,12 @@ def restore_payload(data: dict) -> dict:
                     pass  # 表无 AUTOINCREMENT 时没有 sqlite_sequence 行，忽略
             cur.execute("DELETE FROM settings")
             for k, v in (data["settings"] or {}).items():
+                if not isinstance(k, str) or not k or len(k) > 64:
+                    raise ValueError("备份 settings 中存在非法键名")
+                # 凭据类设置一律不采用备份值：只允许用上面记下的当前值覆盖，
+                # 防止手工构造的备份把登录/通知/API 凭据替换成攻击者可控值
+                if k in BACKUP_EXCLUDE_SETTINGS:
+                    continue
                 cur.execute("INSERT INTO settings VALUES(?,?)", (k, str(v)))
             for k, v in keep.items():
                 cur.execute("INSERT OR REPLACE INTO settings VALUES(?,?)", (k, v))

@@ -498,21 +498,21 @@ onMounted(load)
 .crumbs { display: flex; align-items: center; gap: 2px; flex-wrap: wrap; min-width: 0; flex: 1; }
 .home-btn { padding: 4px 6px; height: 28px; color: var(--el-color-primary); }
 .crumb {
-  border: 0; background: none; color: var(--saas-text-sub); font-size: 13px;
+  border: 0; background: none; color: var(--saas-text-sub); font-size: var(--fs-body);
   padding: 4px 7px; border-radius: 6px; cursor: pointer; max-width: 220px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .crumb:hover { color: var(--el-color-primary); background: var(--el-color-primary-light-9); }
 .crumb.current { color: var(--saas-text-main); font-weight: 600; cursor: default; }
 .search-title { max-width: 360px; }
-.crumb-sep { color: #c0cbe3; font-size: 12px; }
+.crumb-sep { color: #c0cbe3; font-size: var(--fs-caption); }
 .head-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .search-input { width: 240px; }
 .files-toolbar {
   display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 14px;
   padding: 10px 12px; background: #f6f9ff; border: 1px solid var(--saas-line); border-radius: 10px;
 }
-.selected-count { font-size: 13px; color: #5a6a8a; }
+.selected-count { font-size: var(--fs-body); color: #5a6a8a; }
 .clip-tag { max-width: 240px; }
 .load-alert { margin-bottom: 14px; }
 .file-name { display: flex; align-items: center; gap: 8px; min-width: 0; cursor: pointer; }
@@ -523,7 +523,7 @@ onMounted(load)
 .dir-tag { flex: none; }
 .more-btn { padding: 4px 6px; }
 .pager { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
-.hint { font-size: 12px; color: #8a97b3; }
+.hint { font-size: var(--fs-caption); color: #8a97b3; }
 .detail-head { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
 .detail-icon {
   width: 42px; height: 42px; border-radius: 10px; flex: none;
@@ -532,8 +532,8 @@ onMounted(load)
 .folder-bg { background: rgba(240, 160, 32, .12); color: #f0a020; }
 .file-bg { background: var(--el-color-primary-light-9); color: var(--el-color-primary); }
 .detail-title { min-width: 0; }
-.detail-name { font-weight: 600; font-size: 14px; color: var(--saas-text-main); word-break: break-all; }
-.detail-sub { font-size: 12px; color: var(--saas-text-sub); margin-top: 4px; }
+.detail-name { font-weight: 600; font-size: var(--fs-body); color: var(--saas-text-main); word-break: break-all; }
+.detail-sub { font-size: var(--fs-caption); color: var(--saas-text-sub); margin-top: 4px; }
 .break-all { word-break: break-all; }
 
 @media (max-width: 768px) {

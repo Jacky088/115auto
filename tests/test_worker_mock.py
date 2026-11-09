@@ -2,6 +2,7 @@
 
 运行: .venv/Scripts/python tests/test_worker_mock.py
 """
+import json
 import os
 import sys
 import tempfile
@@ -72,6 +73,19 @@ pan.mkdirs = fake_mkdirs
 pan.receive = fake_receive
 pan.check_login = lambda: {"ok": True, "name": "测试账号"}
 
+# 与生产路径一致：队列循环先原子领取（queued -> running）再调用 _process_one；
+# 终态回写已加 status 守卫，测试必须模拟领取，否则所有回写都会被判为「迟到」而忽略。
+_orig_process_one = queue_worker._process_one
+
+
+def _process_one_claimed(job):
+    db.execute("UPDATE transfers SET status='running', running_at=?"
+               " WHERE id=? AND status='queued'", (time.time(), job["id"]))
+    return _orig_process_one(job)
+
+
+queue_worker._process_one = _process_one_claimed
+
 
 def mkjob(share_code="testcode1"):
     r = pipeline.process_message("test_ch", next_mid(),
@@ -106,6 +120,8 @@ print("\n=== 3. 放行 share_info 命中（bypass 重跑）===")
 FakePan.total_size = 5 * (1 << 30)
 row["bypass_filters"] = 1
 row["status"] = "queued"
+# 放行 API 会把记录真正改回 queued 再排队；只改内存 dict 无法通过领取守卫
+db.execute("UPDATE transfers SET status='queued', bypass_filters=1 WHERE id=?", (row["id"],))
 queue_worker._process_one(row)
 row2 = dict(db.query("SELECT * FROM transfers WHERE id=?", (row["id"],), one=True))
 check("bypass 后转存成功", row2["status"] == "success", row2["status"])
@@ -294,10 +310,13 @@ print("\n=== 12. 转存成功 TG 通知 ===")
 from backend.worker import jobs  # noqa: E402
 pan.list_file_names = lambda cid, limit=200: {"ok.mkv"}  # 目录反查命中，确保成功路径可用
 
-# 12.1 集数提取
+# 12.1 集数提取（多种常见写法统一归一，供通知/追更/补全共用）
 check("提取 S01E40", jobs.extract_episode("某剧 (2026) S01E40 1080p") == "S01E40")
 check("提取 第495集", jobs.extract_episode("某动漫 第495集 2160p") == "第495集")
 check("提取 第3期", jobs.extract_episode("奔跑吧 第3期") == "第3期")
+check("提取 EP12", jobs.extract_episode("某剧 EP12 1080p") == "第12集")
+check("提取 更新至12集", jobs.extract_episode("某剧 更新至12集") == "第12集")
+check("集数写法归一 S1E5", jobs.extract_episode("某剧 s1e5 1080p") == "S01E05")
 check("无集数返回空", jobs.extract_episode("阿凡达.2009.2160p.BluRay") == "")
 
 # 12.2 通知内容格式（mock notify 捕获）
@@ -749,7 +768,11 @@ async def _latest():
 real_ok = False
 try:
     latest = asyncio.run(_latest())
-    real_ok = bool(latest)
+    # 公网被墙/代理失败时 t.me 仍可能返回 1 条错误页内容，不能当作真实样本；
+    # 不足 15 条即视为网络不可用，跳过整段外网用例（离线 CI 稳定通过）
+    real_ok = bool(latest) and len(latest) >= 15
+    if latest and not real_ok:
+        print(f"  ⚠️  真实 t.me 返回 {len(latest)} 条（疑似错误页），跳过 19.2/19.3")
 except Exception as e:
     print(f"  ⚠️  真实 t.me 抓取失败，跳过 19.2/19.3: {type(e).__name__}: {e}")
 
@@ -1071,8 +1094,32 @@ try:
     check("命中订阅 → 正常入队", r["queued"] == 1, str(r))
     sub_row = dict(db.query("SELECT * FROM subscriptions WHERE keyword='某某电影'", one=True))
     check("订阅命中时间已记录", sub_row["last_match_at"] is not None, str(sub_row))
+
+    # 27.1 一条消息命中多个订阅（含别名）→ 全部记录进度，而不是只记最老的一条
+    db.execute("INSERT INTO subscriptions(keyword,aliases,created_at) VALUES('多订阅测试','[]',?)",
+               (time.time(),))
+    db.execute("INSERT INTO subscriptions(keyword,aliases,created_at) VALUES"
+               "('多订阅测试 第二季',?,?)",
+               (json.dumps(["多订阅测试 2"], ensure_ascii=False), time.time()))
+    hits = sub_mod.match_all("多订阅测试 第二季 S02E01 1080p")
+    check("一条消息命中多个订阅", len({h["id"] for h in hits}) >= 2, str(hits))
+    row1 = dict(db.query("SELECT * FROM subscriptions WHERE keyword='多订阅测试'", one=True))
+    first_new = sub_mod.record_progress(row1, "多订阅测试 S01E05", 1, 5, "ep")
+    row1 = dict(db.query("SELECT * FROM subscriptions WHERE keyword='多订阅测试'", one=True))
+    same_ep = sub_mod.record_progress(row1, "多订阅测试 第5集", None, 5, "ep")
+    check("不同写法的同一集不重复通知", first_new is True and same_ep is False,
+          f"{first_new}/{same_ep}")
+    check("关键词归一化判重生效", sub_mod.find_conflict("多订阅测试") is not None)
+    # 直接走进度记录入口，避免占用转存额度影响后续用例
+    pipeline._record_sub_progress(hits, "多订阅测试 第二季 S02E01", "", "test_ch", True)
+    recs = db.query("SELECT * FROM subscriptions WHERE keyword LIKE '多订阅测试%'")
+    check("多订阅同时记录追更进度",
+          all(x["last_ep"] == "S02E01" and x["last_season"] == 2 and x["last_episode"] == 1
+              for x in recs),
+          str([dict(x) for x in recs]))
 finally:
     db.set_setting("subscription_only", False)
+    db.execute("DELETE FROM subscriptions WHERE keyword LIKE '多订阅测试%'")
 
 print("\n=== 28. （已移除）TMDB 刮削 → 确认模块删除后转存不受影响 ===")
 r = pipeline.process_message("test_ch", next_mid(),
@@ -1394,6 +1441,15 @@ try:
 except ValueError as e:
     check("转存中恢复被拒绝", "转存中" in str(e), str(e))
 db.execute("DELETE FROM transfers WHERE share_code='running001'")
+# 场景 1 的整体恢复清空了 routes/channels/rules，后续 39/40 用例仍需要基础路由，
+# 否则分类能出来但目标目录为空，任务会被当成「未分类=跳过」
+for cat, target in (("电影", "/媒体库/电影"), ("电视剧", "/媒体库/电视剧")):
+    db.execute("INSERT INTO routes(category,target_dir,offline_dir) VALUES(?,?,?)"
+               " ON CONFLICT(category) DO UPDATE SET target_dir=excluded.target_dir",
+               (cat, target, ""))
+# 规则表也被恢复清空，未分类不再默认跳过，后续 39/40 用例才会正常入队
+db.set_setting("unclassified_action", "/媒体库/未分类")
+classifier._cache = ({}, 0)
 
 print("\n=== 43. 提取码前置写法识别 ===")
 from backend.core import extractor  # noqa: E402

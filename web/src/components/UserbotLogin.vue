@@ -173,15 +173,15 @@ defineExpose({ loadStatus, runTest })
 <style scoped>
 .ub-box { display: flex; flex-direction: column; gap: 12px; }
 .ub-box.compact { gap: 10px; }
-.ub-status { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; }
+.ub-status { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: var(--fs-body); }
 .ub-form :deep(.el-button + .el-button) { margin-left: 10px; }
-.ub-hint { color: #999; font-size: 12px; }
+.ub-hint { color: #999; font-size: var(--fs-caption); }
 .ub-err { margin-top: 10px; }
 .ub-result { display: flex; flex-direction: column; gap: 6px; }
-.ub-ch { display: flex; align-items: center; gap: 6px; font-size: 13px; padding-left: 4px; }
+.ub-ch { display: flex; align-items: center; gap: 6px; font-size: var(--fs-body); padding-left: 4px; }
 .ub-ch .ok { color: #67c23a; }
 .ub-ch .bad { color: #f56c6c; }
 .ub-ch-name { font-weight: 600; }
 .ub-ch-title { color: #909399; }
-.ub-ch-err { color: #f56c6c; font-size: 12px; }
+.ub-ch-err { color: #f56c6c; font-size: var(--fs-caption); }
 </style>

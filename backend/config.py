@@ -17,6 +17,12 @@ SECRET_FILE = DATA_DIR / "secret.key"
 WEB_USERNAME = os.environ.get("WEB_USERNAME", "admin")
 WEB_PASSWORD = os.environ.get("WEB_PASSWORD", "admin123")
 
+# 可信反向代理（逗号分隔 IP/CIDR）。只有直连来源命中此列表时才解析 X-Forwarded-For，
+# 否则一律使用 socket 来源地址，防止客户端伪造 XFF 绕过登录限速。
+TRUSTED_PROXIES = tuple(
+    p.strip() for p in os.environ.get("TRUSTED_PROXIES", "").split(",") if p.strip()
+)
+
 for d in (DATA_DIR, LOG_DIR):
     d.mkdir(parents=True, exist_ok=True)
 

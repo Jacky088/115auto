@@ -1,24 +1,64 @@
 """主业务路由：登录/向导/仪表盘/频道/规则/黑名单/转存记录/设置/日志。"""
+import json
 import re
 import threading
 import time
+from ipaddress import ip_address, ip_network
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 
 from .. import auth, config, database as db
-from ..core import classifier, filters, logstream, patguard, pipeline
+from ..core import classifier, filters, logstream, patguard, pipeline, subscribe as submod
 from ..pan115 import client as pan
 from ..worker import jobs
 from .deps import require_user
 
 router = APIRouter(prefix="/api")
 
+# 海报专用 HttpOnly Cookie：路径收窄到海报接口，避免随全部 API 请求发送；
+# 浏览器 <img> 无法带 Authorization 头，靠同源 Cookie 鉴权（不再把长期 JWT 放 URL）。
+POSTER_COOKIE = "sa_poster"
+
+
+def _is_trusted_proxy(host: str) -> bool:
+    """判断直连来源是否在可信代理列表（支持 CIDR）。"""
+    try:
+        ip = ip_address(host)
+    except ValueError:
+        return False
+    for item in config.TRUSTED_PROXIES:
+        try:
+            if "/" in item:
+                if ip in ip_network(item, strict=False):
+                    return True
+            elif ip == ip_address(item):
+                return True
+        except ValueError:
+            continue
+    return False
+
 
 def _client_ip(request: Request) -> str:
-    """来源 IP：反代场景取 X-Forwarded-For 首段，兜底 remote_addr。"""
+    """来源 IP：仅当直连来源是可信代理时才解析 X-Forwarded-For，
+    并从右往左取第一个非可信地址；否则用 socket 地址，防止伪造 XFF 绕过限速。"""
+    remote = request.client.host if request.client else ""
     fwd = request.headers.get("x-forwarded-for", "")
-    return (fwd.split(",")[0].strip() if fwd else "") or (
-        request.client.host if request.client else "")
+    if not fwd or not _is_trusted_proxy(remote):
+        return remote
+    parts = [x.strip() for x in fwd.split(",") if x.strip()]
+    for item in reversed(parts):
+        if not _is_trusted_proxy(item):
+            return item
+    return parts[0] if parts else remote
+
+
+def _set_poster_cookie(response: Response, request: Request, token: str) -> None:
+    """下发海报鉴权 Cookie（HttpOnly + SameSite=Strict，路径仅海报接口）。"""
+    response.set_cookie(
+        POSTER_COOKIE, token, max_age=auth.TOKEN_TTL,
+        httponly=True, samesite="strict", path="/api/tmdb/poster",
+        secure=request.url.scheme == "https",
+    )
 
 
 def _like_escape(s: str) -> str:
@@ -33,7 +73,7 @@ def _web_username() -> str:
 
 
 @router.post("/auth/login")
-def login(body: dict, request: Request):
+def login(body: dict, request: Request, response: Response):
     ip = _client_ip(request)
     username = str(body.get("username", ""))[:64]
     password = str(body.get("password", ""))
@@ -49,7 +89,16 @@ def login(body: dict, request: Request):
         logstream.warn("system", f"网页登录失败（来源 {ip}）")
         raise HTTPException(401, "用户名或密码错误")
     logstream.info("system", "网页登录成功")
-    return {"token": auth.make_token(username)}
+    token = auth.make_token(username)
+    _set_poster_cookie(response, request, token)
+    return {"token": token}
+
+
+@router.post("/auth/logout")
+def logout(response: Response):
+    """退出登录：清除海报 Cookie（前端同时丢弃 localStorage 中的 token）。"""
+    response.delete_cookie(POSTER_COOKIE, path="/api/tmdb/poster")
+    return {"ok": True}
 
 
 @router.get("/auth/me")
@@ -62,13 +111,14 @@ _USERNAME_RE = re.compile(r"^[A-Za-z0-9_@\.\-\u4e00-\u9fa5]{2,32}$")
 
 
 @router.post("/auth/password")
-def change_pwd(body: dict, request: Request, _=Depends(require_user)):
+def change_pwd(body: dict, request: Request, response: Response, _=Depends(require_user)):
     """修改用户名和/或密码（都需验证旧密码）。body: {old, new?, username?}"""
+    ip = _client_ip(request)
     old = body.get("old", "")
     if not auth.verify_password(old, db.get_setting("web_password_hash", "")):
-        auth.record_login_fail(_client_ip(request))  # 旧密码连续错误同样触发限速，防止已登录会话被暴力猜密码
+        auth.record_login_fail(ip)  # 旧密码连续错误同样触发限速，防止已登录会话被暴力猜密码
         raise HTTPException(400, "旧密码错误")
-    if auth.login_throttled():
+    if auth.login_throttled(ip):
         raise HTTPException(429, "失败次数过多，请 1 分钟后再试")
     username = str(body.get("username") or "").strip()
     new = str(body.get("new") or "")
@@ -94,8 +144,9 @@ def change_pwd(body: dict, request: Request, _=Depends(require_user)):
     logstream.info("system", "管理员账号已在网页修改（" + "、".join(changed) + "）")
     # 轮换 JWT 签名密钥：所有旧 token（含可能被窃取的）立即失效，本会话换取新 token 无感续期
     auth.rotate_secret()
-    return {"ok": True, "username": _web_username(),
-            "token": auth.make_token(_web_username())}
+    new_token = auth.make_token(_web_username())
+    _set_poster_cookie(response, request, new_token)
+    return {"ok": True, "username": _web_username(), "token": new_token}
 
 
 # ---------- wizard ----------
@@ -276,8 +327,8 @@ async def add_channel(body: dict, _=Depends(require_user)):
         raise HTTPException(400, "频道名仅支持字母、数字与下划线（1-64 位）")
     if ctype not in ("polling", "userbot"):
         raise HTTPException(400, "type 必须是 polling 或 userbot")
-    if db.query("SELECT 1 FROM channels WHERE type=? AND name=?", (ctype, name), one=True):
-        raise HTTPException(400, "该频道已存在")
+    if db.query("SELECT 1 FROM channels WHERE name=?", (name,), one=True):
+        raise HTTPException(400, "该频道已存在（同一频道不能同时用轮询与 Userbot 接入，避免重复处理）")
     # 频道数量上限：防止误操作/脚本灌入海量频道拖垮轮询与 115 风控
     n = db.query("SELECT count(*) c FROM channels", one=True)["c"]
     if n >= 50:
@@ -427,47 +478,134 @@ def transfer_message(ch_id: int, message_id: int, _=Depends(require_user)):
 
 
 # ---------- subscriptions ----------
+def _clean_aliases(value) -> list[str]:
+    """校验并归一化别名输入：接受字符串（换行/逗号分隔）或字符串数组。"""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        parts = re.split(r"[\n,，;；]", value)
+    elif isinstance(value, (list, tuple)):
+        parts = list(value)
+    else:
+        raise HTTPException(400, "别名需为字符串或字符串数组")
+    out, seen = [], set()
+    for part in parts:
+        s = str(part or "").strip()
+        if not s:
+            continue
+        if len(s) > submod.MAX_KEYWORD_LEN:
+            raise HTTPException(400, f"别名「{s[:20]}…」超过 {submod.MAX_KEYWORD_LEN} 字符")
+        n = submod.normalize(s)
+        if n and n not in seen:
+            seen.add(n)
+            out.append(s)
+    if len(out) > submod.MAX_ALIASES:
+        raise HTTPException(400, f"别名最多 {submod.MAX_ALIASES} 个")
+    return out
+
+
+def _clean_tmdb_meta(body: dict, current_id=None, current_kind="") -> tuple[int | None, str]:
+    """校验 TMDB 元数据（仅做记录展示，不参与匹配）。"""
+    tmdb_id = current_id
+    if "tmdb_id" in body:
+        raw = body.get("tmdb_id")
+        if raw in (None, ""):
+            tmdb_id = None
+        else:
+            try:
+                tmdb_id = int(raw)
+            except (TypeError, ValueError):
+                raise HTTPException(400, "tmdb_id 必须为整数")
+            if tmdb_id <= 0:
+                raise HTTPException(400, "tmdb_id 必须为正整数")
+    kind = current_kind or ""
+    if "kind" in body:
+        kind = str(body.get("kind") or "").strip()
+        if kind not in ("", "tv", "movie"):
+            raise HTTPException(400, "kind 仅支持 tv / movie")
+    return tmdb_id, kind
+
+
+def _reset_progress_sql(sub_id: int):
+    db.execute(
+        "UPDATE subscriptions SET last_ep='', last_season=NULL, last_episode=NULL,"
+        " last_title='', last_match_at=NULL WHERE id=?", (sub_id,))
+
+
 @router.get("/subscriptions")
 def list_subscriptions(_=Depends(require_user)):
-    return {"items": [dict(r) for r in db.query("SELECT * FROM subscriptions ORDER BY id DESC")],
+    items = []
+    for r in db.query("SELECT * FROM subscriptions ORDER BY id DESC"):
+        row = dict(r)
+        row["aliases"] = submod.aliases_of(row)  # 统一返回数组，前端好比对/展示
+        items.append(row)
+    return {"items": items,
             "subscription_only": bool(db.get_setting("subscription_only", False))}
 
 
 @router.post("/subscriptions")
 def add_subscription(body: dict, _=Depends(require_user)):
-    kw = (body.get("keyword") or "").strip()
+    kw = str(body.get("keyword") or "").strip()
     if not kw:
         raise HTTPException(400, "关键词不能为空")
-    if len(kw) > 100:
-        raise HTTPException(400, "关键词最长 100 字符")
-    if db.query("SELECT 1 FROM subscriptions WHERE keyword=?", (kw,), one=True):
-        raise HTTPException(400, f"订阅「{kw}」已存在")
-    db.execute("INSERT INTO subscriptions(keyword,note,created_at) VALUES(?,?,?)",
-               (kw, (body.get("note") or "")[:200], time.time()))
-    logstream.info("subscribe", f"添加追剧订阅：{kw}")
+    if len(kw) > submod.MAX_KEYWORD_LEN:
+        raise HTTPException(400, f"关键词最长 {submod.MAX_KEYWORD_LEN} 字符")
+    aliases = _clean_aliases(body.get("aliases"))
+    conflict = submod.find_conflict(kw, aliases)
+    if conflict:
+        raise HTTPException(400, f"订阅「{kw}」与现有订阅「{conflict['keyword']}」重复")
+    tmdb_id, kind = _clean_tmdb_meta(body)
+    db.execute(
+        "INSERT INTO subscriptions(keyword,note,aliases,tmdb_id,kind,created_at)"
+        " VALUES(?,?,?,?,?,?)",
+        (kw, (body.get("note") or "")[:200],
+         json.dumps(aliases, ensure_ascii=False), tmdb_id, kind, time.time()))
+    logstream.info("subscribe", f"添加追剧订阅：{kw}（别名 {len(aliases)} 个）")
     return {"ok": True}
 
 
 @router.put("/subscriptions/{sub_id}")
 def update_subscription(sub_id: int, body: dict, _=Depends(require_user)):
-    sub = db.query("SELECT id FROM subscriptions WHERE id=?", (sub_id,), one=True)
+    sub = db.query("SELECT * FROM subscriptions WHERE id=?", (sub_id,), one=True)
     if not sub:
         raise HTTPException(404, "订阅不存在")
+    row = dict(sub)
     if "enabled" in body:
         db.execute("UPDATE subscriptions SET enabled=? WHERE id=?",
                    (1 if body["enabled"] else 0, sub_id))
+
+    new_kw = str(row.get("keyword") or "").strip()
+    kw_changed = False
     if "keyword" in body:
-        kw = (str(body["keyword"]) or "").strip()
+        kw = str(body["keyword"] or "").strip()
         if not kw:
             raise HTTPException(400, "关键词不能为空")
-        dup = db.query("SELECT id FROM subscriptions WHERE keyword=? AND id<>?", (kw, sub_id), one=True)
-        if dup:
-            raise HTTPException(400, f"订阅「{kw}」已存在")
-        db.execute("UPDATE subscriptions SET keyword=? WHERE id=?", (kw[:100], sub_id))
-    # 进度重置：清除追更记录，下次命中重新通知
-    if body.get("reset_progress"):
-        db.execute("UPDATE subscriptions SET last_ep='', last_title='', last_match_at=NULL WHERE id=?",
-                   (sub_id,))
+        if len(kw) > submod.MAX_KEYWORD_LEN:
+            raise HTTPException(400, f"关键词最长 {submod.MAX_KEYWORD_LEN} 字符")
+        kw_changed = kw != new_kw
+        new_kw = kw
+    new_aliases = submod.aliases_of(row)
+    aliases_changed = False
+    if "aliases" in body:
+        new_aliases = _clean_aliases(body.get("aliases"))
+        aliases_changed = new_aliases != submod.aliases_of(row)
+    if kw_changed or aliases_changed:
+        conflict = submod.find_conflict(new_kw, new_aliases, exclude_id=sub_id)
+        if conflict:
+            raise HTTPException(400, f"订阅「{new_kw}」与现有订阅「{conflict['keyword']}」重复")
+    if kw_changed:
+        db.execute("UPDATE subscriptions SET keyword=? WHERE id=?", (new_kw, sub_id))
+    if aliases_changed:
+        db.execute("UPDATE subscriptions SET aliases=? WHERE id=?",
+                   (json.dumps(new_aliases, ensure_ascii=False), sub_id))
+    tmdb_id, kind = _clean_tmdb_meta(body, row.get("tmdb_id"), row.get("kind") or "")
+    if "tmdb_id" in body:
+        db.execute("UPDATE subscriptions SET tmdb_id=? WHERE id=?", (tmdb_id, sub_id))
+    if "kind" in body:
+        db.execute("UPDATE subscriptions SET kind=? WHERE id=?", (kind, sub_id))
+    # 关键词变更后旧剧的进度不再适用；reset_progress 显式重置也可
+    if body.get("reset_progress") or kw_changed:
+        _reset_progress_sql(sub_id)
     return {"ok": True}
 
 
@@ -485,7 +623,8 @@ _TMDB_IMG_BASE = "https://image.tmdb.org/t/p"
 
 
 def _tmdb_lang() -> str:
-    return str(db.get_setting("tmdb_language", "zh-CN") or "zh-CN") or "zh-CN"
+    """TMDB 返回语言固定为简体中文（原先的 tmdb_language 设置无入口，已移除）。"""
+    return "zh-CN"
 
 
 def _tmdb_get(path: str, params: dict, timeout: float = 10):
@@ -521,10 +660,18 @@ def _tmdb_item(it: dict, kind: str) -> dict | None:
 
 
 # TV 详情（季列表）缓存：季播剧的最新季基本不变，进程内缓存即可（带 TTL 与容量上限）
-_TV_SEASON_CACHE: dict[int, tuple[float, tuple[int, str] | None]] = {}
+_TV_SEASON_CACHE: dict[tuple[str, int], tuple[float, tuple[int, str] | None]] = {}
 _TV_SEASON_LOCK = threading.Lock()  # 同步接口跑在线程池，缓存读写需互斥
-_TV_SEASON_TTL = 86400.0  # 24 小时
+_TV_SEASON_TTL = 86400.0       # 成功且有数据：24 小时
+_TV_SEASON_FAIL_TTL = 300.0    # 失败/无数据：5 分钟后重试，避免网络抖动被缓存一整天
 _TV_SEASON_MAX = 500
+
+# 分类浏览结果缓存：一次 discover 最多触发 3 个列表 + 数十个详情请求（N+1），
+# 首屏反复切换分类会拖慢页面并消耗 TMDB 配额；短缓存 5 分钟，只缓存成功结果。
+_DISCOVER_CACHE: dict[tuple, tuple[float, dict]] = {}
+_DISCOVER_LOCK = threading.Lock()
+_DISCOVER_TTL = 300.0
+_DISCOVER_MAX = 100
 
 
 def _latest_season_of(tv_id, api_key: str, lang: str) -> tuple[int, str] | None:
@@ -537,17 +684,20 @@ def _latest_season_of(tv_id, api_key: str, lang: str) -> tuple[int, str] | None:
         tv_id = int(tv_id)
     except (TypeError, ValueError):
         return None
+    key = (lang, tv_id)
     now = time.time()
     with _TV_SEASON_LOCK:
-        hit = _TV_SEASON_CACHE.get(tv_id)
+        hit = _TV_SEASON_CACHE.get(key)
         if hit and now < hit[0]:
             return hit[1]
         if len(_TV_SEASON_CACHE) > _TV_SEASON_MAX:
             _TV_SEASON_CACHE.clear()  # 简单兜底：条目超限时整体重来，避免无限增长
     best = None
+    ok = False
     try:
         resp = _tmdb_get(f"/tv/{tv_id}", {"api_key": api_key, "language": lang})
         if resp.status_code == 200:
+            ok = True
             for s in (resp.json().get("seasons") or []):
                 try:
                     sn = int(s.get("season_number") or 0)
@@ -556,10 +706,13 @@ def _latest_season_of(tv_id, api_key: str, lang: str) -> tuple[int, str] | None:
                 ad = str(s.get("air_date") or "").strip()
                 if sn >= 1 and ad and (best is None or sn > best[0]):
                     best = (sn, ad)
-    except Exception:
-        pass
+        else:
+            logstream.warn("system", f"TMDB /tv/{tv_id} 返回 {resp.status_code}")
+    except Exception as e:
+        logstream.warn("system", f"TMDB /tv/{tv_id} 请求失败: {logstream.exc(e)}")
     with _TV_SEASON_LOCK:
-        _TV_SEASON_CACHE[tv_id] = (time.time() + _TV_SEASON_TTL, best)
+        ttl = _TV_SEASON_TTL if (ok and best) else _TV_SEASON_FAIL_TTL
+        _TV_SEASON_CACHE[key] = (time.time() + ttl, best)
     return best
 
 
@@ -580,16 +733,20 @@ def _enrich_tv_latest_season(items: list[dict], api_key: str, lang: str) -> list
 
 
 @router.get("/tmdb/discover")
-def tmdb_discover(kind: str = "on_air", page: int = 1, _=Depends(require_user)):
+def tmdb_discover(kind: str = "on_air", page: int = 1, region: str = "",
+                  _=Depends(require_user)):
     """追剧选剧分类浏览：按「追剧日历」视角组织，电影与剧集各自对齐正确概念。
 
     kind:
       on_air  — 📺 正在播出：剧集=TMDB /tv/on_the_air（未来 7 天内有更新、在播）；
                 电影=/movie/now_playing（正在影院热映）——电影没有「播出」概念
       upcoming— 📅 即将上线：电影=/movie/upcoming（已定档待映）；
-                剧集=discover 首播在今天~未来 90 天内的新剧/新一季，按开播日期升序（日历感）
+                剧集=今天~未来 90 天内开播的新剧 + 最新一季定档的老剧（新一季），
+                统一按 enrich 后的实际播出日期升序，保证日历顺序与展示日期一致
       anime   — 🎌 动漫新番（动画类目 + 最近 45 天内开播/更新的剧）
       doc     — 🌍 纪录片（纪录片类目 + 最近 90 天内开播/更新的剧）
+
+    region: 可选两位地区码（如 CN/US），仅用于电影上映档期；不传则沿用 TMDB 默认。
     """
     import datetime
 
@@ -598,7 +755,25 @@ def tmdb_discover(kind: str = "on_air", page: int = 1, _=Depends(require_user)):
         raise HTTPException(400, "请先在「订阅追剧」页填写并保存 TMDB API Key")
     page = min(max(page, 1), 500)
     today = datetime.date.today()
+    today_s = today.isoformat()
+    hi_s = (today + datetime.timedelta(days=90)).isoformat()
     lang = _tmdb_lang()
+    region = str(region or "").strip().upper()
+    if region and not re.fullmatch(r"[A-Z]{2}", region):
+        raise HTTPException(400, "region 需为两位国家/地区代码，如 CN / US")
+
+    cache_key = (kind, page, region, lang, api_key)
+    now = time.time()
+    with _DISCOVER_LOCK:
+        hit = _DISCOVER_CACHE.get(cache_key)
+        if hit and now < hit[0]:
+            return hit[1]
+
+    movie_base = {"api_key": api_key, "language": lang, "page": page}
+    if region:
+        movie_base["region"] = region
+    tv_base = {"api_key": api_key, "language": lang, "page": page,
+               "include_adult": "false"}
 
     items: list[dict] = []
     total_pages = 1
@@ -618,45 +793,29 @@ def tmdb_discover(kind: str = "on_air", page: int = 1, _=Depends(require_user)):
         items.extend(x for x in (_tmdb_item(it, k)
                                  for it in (data.get("results") or [])) if x)
 
-    def _collect(path: str, params: dict, k: str) -> None:
-        nonlocal total_pages
-        try:
-            resp = _tmdb_get(path, params)
-        except Exception as e:
-            logstream.warn("system", f"TMDB {path} 请求失败: {logstream.exc(e)}")
-            return
-        if resp.status_code != 200:
-            logstream.warn("system", f"TMDB {path} 返回 {resp.status_code}: {str(resp.text)[:120]}")
-            return
-        data = resp.json()
-        total_pages = max(total_pages, min(int(data.get("total_pages") or 1), 500))
-        items.extend(x for x in (_tmdb_item(it, k)
-                                 for it in (data.get("results") or [])) if x)
-
     if kind == "on_air":
         # 剧集：在更剧；电影：正在热映（两个世界的同一档位，保证类型筛选双方都有数据）
-        _collect("/tv/on_the_air", {"api_key": api_key, "language": lang,
-                                    "page": page}, "tv")
-        _collect("/movie/now_playing", {"api_key": api_key, "language": lang,
-                                        "page": page}, "movie")
+        _collect("/tv/on_the_air", dict(tv_base), "tv")
+        _collect("/movie/now_playing", dict(movie_base), "movie")
     elif kind == "upcoming":
-        # 电影：已定档待映；剧集：已定档新剧/新一季（今天~90 天内开播）
-        _collect("/movie/upcoming", {"api_key": api_key, "language": lang,
-                                     "page": page}, "movie")
-        _collect("/discover/tv", {"api_key": api_key, "language": lang, "page": page,
-                                  "sort_by": "first_air_date.asc", "include_adult": "false",
-                                  "first_air_date.gte": today.isoformat(),
-                                  "first_air_date.lte": (today + datetime.timedelta(days=90)).isoformat()},
-                 "tv")
+        # 电影：已定档待映
+        _collect("/movie/upcoming", dict(movie_base), "movie")
+        # 剧集①：系列首播在今天~90 天内的全新剧
+        _collect("/discover/tv", {**tv_base, "sort_by": "first_air_date.asc",
+                                  "first_air_date.gte": today_s,
+                                  "first_air_date.lte": hi_s}, "tv")
+        # 剧集②：老剧新一季。TMDB 的 first_air_date 是系列首播日，用它能拿到
+        # 已播剧的最新一季日期；enrich 后再按「最新季播出日」过滤到 90 天窗口内
+        _collect("/discover/tv", {**tv_base, "sort_by": "popularity.desc",
+                                  "first_air_date.lte": today_s,
+                                  "vote_count.gte": "100"}, "tv")
     elif kind == "anime":
-        _collect("/discover/tv", {"api_key": api_key, "language": lang, "page": page,
-                                  "sort_by": "popularity.desc", "include_adult": "false",
+        _collect("/discover/tv", {**tv_base, "sort_by": "popularity.desc",
                                   "with_genres": "16",
                                   "air_date.gte": (today - datetime.timedelta(days=45)).isoformat()},
                  "tv")
     elif kind == "doc":
-        _collect("/discover/tv", {"api_key": api_key, "language": lang, "page": page,
-                                  "sort_by": "popularity.desc", "include_adult": "false",
+        _collect("/discover/tv", {**tv_base, "sort_by": "popularity.desc",
                                   "with_genres": "99",
                                   "air_date.gte": (today - datetime.timedelta(days=90)).isoformat()},
                  "tv")
@@ -664,15 +823,41 @@ def tmdb_discover(kind: str = "on_air", page: int = 1, _=Depends(require_user)):
         raise HTTPException(400, f"未知分类: {kind}")
     if not items:
         raise HTTPException(502, "TMDB 请求失败，请检查 API Key 或网络/代理设置")
+
+    # 先 enrich（可能改写 date），再排序：保证展示日期与排序依据一致
+    items = _enrich_tv_latest_season(items, api_key, lang)
     if kind == "upcoming":
-        # 即将上线按开播/上映日期升序：最接近今天的排最前，符合追剧日历视角
+        keep = []
+        for it in items:
+            d = str(it.get("date") or "")
+            if it.get("kind") == "movie":
+                if d >= today_s:
+                    keep.append(it)
+            elif today_s <= d <= hi_s:
+                keep.append(it)
+        items = keep
         items.sort(key=lambda x: x.get("date") or "9999-12-31")
     else:
         items.sort(key=lambda x: -x["popularity"])
-    # TV 条目改用最新季的播出时间 + 季号标签（季播剧首播日期没有参考意义）
-    items = _enrich_tv_latest_season(items, api_key, lang)
-    # 合并类目含电影+剧集两个来源，返回双份单页（各 20 条），保证类型筛选双方都有数据
-    return {"items": items[:40], "page": page, "total_pages": total_pages}
+
+    # 新剧/回归剧两个来源可能同时返回同一部剧，按 (kind, id) 去重
+    seen, uniq = set(), []
+    for it in items:
+        key = (it.get("kind"), it.get("id"))
+        if key in seen:
+            continue
+        seen.add(key)
+        uniq.append(it)
+    items = uniq
+    if not items:
+        raise HTTPException(502, "TMDB 暂未返回可展示的条目，请稍后重试或检查代理设置")
+    # 合并类目含电影+剧集两个来源，单页最多返回 40 条，保证类型筛选双方都有数据
+    result = {"items": items[:40], "page": page, "total_pages": total_pages}
+    with _DISCOVER_LOCK:
+        if len(_DISCOVER_CACHE) > _DISCOVER_MAX:
+            _DISCOVER_CACHE.clear()
+        _DISCOVER_CACHE[cache_key] = (time.time() + _DISCOVER_TTL, result)
+    return result
 
 
 @router.get("/tmdb/search")
@@ -684,37 +869,50 @@ def tmdb_search(query: str = "", kind: str = "all", page: int = 1, _=Depends(req
     query = query.strip()
     if len(query) < 2:
         raise HTTPException(400, "搜索词至少 2 个字符")
-    page = page if page >= 1 else 1
+    page = min(max(page, 1), 500)
+    lang = _tmdb_lang()
     kinds = ("tv", "movie") if kind not in ("tv", "movie") else (kind,)
     items = []
     for k in kinds:
         try:
             resp = _tmdb_get(f"/search/{k}", {"api_key": api_key, "query": query,
-                                              "language": _tmdb_lang(), "page": page})
+                                              "language": lang, "page": page})
             if resp.status_code != 200:
+                logstream.warn("system",
+                               f"TMDB /search/{k} 返回 {resp.status_code}: {str(resp.text)[:120]}")
                 continue
             items += [x for x in (_tmdb_item(it, k) for it in (resp.json().get("results") or [])) if x]
-        except Exception:
-            continue  # 网络异常时跳过该类型，另一个类型可能仍可用
+        except Exception as e:
+            # 单类型失败不阻断另一类型，但必须留痕，便于定位 API Key/代理问题
+            logstream.warn("system", f"TMDB /search/{k} 请求失败: {logstream.exc(e)}")
+            continue
+    seen, uniq = set(), []
+    for it in items:
+        key = (it.get("kind"), it.get("id"))
+        if key in seen:
+            continue
+        seen.add(key)
+        uniq.append(it)
+    items = uniq
     items.sort(key=lambda x: -x["popularity"])
     # TV 条目同样标注最新季（季号 + 最新季播出时间），与分类浏览口径一致
-    items = _enrich_tv_latest_season(items, api_key, _tmdb_lang())
+    items = _enrich_tv_latest_season(items, api_key, lang)
     return {"items": items[:24]}
 
 
 @router.get("/tmdb/poster")
-def tmdb_poster(path: str = "", token: str = "",
-                authorization: str = Header(default="")):
+def tmdb_poster(request: Request, path: str = "", authorization: str = Header(default="")):
     """后端代理 TMDB 海报图片（大陆无法直连 image.tmdb.org，走 TG 代理）。
 
-    浏览器 <img> 标签无法带 Authorization 头，因此额外允许 ?token= 鉴权。
+    浏览器 <img> 无法带 Authorization 头：登录时下发路径仅限本接口的 HttpOnly Cookie，
+    不再把长期登录 JWT 放进 URL（避免进入访问日志/浏览器历史/Referer）。
     """
     from fastapi.responses import Response
     user = ""
     if authorization.startswith("Bearer "):
         user = auth.check_token(authorization[7:]) or ""
-    if not user and token:
-        user = auth.check_token(token) or ""
+    if not user:
+        user = auth.check_token(request.cookies.get(POSTER_COOKIE, "")) or ""
     if not user:
         raise HTTPException(401, "登录已过期，请重新登录")
     if not re.match(r"^/[A-Za-z0-9._-]+(\.jpg|\.png|\.jpeg|\.webp)$", path):
@@ -730,9 +928,11 @@ def tmdb_poster(path: str = "", token: str = "",
         ct = (resp.headers.get("content-type") or "").lower()
         if resp.status_code != 200 or not ct.startswith("image/"):
             raise HTTPException(404, "海报获取失败")
+        if len(resp.content) > 6 * 1024 * 1024:
+            raise HTTPException(404, "海报体积过大")
         return Response(content=resp.content, media_type=resp.headers.get(
             "content-type", "image/jpeg"),
-            headers={"Cache-Control": "public, max-age=604800"})
+            headers={"Cache-Control": "private, max-age=604800"})
     except HTTPException:
         raise
     except Exception as e:
@@ -796,6 +996,7 @@ def save_rules(body: dict, _=Depends(require_user)):
         routes = body.get("routes") or []
         if not isinstance(routes, list):
             raise HTTPException(400, "routes 必须是数组")
+        cleaned_routes = []
         categories = set()
         for i, r in enumerate(routes):
             if not isinstance(r, dict):
@@ -808,15 +1009,12 @@ def save_rules(body: dict, _=Depends(require_user)):
             if not target:
                 raise HTTPException(400, f"分类「{category}」的分享转存目录不能为空（可填 skip）")
             categories.add(category)
-            db.execute(
-                "INSERT INTO routes(category,target_dir,offline_dir) VALUES(?,?,?)"
-                " ON CONFLICT(category) DO UPDATE SET target_dir=excluded.target_dir,"
-                " offline_dir=excluded.offline_dir",
-                (category, target, offline))
-        # 全量同步：删除本次未提交的分类映射
-        for row in db.query("SELECT category FROM routes"):
-            if row["category"] not in categories:
-                db.execute("DELETE FROM routes WHERE category=?", (row["category"],))
+            cleaned_routes.append((category, target, offline))
+        # 整批一个事务：先全部校验再统一落库，避免中途失败留下半套映射
+        with db.transaction() as con:
+            con.execute("DELETE FROM routes")
+            con.executemany("INSERT INTO routes(category,target_dir,offline_dir) VALUES(?,?,?)",
+                            cleaned_routes)
         saved_routes = len(categories)
 
     if "unclassified_action" in body:
@@ -1061,6 +1259,7 @@ _INT_SETTINGS = {
     "poll_interval_max": (15, 3600),
     "transfer_interval_min": (30, 1800),
     "transfer_interval_max": (30, 1800),
+    "running_timeout_min": (15, 720),
     # 115 单账号每日转存安全上限：1~50（0 不再表示「不限制」）
     "daily_limit": (1, 50),
     "tg_api_id": (0, 2 ** 31 - 1),
@@ -1142,7 +1341,8 @@ def _norm_setting(k: str, v):
 def get_settings(_=Depends(require_user)):
     keys = ["tg_mode", "enable_share_transfer", "enable_offline_download",
             "poll_interval_min", "poll_interval_max", "transfer_interval_min",
-            "transfer_interval_max", "daily_limit", "retry_backoff", "min_size_gb",
+            "transfer_interval_max", "running_timeout_min", "daily_limit",
+            "retry_backoff", "min_size_gb",
             "unclassified_action", "notify_token", "notify_chat_id",
             "notify_transfer_success", "proxy",
             "schedule_enabled", "schedule_start", "schedule_end",
@@ -1162,7 +1362,8 @@ def get_settings(_=Depends(require_user)):
                 "subscription_only": False, "dedup_by_name": True,
                 "organize_enabled": False, "share_update_enabled": True,
                 "digest_enabled": True, "digest_time": "21:00",
-                "auto_backup_enabled": False, "auto_backup_days": 7}
+                "auto_backup_enabled": False, "auto_backup_days": 7,
+                "running_timeout_min": 60}
     return {k: db.get_setting(k, defaults.get(k)) for k in keys}
 
 
@@ -1170,7 +1371,8 @@ def get_settings(_=Depends(require_user)):
 def put_settings(body: dict, _=Depends(require_user)):
     allowed = {"tg_mode", "enable_share_transfer", "enable_offline_download",
                "poll_interval_min", "poll_interval_max", "transfer_interval_min",
-               "transfer_interval_max", "daily_limit", "retry_backoff", "min_size_gb",
+               "transfer_interval_max", "running_timeout_min", "daily_limit",
+               "retry_backoff", "min_size_gb",
                "unclassified_action", "notify_token", "notify_chat_id",
                "notify_transfer_success", "proxy",
                "schedule_enabled", "schedule_start", "schedule_end",
@@ -1346,7 +1548,8 @@ def get_logs(date: str = "", level: str = "", module: str = "", search: str = ""
     if module:
         where.append("module=?"); params.append(module)
     if search:
-        where.append("message LIKE ?"); params.append(f"%{search}%")
+        where.append("message LIKE ? ESCAPE '\\'")
+        params.append(f"%{_like_escape(search.strip()[:100])}%")
     w = " AND ".join(where)
     total = db.query(f"SELECT count(*) c FROM logs WHERE {w}", tuple(params), one=True)["c"]
     rows = db.query(f"SELECT * FROM logs WHERE {w} ORDER BY id DESC LIMIT ? OFFSET ?",

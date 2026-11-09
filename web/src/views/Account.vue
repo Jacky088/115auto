@@ -64,7 +64,7 @@
         <div class="qr-box" v-html="qr.svg" @click="createQr"></div>
         <p v-if="qr.err" class="qr-err">❌ {{ qr.err }}</p>
         <p v-else-if="qr.scanned" style="color: #67c23a; margin: 4px">✅ 已扫描，请在手机上确认</p>
-        <p v-else style="color: #999; font-size: 12px">请用 115 App 扫码，点击二维码可刷新</p>
+        <p v-else style="color: #999; font-size: var(--fs-caption)">请用 115 App 扫码，点击二维码可刷新</p>
       </template>
       <el-button v-else type="primary" :loading="qr.loading" @click="createQr">生成二维码</el-button>
     </div>
@@ -190,12 +190,12 @@ onUnmounted(stopQrPoll)
 .account-grid :deep(.el-descriptions__label) { white-space: nowrap; }
 .qr-box { width: 200px; margin: 0 auto; cursor: pointer; background: #fff; padding: 8px; border-radius: 8px; }
 .qr-box :deep(svg) { width: 100%; height: auto; display: block; }
-.qr-err { color: #f56c6c; font-size: 13px; margin: 4px; }
+.qr-err { color: #f56c6c; font-size: var(--fs-body); margin: 4px; }
 .tg-test { margin-top: 12px; display: flex; flex-direction: column; gap: 6px; }
-.tg-ch { display: flex; align-items: center; gap: 6px; font-size: 13px; }
+.tg-ch { display: flex; align-items: center; gap: 6px; font-size: var(--fs-body); }
 .tg-ch .ok { color: #67c23a; }
 .tg-ch .bad { color: #f56c6c; }
 .tg-ch-name { font-weight: 600; }
 .tg-ch-sub { color: #909399; }
-.tg-ch-err { color: #f56c6c; font-size: 12px; }
+.tg-ch-err { color: #f56c6c; font-size: var(--fs-caption); }
 </style>

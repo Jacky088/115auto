@@ -8,7 +8,7 @@
           <el-button @click="addRoute">添加分类</el-button>
           <el-tag v-if="dirtyRoutes" type="danger" effect="plain" size="small">● 有未保存的更改</el-tag>
           <el-tooltip content="无法识别分类的资源：跳过，或输入任意目录统一存放（如 /待整理），输入后回车确认">
-            <span style="color:#999; font-size:12px; margin-left: auto">
+            <span style="color:#999; font-size:var(--fs-caption); margin-left: auto">
               未分类动作：
               <el-select v-model="unclassifiedAction" style="width: 170px" filterable allow-create
                          default-first-option @change="dirtyRoutes = true">
@@ -134,8 +134,8 @@ onMounted(load)
 </script>
 
 <style scoped>
-.tip-text { color: #e6a23c; font-size: 12px; }
-.page-tip { color: #909399; font-size: 12px; margin: 0 0 12px; }
+.tip-text { color: #e6a23c; font-size: var(--fs-caption); }
+.page-tip { color: #909399; font-size: var(--fs-caption); margin: 0 0 12px; }
 .dir-btn { width: 100%; justify-content: flex-start; font-weight: normal;
            height: auto; min-height: 32px; padding: 5px 12px; white-space: normal; }
 .dir-btn .el-icon { margin-right: 6px; color: #e6a23c; flex: none; align-self: flex-start; margin-top: 3px; }

@@ -7,15 +7,19 @@
       </div>
     </template>
 
-    <!-- 订阅关键词列表：命中频道消息即按关键词自动追剧；操作含向前补全/重置进度 -->
+    <!-- 订阅关键词列表：命中频道消息即按关键词自动追剧；操作含补全/重置（与转存记录、频道页按钮文案统一） -->
     <div class="sub-section">
       <div class="sub-title">
         📋 订阅关键词
         <span class="tip">命中频道消息后自动转存并追更；在下方 TMDB 海报墙点选「订阅」即可添加</span>
       </div>
       <el-table :data="items" empty-text="还没有订阅，可在下方浏览或搜索后点击「订阅」添加">
-        <el-table-column prop="keyword" label="关键词" min-width="150" show-overflow-tooltip>
-          <template #default="{ row }"><span class="mono">{{ row.keyword }}</span></template>
+        <el-table-column prop="keyword" label="关键词" min-width="170" show-overflow-tooltip>
+          <template #default="{ row }">
+            <span class="mono">{{ row.keyword }}</span>
+            <div v-if="row.aliases && row.aliases.length" class="sub-alias"
+                 :title="row.aliases.join('、')">别名：{{ row.aliases.join('、') }}</div>
+          </template>
         </el-table-column>
         <el-table-column prop="note" label="备注" min-width="120" show-overflow-tooltip>
           <template #default="{ row }">{{ row.note || '-' }}</template>
@@ -37,21 +41,28 @@
             <span v-else>-</span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="190">
+        <el-table-column label="操作" width="210">
           <template #default="{ row }">
             <div class="sub-actions">
-              <el-button type="primary" text @click="openBackfill(row)">向前补全</el-button>
+              <el-button type="primary" text @click="openBackfill(row)">补全</el-button>
               <el-popconfirm title="重置后将清除该订阅的追更进度记录，下次命中重新记录。确认重置？"
                              confirm-button-text="重置" cancel-button-text="取消" confirm-button-type="warning"
                              width="280" @confirm="resetProgress(row)">
-                <template #reference><el-button type="warning" text>重置进度</el-button></template>
-              </el-popconfirm>
-              <el-popconfirm title="删除后将不再按该关键词自动追剧。确认删除？"
-                             confirm-button-text="删除" cancel-button-text="取消" confirm-button-type="danger"
-                             width="260" @confirm="del(row)">
-                <template #reference><el-button type="danger" text>删除</el-button></template>
+                <template #reference><el-button type="warning" text>重置</el-button></template>
               </el-popconfirm>
             </div>
+          </template>
+        </el-table-column>
+        <!-- 删除单独一列：避免和「补全/重置」挤在一起被裁切 -->
+        <el-table-column label="删除" width="90" align="center" fixed="right">
+          <template #default="{ row }">
+            <el-popconfirm title="删除后将不再按该关键词自动追剧。确认删除？"
+                           confirm-button-text="删除" cancel-button-text="取消" confirm-button-type="danger"
+                           width="260" @confirm="del(row)">
+              <template #reference>
+                <el-button type="danger" size="small" plain>删除</el-button>
+              </template>
+            </el-popconfirm>
           </template>
         </el-table-column>
       </el-table>
@@ -144,8 +155,8 @@
               </div>
               <div v-if="it.overview" class="tmdb-overview" :title="it.overview">{{ it.overview }}</div>
               <el-button size="small" type="primary" class="tmdb-sub-btn"
-                         :disabled="isSubscribed(it.name)" @click="subFromTmdb(it)">
-                {{ isSubscribed(it.name) ? '已订阅' : '订阅' }}
+                         :disabled="isSubscribed(it)" @click="subFromTmdb(it)">
+                {{ isSubscribed(it) ? '已订阅' : '订阅' }}
               </el-button>
             </div>
           </div>
@@ -250,22 +261,36 @@ const switchCat = (key) => {
   loadBrowse(true)
 }
 
+// 请求序号：快速切换分类时丢弃过期响应，避免旧分类数据覆盖新分类
+let browseSeq = 0
+
 const loadBrowse = async (reset = true) => {
-  if (gridLoading.value) return
   const cat = CATS.find((c) => c.key === activeCat.value) || CATS[0]
   const page = reset ? 1 : browsePage.value + 1
+  const seq = ++browseSeq
   gridLoading.value = true
   try {
     const { data } = await api.get('/api/tmdb/discover',
       { params: { kind: cat.kind, page } })
-    browseItems.value = reset ? (data.items || []) : [...browseItems.value, ...(data.items || [])]
+    if (seq !== browseSeq) return // 已被更新的请求取代
+    // 追加分页时按 (kind,id) 去重：两页之间/多数据源合并都可能出现重复条目
+    const merged = reset ? (data.items || []) : [...browseItems.value, ...(data.items || [])]
+    const seen = new Set()
+    browseItems.value = merged.filter((it) => {
+      const key = `${it.kind}:${it.id}`
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
     browsePage.value = data.page || page
     browseTotalPages.value = data.total_pages || 1
   } catch (e) {
-    if (reset) browseItems.value = []
-    ElMessage.error(errMsg(e))
+    if (seq === browseSeq) {
+      if (reset) browseItems.value = []
+      ElMessage.error(errMsg(e))
+    }
   } finally {
-    gridLoading.value = false
+    if (seq === browseSeq) gridLoading.value = false
   }
 }
 
@@ -293,13 +318,20 @@ const exitSearch = () => {
 }
 
 const posterUrl = (path) => {
-  const token = encodeURIComponent(localStorage.getItem('token') || '')
-  return `/api/tmdb/poster?path=${encodeURIComponent(path)}&token=${token}`
+  // 鉴权走登录时下发的 HttpOnly Cookie（路径仅限本接口），不再把长期 token 拼进 URL
+  return `/api/tmdb/poster?path=${encodeURIComponent(path)}`
 }
 
-// 已订阅判定：订阅关键词与片名一致（两侧去空白、忽略大小写）
-const isSubscribed = (name) =>
-  items.value.some((r) => (r.keyword || '').trim().toLowerCase() === name.trim().toLowerCase())
+// 已订阅判定：关键词或别名与片名/原始名一致（去空白、忽略大小写）
+const normName = (s) => String(s || '').trim().toLowerCase()
+const isSubscribed = (it) => {
+  const names = [it.name, it.original].filter(Boolean).map(normName)
+  return items.value.some((r) => {
+    const terms = [r.keyword, ...(Array.isArray(r.aliases) ? r.aliases : [])]
+      .filter(Boolean).map(normName)
+    return terms.some((t) => names.includes(t))
+  })
+}
 
 const saveTmdbKey = async () => {
   const key = tmdbKeyInput.value.trim()
@@ -317,13 +349,19 @@ const saveTmdbKey = async () => {
 
 const subFromTmdb = async (it) => {
   try {
+    // 同时保存原始名作为别名：频道帖子常用原名，只存中文译名会漏命中
+    const aliases = []
+    if (it.original && it.original !== it.name) aliases.push(it.original)
     await api.post('/api/subscriptions', {
       keyword: it.name,
+      aliases,
+      tmdb_id: it.id,
+      kind: it.kind,
       note: `TMDB ${it.kind === 'tv' ? '电视剧' : '电影'}`
         + (it.season ? ` · 最新季 ${it.season}` : '')
         + (it.year ? ` · ${it.year}` : ''),
     })
-    ElMessage.success(`已添加订阅「${it.name}」${it.kind === 'tv' ? '，命中后会推送追更通知' : ''}`)
+    ElMessage.success(`已添加订阅「${it.name}」，命中后会记录追更进度并推送通知`)
     load()
   } catch (e) { ElMessage.error(errMsg(e)) }
 }
@@ -392,10 +430,12 @@ onMounted(load)
 </script>
 
 <style scoped>
-.tip { color: #999; font-size: 12px; font-weight: 400; }
+.tip { color: #999; font-size: var(--fs-caption); font-weight: 400; }
 .sub-actions { display: flex; align-items: center; flex-wrap: nowrap; gap: 6px; white-space: nowrap; }
-.sub-actions :deep(.el-button) { margin-left: 0 !important; }
-.hit-title { font-size: 12px; color: #999; margin-top: 2px; word-break: break-all; }
+/* flex:none 防止列宽不足时按钮被压扁导致文字溢出；内边距收窄以适应列宽 */
+.sub-actions :deep(.el-button) { margin-left: 0 !important; flex: none; padding: 6px 8px; }
+.hit-title { font-size: var(--fs-caption); color: #999; margin-top: 2px; word-break: break-all; }
+.sub-alias { font-size: var(--fs-caption); color: #999; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ---- TMDB 选剧 ---- */
 .sub-section { margin-bottom: 4px; }
@@ -406,11 +446,11 @@ onMounted(load)
 .tmdb-title .tip { font-weight: 400; }
 .title-search { margin-left: auto; width: 240px; }
 .k-chips { display: inline-flex; gap: 6px; margin-left: auto; }
-.k-chip { font-size: 12px; padding: 1px 10px; }
-.tmdb-empty { color: #999; font-size: 13px; padding: 12px 0 4px; }
+.k-chip { font-size: var(--fs-caption); padding: 1px 10px; }
+.tmdb-empty { color: #999; font-size: var(--fs-body); padding: 12px 0 4px; }
 .tmdb-cats { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
 .cat-chip {
-  padding: 5px 14px; border-radius: 16px; font-size: 13px; cursor: pointer; user-select: none;
+  padding: 5px 14px; border-radius: 16px; font-size: var(--fs-body); cursor: pointer; user-select: none;
   background: var(--saas-hover, #f4f7fe); color: var(--saas-text-main, #1f2d3d);
   border: 1px solid transparent; transition: all .15s;
 }
@@ -433,14 +473,14 @@ onMounted(load)
 .poster-img { width: 96px; height: 144px; border-radius: 8px; display: block; background: var(--saas-hover, #f4f7fe); }
 .poster-err, .poster-none {
   width: 96px; height: 144px; border-radius: 8px; display: flex; align-items: center; justify-content: center;
-  background: var(--saas-hover, #f4f7fe); color: #999; font-size: 12px; text-align: center; padding: 6px;
+  background: var(--saas-hover, #f4f7fe); color: #999; font-size: var(--fs-caption); text-align: center; padding: 6px;
 }
 .tmdb-info { flex: 1; min-width: 0; display: flex; flex-direction: column; }
-.tmdb-name { font-weight: 600; font-size: 14px; color: var(--saas-text-main, #1f2d3d); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tmdb-orig { font-size: 12px; color: #999; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tmdb-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 6px; font-size: 12px; color: var(--saas-text-sub, #666); }
+.tmdb-name { font-weight: 600; font-size: var(--fs-body); color: var(--saas-text-main, #1f2d3d); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tmdb-orig { font-size: var(--fs-caption); color: #999; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tmdb-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 6px; font-size: var(--fs-caption); color: var(--saas-text-sub, #666); }
 .tmdb-overview {
-  font-size: 12px; color: #8a97b3; line-height: 1.6; margin-top: 6px;
+  font-size: var(--fs-caption); color: #8a97b3; line-height: 1.6; margin-top: 6px;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
 }
 .tmdb-sub-btn { margin-top: auto; align-self: flex-start; }

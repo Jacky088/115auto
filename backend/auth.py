@@ -18,6 +18,7 @@ FAIL_WINDOW = 60.0    # 窗口长度（秒）
 _FAIL_MAX_IPS = 1000  # 防内存膨胀：跟踪的 IP 数上限
 
 _TOKEN_TTL = 7 * 86400          # JWT 有效期
+TOKEN_TTL = _TOKEN_TTL          # 对外公开（海报 Cookie 等需要对齐有效期）
 _RENEW_AFTER = _TOKEN_TTL // 2  # 剩余不足一半时滑动续期
 
 

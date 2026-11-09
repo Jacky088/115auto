@@ -15,8 +15,9 @@ from . import jobs
 
 _last_update_id = 0
 
-# /sub 搜索结果缓存：chat_id -> 候选列表（subpick 按钮回调时取回对应条目）
-_SUB_SEARCH_CACHE: dict[str, list] = {}
+# /sub 搜索结果缓存：chat_id -> (缓存时间, 候选列表)（subpick 按钮回调时取回对应条目）
+_SUB_SEARCH_CACHE: dict[str, tuple[float, list]] = {}
+_SUB_SEARCH_TTL = 1800  # 30 分钟：旧消息里的按钮过期后不再订阅到别的片
 _SUB_NUMS = ["①", "②", "③", "④", "⑤", "⑥"]
 
 # 备份文件恢复待确认区：chat_id -> (payload, 缓存时间)。
@@ -377,7 +378,8 @@ async def add_channel_flow(raw: str) -> str:
         return "频道名过长（最多 64 字符）"
     if not _re.fullmatch(r"[0-9A-Za-z_]{1,64}", name):
         return "频道名仅支持字母、数字与下划线（1-64 位）"
-    if db.query("SELECT 1 FROM channels WHERE type='polling' AND name=?", (name,), one=True):
+    if db.query("SELECT 1 FROM channels WHERE name=?", (name,), one=True):
+        # 不限制 type：同一频道若已有 userbot 记录，再加 polling 会导致消息被两条链路重复处理
         return f"频道 @{name} 已存在。订阅模式可在网页「频道管理」按频道开关"
     n = db.query("SELECT count(*) c FROM channels", one=True)["c"]
     if n >= 50:
@@ -405,10 +407,16 @@ def _handle_sub(args: list[str]) -> str:
         kw = " ".join(args[1:]).strip()
         if not kw:
             return "用法：/sub del <关键词>"
-        n = db.execute("DELETE FROM subscriptions WHERE keyword=?", (kw,))
-        if n:
-            logstream.info("subscribe", f"已通过 TG 指令删除订阅: {kw}")
-            return f"🗑 已删除订阅「{kw}」"
+        # 与网页一致的归一化口径：大小写/空格/标点差异也能删到；关键词或别名均可
+        target = _sub.normalize(kw)
+        matched = [dict(r) for r in db.query("SELECT * FROM subscriptions")
+                   if target and target in {_sub.normalize(t) for t in _sub.terms_of(dict(r))}]
+        for row in matched:
+            db.execute("DELETE FROM subscriptions WHERE id=?", (row["id"],))
+        if matched:
+            names = "、".join(f"「{r['keyword']}」" for r in matched[:3])
+            logstream.info("subscribe", f"已通过 TG 指令删除订阅: {names}")
+            return f"🗑 已删除订阅{names}"
         return f"未找到订阅「{kw}」"
     if args:
         return "添加订阅请发送 /sub <片名>，我会搜索 TMDB 返回海报供你点选订阅"
@@ -436,18 +444,32 @@ async def _bot_send_text(client: "httpx.AsyncClient", token: str, chat_id: str,
         pass
 
 
-def _sub_add(name: str, note: str) -> str:
-    """添加订阅（去重），返回给用户的回复文案。"""
+def _sub_add(name: str, note: str, aliases: list | None = None,
+             tmdb_id: int | None = None, kind: str = "") -> str:
+    """添加订阅（归一化去重），返回给用户的回复文案。
+
+    别名（如 TMDB 原始名）会一并保存，频道帖子用任一名称都能命中。
+    """
     from ..core import subscribe as _sub
-    exists = db.query("SELECT 1 FROM subscriptions WHERE keyword=?", (name,), one=True)
-    if exists:
-        return f"订阅「{name}」已存在"
-    db.execute("INSERT INTO subscriptions(keyword,note,created_at) VALUES(?,?,?)",
-               (name, note, time.time()))
-    logstream.info("subscribe", f"已通过 TG Bot 搜索订阅: {name}（{note}）")
-    return (f"✅ 已订阅「{name}」" +
-            ("，订阅模式下仅转存命中该关键词的内容" if _sub.subscription_only() else
-             "，命中后会推送追更通知"))
+    name = str(name or "").strip()
+    if not name:
+        return "片名不能为空"
+    if len(name) > _sub.MAX_KEYWORD_LEN:
+        return f"片名过长（最多 {_sub.MAX_KEYWORD_LEN} 字符）"
+    al = [a for a in (str(x or "").strip() for x in (aliases or []))
+          if a and len(a) <= _sub.MAX_KEYWORD_LEN][:_sub.MAX_ALIASES]
+    conflict = _sub.find_conflict(name, al)
+    if conflict:
+        return f"订阅「{name}」已存在（与「{conflict['keyword']}」重复）"
+    db.execute(
+        "INSERT INTO subscriptions(keyword,note,aliases,tmdb_id,kind,created_at)"
+        " VALUES(?,?,?,?,?,?)",
+        (name, note, json.dumps(al, ensure_ascii=False), tmdb_id,
+         kind if kind in ("tv", "movie") else "", time.time()))
+    logstream.info("subscribe", f"已通过 TG Bot 搜索订阅: {name}（{note}，别名 {len(al)} 个）")
+    return (f"✅ 已订阅「{name}」\n"
+            "命中该剧的频道消息后会记录追更进度并推送通知；"
+            "是否仅转存命中内容由「频道管理」的仅订阅开关决定")
 
 
 async def sub_search_flow(client: "httpx.AsyncClient", token: str,
@@ -467,7 +489,10 @@ async def sub_search_flow(client: "httpx.AsyncClient", token: str,
             if resp.status_code == 200:
                 cands += [x for x in (_tmdb_item(it, k)
                                       for it in (resp.json().get("results") or [])) if x]
-        except Exception:
+            else:
+                logstream.warn("system", f"TG /sub 搜索 /search/{k} 返回 {resp.status_code}")
+        except Exception as e:
+            logstream.warn("system", f"TG /sub 搜索 /search/{k} 失败: {logstream.exc(e)}")
             continue
     cands.sort(key=lambda x: -x["popularity"])
     cands = [c for c in cands if c["poster_path"]][:6]
@@ -497,7 +522,7 @@ async def sub_search_flow(client: "httpx.AsyncClient", token: str,
     if not kept:
         await _bot_send_text(client, token, chat_id, "海报获取失败，请检查网络/代理设置后重试")
         return
-    _SUB_SEARCH_CACHE[str(chat_id)] = kept
+    _SUB_SEARCH_CACHE[str(chat_id)] = (time.time(), kept)
 
     try:  # 相册消息：一次发齐全部海报
         await client.post(
@@ -615,9 +640,13 @@ async def _handle_subpick(client: "httpx.AsyncClient", token: str,
                           chat_id: str, data: str) -> None:
     """处理 subpick 按钮回调：完成订阅/取消，回复新消息（不动搜索结果）。"""
     idx = data.split(":", 1)[1].strip() if ":" in data else "x"
-    cands = _SUB_SEARCH_CACHE.get(str(chat_id), [])
+    entry = _SUB_SEARCH_CACHE.get(str(chat_id))
+    if not entry or time.time() - entry[0] > _SUB_SEARCH_TTL:
+        cands = []  # 过期按钮不再指向新的缓存，避免订错片
+    else:
+        cands = entry[1]
     if idx == "x" or not cands:
-        reply = "已取消"
+        reply = "已取消，或搜索选项已过期，请重新发送 /sub <片名>"
     else:
         try:
             it = cands[int(idx)]
@@ -626,7 +655,11 @@ async def _handle_subpick(client: "httpx.AsyncClient", token: str,
         else:
             note = f"TMDB {'电视剧' if it['kind'] == 'tv' else '电影'}" + \
                    (f" · {it['year']}" if it["year"] else "")
-            reply = _sub_add(it["name"], note)
+            aliases = []
+            if it.get("original") and it["original"] != it["name"]:
+                aliases.append(it["original"])
+            reply = _sub_add(it["name"], note, aliases=aliases,
+                             tmdb_id=it.get("id"), kind=it.get("kind") or "")
     await _bot_send_text(client, token, chat_id, reply)
 
 

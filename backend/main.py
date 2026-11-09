@@ -78,7 +78,57 @@ async def lifespan(app: FastAPI):
         pass
 
 
-app = FastAPI(title="115 自动转存助手", lifespan=lifespan)
+app = FastAPI(title="115 自动转存助手", lifespan=lifespan,
+              docs_url=None, redoc_url=None, openapi_url=None)
+
+
+class _BodyTooLarge(BaseException):
+    """请求体超过上限（在读取阶段触发，避免 chunked 绕过 Content-Length 检查）。
+
+    继承 BaseException 而非 Exception：FastAPI 解析请求体时会把 Exception 统一包成
+    400（There was an error parsing the body），从而吞掉本信号；BaseException 不会被
+    其 `except Exception` 捕获，可稳定返回 413。
+    """
+
+
+class _BodyLimitMiddleware:
+    """按实际读取字节数限制请求体，防止无 Content-Length 的 chunked 请求打爆内存。"""
+
+    def __init__(self, app, limit: int = _MAX_BODY_BYTES,
+                 exempt_prefixes: tuple = _MAX_BODY_EXEMPT_PREFIXES,
+                 exempt_limit: int = _MAX_BODY_EXEMPT):
+        self.app = app
+        self.limit = limit
+        self.exempt_prefixes = exempt_prefixes
+        self.exempt_limit = exempt_limit
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        path = scope.get("path", "")
+        limit = self.exempt_limit if path.startswith(self.exempt_prefixes) else self.limit
+        received = 0
+
+        async def limited_receive():
+            nonlocal received
+            message = await receive()
+            if message.get("type") == "http.request":
+                received += len(message.get("body") or b"")
+                if received > limit:
+                    raise _BodyTooLarge()
+            return message
+
+        try:
+            await self.app(scope, limited_receive, send)
+        except _BodyTooLarge:
+            try:
+                response = JSONResponse({"detail": "请求体过大"}, status_code=413)
+                await response(scope, receive, send)
+            except RuntimeError:
+                pass  # 响应已开始发送，无法再改写状态码，直接结束
+
+
+app.add_middleware(_BodyLimitMiddleware)
 
 
 @app.middleware("http")
@@ -95,6 +145,14 @@ async def security_headers(request, call_next):
     resp.headers.setdefault("X-Content-Type-Options", "nosniff")
     resp.headers.setdefault("X-Frame-Options", "DENY")
     resp.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    # CSP：脚本只允许同源打包产物；Element Plus 依赖内联样式，样式保留 unsafe-inline。
+    # 不启用 unsafe-eval（Vue 为构建期编译），兼顾 XSS 缓解与页面正常渲染。
+    resp.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data: blob:; font-src 'self' data:; "
+        "connect-src 'self' ws: wss:; object-src 'none'; base-uri 'self'; "
+        "frame-ancestors 'none'")
     return resp
 
 

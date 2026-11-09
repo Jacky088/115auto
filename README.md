@@ -46,12 +46,12 @@ cat data/initial_password.txt                            # 直接读取（登录
 > **海外 VPS 提示**：115 对登录接口有 IP 风控，海外/机房 IP 扫码后可能提示「老乡验证失败 / IP 登录异常」。
 > 可在本地电脑浏览器登录 115.com，按页面指引复制 Cookie，用「账号管理 → 手动导入 Cookie」完成登录。
 
-浏览器打开 `http://服务器IP:38080`，账号 `admin`，密码为你设置的 `WEB_PASSWORD`（未设置则为自动生成的随机密码）。
+打开 `http://服务器IP:38080`（本机可 `http://127.0.0.1:38080`）访问，账号 `admin`，密码为你设置的 `WEB_PASSWORD`（未设置则为自动生成的随机密码）。
 
-> 面板可直接操控 115 账号。端口默认监听全部网卡（`0.0.0.0:38080`），NAS 局域网内直接访问；
-> 登录层已有密码限速 + JWT 保护。若希望只在服务器本机访问（更安全），把 docker-compose.yml
-> 端口改为 `127.0.0.1:38080:8000`，远程用 `ssh -L 38080:127.0.0.1:38080 服务器` 建隧道，
-> 或加一层 Caddy 自动 HTTPS 反代：
+> 面板可直接操控 115 账号，端口默认监听所有网卡（`0.0.0.0:38080`），局域网/公网可直接访问。
+> 请务必设置强 `WEB_PASSWORD`；若只想本机访问（通过反向代理或 SSH 隧道），在同目录 `.env`
+> 写入 `PAN_BIND_IP=127.0.0.1`。建议公网场景加一层 Caddy 自动 HTTPS 反代；反代场景请同时
+> 设置 `TRUSTED_PROXIES=代理IP/网段`，否则登录限速按直连代理 IP 计算：
 
 ```
 pan.example.com {
@@ -110,7 +110,8 @@ FastAPI + SQLite + Telethon + [p115client](https://github.com/ChenyangGao/web-mo
 python -m venv .venv
 .venv/Scripts/pip install -r backend/requirements.txt   # Windows
 .venv/bin/pip install -r backend/requirements.txt       # Linux/Mac
-# 可复现安装（依赖版本锁定）：pip install -r backend/requirements.lock.txt
+# 可复现安装（依赖版本锁定）：pip install -r backend/requirements.lock
+# 需要跑测试的完整开发环境（含 pytest 等）：pip install -r backend/requirements.lock.txt
 .venv/Scripts/python -m uvicorn backend.main:app --port 8000 --reload
 
 # 前端（另开终端，/api 自动代理到 8000）

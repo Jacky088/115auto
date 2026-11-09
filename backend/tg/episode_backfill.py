@@ -1,8 +1,9 @@
 """追剧向前补全：周播剧从中间集数开始追时（如首看即 E03），自动向前翻找
 频道历史里同一剧集的早期分集（E01、E02）并补转存。
 
-触发：某集转存成功且解析出集数 > 1 → submit_backfill() 入队 → episode_backfill_loop()
-向前翻页 https://t.me/s/<频道>?before=<消息ID>，匹配「同剧且集数更早」的帖子，
+触发：用户显式发起（网页 /api/backfill/episodes 或 Bot /backfill）→ submit_backfill()
+入队 → episode_backfill_loop() 向前翻页 https://t.me/s/<频道>?before=<消息ID>，
+匹配「同剧且集数更早」的帖子，
 正文经 resolver 解析链接后交给 pipeline.process_message（复用黑名单/分类/判重/限额），
 任务带增量标记（increment=1）：已存过的集数自动跳过，不会重复转存。
 
@@ -19,7 +20,7 @@ import re
 import httpx
 
 from .. import database as db
-from ..core import classifier, logstream, pipeline
+from ..core import classifier, episode, logstream, pipeline
 from ..worker import jobs
 from . import polling, resolver
 
@@ -49,29 +50,17 @@ def _persist_done(req: dict) -> None:
     except Exception:
         pass
 
-_EP_SEASON = re.compile(r"[Ss](\d{1,2})\s?[Ee](\d{1,3})")
-_EP_ABS = re.compile(r"[Ee][Pp]\s?(\d{1,3})")
-_EP_CN = re.compile(r"第\s?(\d{1,3})\s?[集话話]")
-_EP_PERIOD = re.compile(r"第\s?(\d{1,3})\s?期")
 _YEAR_PAREN = re.compile(r"[（(]\s*\d{4}\s*[）)]\s*")
 
 
 def parse_episode(title: str) -> tuple[int | None, int | None]:
-    """从标题解析 (季, 集)。识别不出返回 (None, None)。"""
-    t = title or ""
-    m = _EP_SEASON.search(t)
-    if m:
-        return int(m.group(1)), int(m.group(2))
-    m = _EP_ABS.search(t)
-    if m:
-        return None, int(m.group(1))
-    m = _EP_CN.search(t)
-    if m:
-        return None, int(m.group(1))
-    m = _EP_PERIOD.search(t)
-    if m:
-        return None, int(m.group(1))
-    return None, None
+    """从标题解析 (季, 集)。识别不出返回 (None, None)。
+
+    与转存通知/订阅追更共用 backend/core/episode.py 的解析口径，
+    支持 S01E05、EP12、第5集、5集、第3期 等写法。
+    """
+    season, ep, _kind = episode.parse(title)
+    return season, ep
 
 
 def base_title(title: str) -> str:
@@ -80,11 +69,7 @@ def base_title(title: str) -> str:
     用于跨帖匹配同一剧集：同剧不同集的标题去掉集数标记与 (年份) 后应完全一致。
     年份括号是标题中最常见的不稳定因素（有的帖子带有的不带），剥掉后匹配更可靠。
     """
-    t = title or ""
-    t = _EP_SEASON.sub("", t)
-    t = _EP_ABS.sub("", t)
-    t = _EP_CN.sub("", t)
-    t = _EP_PERIOD.sub("", t)
+    t = episode.strip_markers(title or "")
     t = _YEAR_PAREN.sub("", t)
     t = t.strip(" 　-—_|·：:，,。.")
     return re.sub(r"\s+", "", t)

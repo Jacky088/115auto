@@ -5,9 +5,8 @@ services:
     # image: yourname/autosave115:latest   # 推到镜像仓库后可改用镜像名
     container_name: autosave115
     ports:
-      # 默认监听全部网卡：NAS / 服务器 IP 直接访问（手机、其他设备均可连）。
-      # 更安全的部署：在 compose 同目录建 .env 文件写入 PAN_BIND_IP=127.0.0.1，
-      # 或直接把下面一行改成 "127.0.0.1:38080:8000"，远程访问走 SSH 隧道或反向代理（见 README）。
+      # 默认监听所有网卡，局域网/公网可直接用 http://服务器IP:38080 访问。
+      # 只想本机访问（需反代或 SSH 隧道）时，在同目录 .env 写入 PAN_BIND_IP=127.0.0.1。
       - "${PAN_BIND_IP:-0.0.0.0}:38080:8000"
     volumes:
       - ./data:/app/data          # 数据库 / Cookie / TG session / 日志，备份=复制此目录
@@ -18,6 +17,16 @@ services:
       # data/initial_password.txt 获取，登录后尽快在右上角修改（改密后该文件自动删除）。
       # 也可直接填强密码。
       - WEB_PASSWORD=
+      # 反向代理地址（逗号分隔 IP/CIDR）：仅这些来源的 X-Forwarded-For 会被信任，
+      # 未配置时一律使用直连 IP，防止伪造 XFF 绕过登录限速。
+      - TRUSTED_PROXIES=${TRUSTED_PROXIES:-}
+    # 小内存 NAS 可取消注释限制内存，并配合下方日志轮转防止磁盘写满
+    # mem_limit: 1g
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     healthcheck:
       # python:3.12-slim 没有 curl/wget，用标准库探活
       test: ["CMD", "python", "-c",

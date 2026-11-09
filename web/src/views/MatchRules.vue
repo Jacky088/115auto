@@ -89,7 +89,7 @@
       <template #header>
         <div class="toolbar" style="margin-bottom: 0">
           <span>黑名单</span>
-          <span style="color:#999; font-size:12px">命中规则的资源在转存前被拦截，可复核放行</span>
+          <span style="color:#999; font-size:var(--fs-caption)">命中规则的资源在转存前被拦截，可复核放行</span>
         </div>
       </template>
       <el-tabs v-model="blTab" @tab-change="loadBlacklist">
@@ -113,12 +113,12 @@
           </el-popconfirm>
           <el-button v-if="blTab === 'file_pattern'" @click="regexHelpVisible = true">正则说明</el-button>
         </div>
-        <p style="color:#999; font-size:12px; margin-top: 0">
+        <p style="color:#999; font-size:var(--fs-caption); margin-top: 0">
           {{ blHint }}
         </p>
         <el-table :data="blItems" size="small" empty-text="暂无条目">
           <el-table-column prop="value" label="内容" min-width="300" show-overflow-tooltip>
-            <template #default="{ row }"><span class="mono" style="font-size:12px">{{ row.value }}</span></template>
+            <template #default="{ row }"><span class="mono">{{ row.value }}</span></template>
           </el-table-column>
           <el-table-column prop="created_at" label="添加时间" width="160">
             <template #default="{ row }">{{ fmtTime(row.created_at) }}</template>
@@ -136,7 +136,7 @@
       </template>
 
       <template v-else>
-        <p style="color:#999; font-size:12px; margin-top: 0; margin-bottom: 10px">
+        <p style="color:#999; font-size:var(--fs-caption); margin-top: 0; margin-bottom: 10px">
           被黑名单拦截的消息记录。点击内容可查看完整消息（分享链接已高亮）；若确认为误拦，可点击「放行」重新处理。
         </p>
         <el-table :data="blHits" size="small" empty-text="暂无拦截记录" v-loading="blHitsLoading">
@@ -161,14 +161,16 @@
               </span>
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="130" fixed="right">
+          <el-table-column label="操作" width="150" fixed="right">
             <template #default="{ row }">
-              <el-button text type="primary" @click="openDetail(row)">详情</el-button>
-              <el-popconfirm title="确认放行？将忽略黑名单重新处理该消息。" confirm-button-text="放行"
-                             cancel-button-text="取消" confirm-button-type="primary" width="240"
-                             @confirm="releaseHit(row)">
-                <template #reference><el-button type="primary" text>放行</el-button></template>
-              </el-popconfirm>
+              <div class="hit-actions">
+                <el-button text type="primary" @click="openDetail(row)">详情</el-button>
+                <el-popconfirm title="确认放行？将忽略黑名单重新处理该消息。" confirm-button-text="放行"
+                               cancel-button-text="取消" confirm-button-type="primary" width="240"
+                               @confirm="releaseHit(row)">
+                  <template #reference><el-button type="primary" text>放行</el-button></template>
+                </el-popconfirm>
+              </div>
             </template>
           </el-table-column>
         </el-table>
@@ -195,7 +197,7 @@
         <el-table :data="builtinRules" size="small" border>
           <el-table-column prop="category" label="分类" width="80" />
           <el-table-column label="匹配特征" min-width="200">
-            <template #default="{ row }"><span class="mono" style="font-size:12px">{{ row.desc }}</span></template>
+            <template #default="{ row }"><span class="mono" style="font-size:var(--fs-caption)">{{ row.desc }}</span></template>
           </el-table-column>
           <el-table-column label="标题示例" min-width="180">
             <template #default="{ row }">{{ row.example }}</template>
@@ -503,13 +505,16 @@ onMounted(() => { loadRules(); loadBlacklist() })
 </script>
 
 <style scoped>
-.tip-text { color: #e6a23c; font-size: 12px; }
-.hit-summary { cursor: pointer; color: #3a4661; font-size: 12px; }
+.tip-text { color: #e6a23c; font-size: var(--fs-caption); }
+/* 命中记录操作列：详情 / 放行 左右排列，不换行 */
+.hit-actions { display: flex; align-items: center; gap: 2px; white-space: nowrap; }
+.hit-actions :deep(.el-button) { margin-left: 0; padding: 4px 8px; }
+.hit-summary { cursor: pointer; color: #3a4661; font-size: var(--fs-caption); }
 .hit-summary:hover { color: var(--el-color-primary); text-decoration: underline; }
 .detail-content {
   margin-top: 14px; padding: 12px 14px; border-radius: 10px;
   background: #f6f9ff; border: 1px solid #e9eefb;
-  font-size: 13px; line-height: 1.9; color: #3a4661;
+  font-size: var(--fs-body); line-height: 1.9; color: #3a4661;
   white-space: pre-wrap; word-break: break-word;
   max-height: 42vh; overflow-y: auto;
 }

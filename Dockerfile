@@ -10,8 +10,9 @@ RUN useradd --uid 1000 --create-home app \
     && mkdir -p /app/data \
     && chown -R app:app /app
 
-COPY backend/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# 依赖锁定：requirements.txt 只记录直接依赖，Docker 用 .lock 保证重建结果可复现
+COPY backend/requirements.lock .
+RUN pip install --no-cache-dir -r requirements.lock
 
 COPY --chown=app:app backend/ ./backend/
 COPY --chown=app:app docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh

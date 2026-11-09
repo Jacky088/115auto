@@ -165,7 +165,7 @@ onMounted(async () => {
 </script>
 
 <style scoped>
-.tip { color: #999; font-size: 12px; font-weight: 400; }
+.tip { color: #999; font-size: var(--fs-caption); font-weight: 400; }
 .day-chips { display: flex; gap: 10px; flex-wrap: wrap; }
 .day-chip {
   flex: 1; min-width: 150px; padding: 12px 16px; border-radius: 10px; cursor: pointer;
@@ -177,17 +177,17 @@ onMounted(async () => {
   background: var(--el-color-primary-light-9);
   box-shadow: 0 2px 10px rgba(47, 107, 255, .12);
 }
-.d-name { font-weight: 600; font-size: 14px; color: var(--saas-text-main);
+.d-name { font-weight: 600; font-size: var(--fs-body); color: var(--saas-text-main);
           display: flex; align-items: center; gap: 8px; }
 .d-badge {
-  font-size: 11px; font-weight: 600; padding: 1px 8px; border-radius: 9px;
+  font-size: var(--fs-caption); font-weight: 600; padding: 1px 8px; border-radius: 9px;
 }
 .d-badge.err { background: #fee2e2; color: #dc2626; }
 .d-badge.warn { background: #fef3c7; color: #d97706; }
 .d-badge.okdot { width: 8px; height: 8px; border-radius: 50%; background: #d1e0ff; padding: 0; }
-.d-sub { display: flex; gap: 10px; margin-top: 5px; font-size: 12px; align-items: center; }
+.d-sub { display: flex; gap: 10px; margin-top: 5px; font-size: var(--fs-caption); align-items: center; }
 .d-count { color: var(--saas-text-sub); }
 .d-warn-text { color: #d97706; font-weight: 500; }
 .d-err-text { color: #dc2626; font-weight: 500; }
-.msg-text { font-size: 12px; word-break: break-all; white-space: normal; line-height: 1.6; }
+.msg-text { font-size: var(--fs-caption); word-break: break-all; white-space: normal; line-height: 1.6; }
 </style>

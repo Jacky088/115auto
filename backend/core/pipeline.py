@@ -87,10 +87,10 @@ def process_message(channel: str, message_id: int, text: str,
     # 4.5 订阅追剧：命中订阅 → 记录进度；该频道开了「仅订阅」→ 未命中的消息不转存
     # 判断优先级：频道自己的 sub_only 开关 > 全局 subscription_only 设置（频道不存在时兜底）
     # 向前补全帖（anchor）不受订阅过滤拦截——用户显式要求补全该剧，跳过与意图冲突
-    sub = subscribe.match(f"{display_title}\n{text or ''}")
+    sub_hits = subscribe.match_all(f"{display_title}\n{text or ''}")
     ch_row = db.query("SELECT sub_only FROM channels WHERE name=?", (channel,), one=True)
     sub_only = bool(ch_row["sub_only"]) if ch_row else subscribe.subscription_only()
-    if sub_only and sub is None and anchor is None:
+    if sub_only and not sub_hits and anchor is None:
         key = f"_sub_skip_logged_{channel}"
         if not _runtime_flags.get(key):
             _runtime_flags[key] = True
@@ -193,9 +193,11 @@ def process_message(channel: str, message_id: int, text: str,
             reason = "未分类，且动作设为「跳过」" if not cat_i else f"「{cat_i}」的目录设为「跳过」"
             logstream.info("pipeline", f"[{channel}] 跳过 {code}（{reason}）")
 
-    # 4.7 订阅进度：命中订阅且本次有真实处理（入队/重复记录）→ 记录追更进度并按需通知
-    if sub and (result["queued"] or result["duplicates"]):
-        _record_sub_progress(sub, display_title, text or "", channel)
+    # 4.7 订阅进度：命中即更新「最近命中」；只有本次真实处理（入队/重复记录）才推进
+    # 追更进度并推送通知，避免被跳过的内容把进度推到前面导致后续漏报
+    if sub_hits:
+        _record_sub_progress(sub_hits, display_title, text or "", channel,
+                             processed=bool(result["queued"] or result["duplicates"]))
 
     # 统计口径：仅计入真实处理过的消息（入队或含链接的跳过），重复消息不重复计数
     if result["queued"] or result["links"]:
@@ -203,19 +205,43 @@ def process_message(channel: str, message_id: int, text: str,
     return result
 
 
-def _record_sub_progress(sub: dict, title: str, text: str, channel: str):
-    """记录订阅追更进度；出现新的一集时推送「追剧更新」通知。"""
-    try:
-        from ..worker import jobs as _jobs
-        ep = _jobs.extract_episode(title) or _jobs.extract_episode(text[:200])
-        if subscribe.record_progress(sub, title, ep):
-            lines = ["🎬 追剧更新", "",
-                     "📺 " + (title or sub.get("keyword", ""))[:80]]
-            if ep:
-                lines.append("🎞 已更新到：" + ep)
-            lines.append("📡 来源：@" + channel.lstrip("@"))
+def _record_sub_progress(subs: list[dict], title: str, text: str,
+                         channel: str, processed: bool):
+    """记录订阅追更进度；出现新的一集时推送一条「追剧更新」通知。
+
+    一条消息可命中多个订阅（关键词/别名重叠），逐个记录进度，但只推送一次通知，
+    避免同一集重复刷屏。进度记录失败只记警告，不影响转存主流程。
+    """
+    from ..core import episode
+    season, ep, kind = episode.parse(title)
+    if ep is None:
+        season, ep, kind = episode.parse(text[:200])
+    display = episode.canonical(season, ep, kind)
+    new_subs = []
+    for sub in subs:
+        try:
+            if not processed:
+                subscribe.touch_match(sub, title)  # 命中但被跳过：只更新「最近命中」
+                continue
+            if subscribe.record_progress(sub, title, season, ep, kind):
+                new_subs.append(sub)
+                logstream.info(
+                    "subscribe",
+                    f"[{sub['keyword']}] 追剧更新：{(title or '')[:50]}"
+                    f"{f'（{display}）' if display else ''}")
+        except Exception as e:
+            logstream.warn("subscribe", f"记录追剧进度失败（{sub.get('keyword')}）: {logstream.exc(e)}")
+    if new_subs:
+        try:
+            from ..worker import jobs as _jobs
+            first = new_subs[0]
+            if display:
+                lines = ["🎬 追剧更新", "", "📺 " + (title or first.get("keyword", ""))[:80],
+                         "🎞 已更新到：" + display,
+                         "📡 来源：@" + channel.lstrip("@")]
+            else:
+                lines = ["🎬 追剧更新", "", "📺 " + (title or first.get("keyword", ""))[:80],
+                         "📡 来源：@" + channel.lstrip("@")]
             _jobs.notify("\n".join(lines))
-            logstream.info("subscribe",
-                           f"[{sub['keyword']}] 追剧更新：{title[:50]}{f'（{ep}）' if ep else ''}")
-    except Exception:
-        pass  # 进度记录失败不影响转存主流程
+        except Exception as e:
+            logstream.warn("subscribe", f"追剧更新通知发送失败: {logstream.exc(e)}")

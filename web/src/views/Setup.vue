@@ -21,7 +21,7 @@
             <div class="qr-box" v-html="qr.svg" @click="createQr"></div>
             <p v-if="qr.err" class="qr-err">❌ {{ qr.err }}</p>
             <p v-else-if="qr.scanned" style="color: #67c23a; margin: 4px">✅ 已扫描，请在手机上确认</p>
-            <p v-else style="color: #999; font-size: 12px; margin: 4px">点击二维码可刷新</p>
+            <p v-else style="color: #999; font-size: var(--fs-caption); margin: 4px">点击二维码可刷新</p>
           </template>
           <el-button v-else type="primary" @click="createQr">生成二维码</el-button>
         </div>
@@ -38,11 +38,11 @@
         <el-radio-group v-model="tgMode" style="display: block; margin: 16px 0">
           <el-radio value="polling" size="large" border style="display: block; margin: 10px 0; height: auto; padding: 12px">
             <b>网页轮询（推荐）</b><br />
-            <span style="color: #999; font-size: 12px">只支持公开频道；不需要 TG 账号，风控风险低，延迟分钟级</span>
+            <span style="color: #999; font-size: var(--fs-caption)">只支持公开频道；不需要 TG 账号，风控风险低，延迟分钟级</span>
           </el-radio>
           <el-radio value="userbot" size="large" border style="display: block; margin: 10px 0; height: auto; padding: 12px">
             <b>Userbot 账号监听</b><br />
-            <span style="color: #999; font-size: 12px">实时、支持私密频道；需要 TG api_id/api_hash，建议用小号</span>
+            <span style="color: #999; font-size: var(--fs-caption)">实时、支持私密频道；需要 TG api_id/api_hash，建议用小号</span>
           </el-radio>
           <el-radio value="both" size="large" border style="display: block; margin: 10px 0; height: auto; padding: 12px">
             <b>两者都启用</b>
@@ -94,7 +94,7 @@
             全盘转存 = 所有资源链接都转存；仅订阅 = 只转存命中订阅关键词的内容。
             之后可在「频道管理」按频道独立调整
           </p>
-          <p v-if="wizardSubOnly === null" class="warn-text" style="font-size: 12px; margin: 6px 0 0">
+          <p v-if="wizardSubOnly === null" class="warn-text" style="font-size: var(--fs-caption); margin: 6px 0 0">
             ⚠️ 必须选择订阅模式（全盘转存 或 仅订阅），选择后才能进入下一步
           </p>
         </div>
@@ -122,7 +122,7 @@
                    sub-title="默认分类规则和黑名单已就绪。启动前请确认下方就绪检查全部通过。">
           <template #extra>
             <div class="btn-stack" style="align-items: stretch; min-width: 300px">
-              <!-- 就绪检查清单：全部通过才能点「开始运行」（服务端同样强制校验） -->
+              <!-- 就绪检查清单：全部通过才能点「运行」（服务端同样强制校验） -->
               <div v-loading="ready.loading" class="ready-box">
                 <div class="ready-item">
                   <el-icon :size="16" :class="ready.data?.ok_115 ? 'ok' : 'bad'">
@@ -150,8 +150,8 @@
                 </div>
               </div>
               <el-button type="primary" size="large" :loading="starting"
-                         :disabled="!ready.data?.ready" @click="startNow">开始运行</el-button>
-              <el-button plain @click="skipFinish">稍后再启动（顶栏可随时点击「开始运行」）</el-button>
+                         :disabled="!ready.data?.ready" @click="startNow">运行</el-button>
+              <el-button plain @click="skipFinish">稍后再启动（顶栏可随时点击「运行」）</el-button>
             </div>
           </template>
         </el-result>
@@ -393,17 +393,33 @@ const finish = async () => {
 .setup-bg { padding: 40px 0; }
 .setup-card { width: min(640px, calc(100vw - 24px)); border-radius: 16px; border: none;
               box-shadow: 0 24px 70px rgba(5, 18, 48, .45) !important; }
-.step-desc { text-align: center; color: #666; margin: 4px 0 18px; }
+/* 正文/提示文字统一用主题变量：固定灰值在深色玻璃卡片上会不可读 */
+.step-desc { text-align: center; color: var(--saas-text-sub); margin: 4px 0 18px; }
+/* 步骤条可读性：
+   1) 完成态标题默认用 success 绿（#67c23a），浅色极光背景上对比度过低，
+      改用深一档成功色并加粗（深色模式变量自动反转为亮绿）；
+   2) 等待态标题默认占位灰在深色玻璃卡片上不可见，改用主题副文字色；
+   3) 标题 word-break: keep-all，避免「TG 接入方式」被拆成「TG 接入方/式」 */
+.setup-card :deep(.el-step__title.is-success),
+.setup-card :deep(.el-step__title.is-finish) {
+  color: var(--el-color-success-dark-2) !important;
+  font-weight: 600;
+}
+.setup-card :deep(.el-step__title.is-wait) {
+  color: var(--saas-text-sub) !important;
+  opacity: .8;
+}
+.setup-card :deep(.el-step__title) { word-break: keep-all; }
 .qr-box { width: 200px; margin: 0 auto; cursor: pointer; background: #fff; padding: 8px; border-radius: 8px; }
 .qr-box :deep(svg) { width: 100%; height: auto; display: block; }
-.qr-err { color: #f56c6c; font-size: 13px; margin: 4px; }
+.qr-err { color: #f56c6c; font-size: var(--fs-body); margin: 4px; }
 .ub-wizard {
   border: 1px solid var(--el-color-primary-light-7); background: var(--el-color-primary-light-9);
   border-radius: 10px; padding: 14px 16px;
 }
-.ub-wizard-tip { margin: 0 0 10px; font-size: 13px; color: #606266; }
-.ub-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; }
-.ub-warn { margin: 10px 0 0; font-size: 12px; color: #b45309; font-weight: 600; }
+.ub-wizard-tip { margin: 0 0 10px; font-size: var(--fs-body); color: var(--saas-text-sub); }
+.ub-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: var(--fs-body); }
+.ub-warn { margin: 10px 0 0; font-size: var(--fs-caption); color: var(--el-color-warning-dark-2); font-weight: 600; }
 .ch-type-box {
   margin-top: 12px; border: 1px solid var(--el-border-color-lighter);
   border-radius: 10px; padding: 12px 14px; max-height: 220px; overflow-y: auto;
@@ -412,15 +428,15 @@ const finish = async () => {
   margin-top: 12px; border: 1px solid var(--el-color-primary-light-7);
   background: var(--el-color-primary-light-9); border-radius: 10px; padding: 12px 14px;
 }
-.ch-type-tip { margin: 0 0 10px; font-size: 12px; color: #909399; }
+.ch-type-tip { margin: 0 0 10px; font-size: var(--fs-caption); color: var(--saas-text-sub); }
 .ch-type-row { display: flex; align-items: center; gap: 10px; padding: 4px 0; }
-.ch-type-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.ch-type-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-body); }
 .ready-box {
   display: flex; flex-direction: column; gap: 10px;
   border: 1px solid var(--el-border-color-lighter); border-radius: 10px; padding: 14px 16px;
   text-align: left;
 }
-.ready-item { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #303133; }
+.ready-item { display: flex; align-items: center; gap: 8px; font-size: var(--fs-body); color: var(--saas-text-main); }
 .ready-item .el-icon.ok { color: #67c23a; }
 .ready-item .el-icon.bad { color: #f56c6c; }
 .ready-item .el-button { margin-left: auto; }

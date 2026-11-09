@@ -254,6 +254,7 @@ onMounted(load)
 .op-actions :deep(.el-button) {
   margin-left: 0 !important;
   padding: 4px 6px;
+  flex: none;
 }
 .op-actions :deep(.el-tooltip__trigger) { display: inline-flex; }
 </style>

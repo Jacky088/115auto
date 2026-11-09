@@ -52,13 +52,13 @@ const submit = async () => {
 
 <style scoped>
 .ci-scene :deep(.el-alert__description) { margin: 0; }
-.ci-steps { font-size: 13px; color: #606266; line-height: 1.8; }
+.ci-steps { font-size: var(--fs-body); color: #606266; line-height: 1.8; }
 .ci-steps p { margin: 0; }
 .ci-steps code {
   background: #f4f4f5; padding: 0 4px; border-radius: 4px;
-  font-family: Consolas, Monaco, monospace; font-size: 12px;
+  font-family: Consolas, Monaco, monospace; font-size: var(--fs-caption);
 }
 .ci-input { margin-top: 4px; }
-.ci-tip { font-size: 12px; color: #b45309; font-weight: 600; margin: 8px 0 0; }
+.ci-tip { font-size: var(--fs-caption); color: #b45309; font-weight: 600; margin: 8px 0 0; }
 .ci-footer { display: flex; justify-content: flex-end; gap: 10px; }
 </style>

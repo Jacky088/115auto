@@ -62,7 +62,7 @@ const submit = async () => {
   display: flex; align-items: center; justify-content: center; color: #fff;
   box-shadow: 0 8px 20px rgba(47, 107, 255, .35);
 }
-.login-head h2 { margin: 0 0 4px; font-size: 19px; color: var(--saas-text-main); }
-.login-head p { color: var(--saas-text-sub); font-size: 13px; margin: 0; }
+.login-head h2 { margin: 0 0 4px; font-size: var(--fs-page); color: var(--saas-text-main); }
+.login-head p { color: var(--saas-text-sub); font-size: var(--fs-body); margin: 0; }
 .login-btn { width: 100%; margin-top: 4px; }
 </style>

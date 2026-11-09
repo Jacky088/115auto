@@ -109,7 +109,7 @@
 </template>
 
 <script setup>
-import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import * as echarts from 'echarts'
 import { api, fmtSize, fmtTime, statusLabel } from '../api'
 
@@ -190,23 +190,31 @@ const connectWs = () => {
 }
 
 let loading = false
-const load = async (withSpace = false) => {
+const load = async () => {
   if (loading) return // 上一轮未完成时跳过，防止定时器并发堆积
   loading = true
   try {
     const [s, r] = await Promise.all([api.get('/api/dashboard/stats'), api.get('/api/dashboard/recent')])
     stats.value = s.data
     recent.value = r.data
-    // 空间信息（登录后才有）：调用会打 115 接口，只在需要时刷新（后端另有 5 分钟缓存）
-    if (withSpace) {
-      try {
-        const sp = await api.get('/api/account/115/status')
-        if (sp.data.space) { space.value = sp.data.space; nextTick(renderSpace) }
-      } catch { /* ignore */ }
-    }
+    // 分类占比只用本地数据，先画出来：不能等待 115 空间接口（它会打 115，慢的时候要好几秒）
     renderPie()
+    retryRender()
   } catch { /* 网络抖动时保留上次数据，不打断定时刷新 */ } finally {
     loading = false
+  }
+}
+
+// 115 空间单独加载，与统计/分类占比互不阻塞（后端另有 5 分钟缓存）
+let spaceLoading = false
+const loadSpace = async () => {
+  if (spaceLoading) return
+  spaceLoading = true
+  try {
+    const sp = await api.get('/api/account/115/status')
+    if (sp.data.space) space.value = sp.data.space
+  } catch { /* 未登录或读取失败时保持上次数据 */ } finally {
+    spaceLoading = false
   }
 }
 
@@ -283,29 +291,56 @@ const renderSpace = () => {
   }, true)
 }
 
+const renderAll = () => { renderPie(); renderSpace() }
+
+// 路由切换/首屏布局未完成时容器可能是 0 尺寸：短间隔重试几次，避免图表空白且不再触发 ResizeObserver
+let renderRetryTimer = null
+const retryRender = (tries = 5) => {
+  clearTimeout(renderRetryTimer)
+  // 实例若在 0×0 容器上初始化过，setOption 不会自愈，必须显式 resize
+  if (pieChart && chartSizeOk(pieRef.value)) pieChart.resize()
+  if (spaceChart && chartSizeOk(spaceRef.value)) spaceChart.resize()
+  renderAll()
+  const piePending = !chartSizeOk(pieRef.value)
+  const spacePending = !!space.value.total && !chartSizeOk(spaceRef.value)
+  if ((piePending || spacePending) && tries > 0) {
+    renderRetryTimer = setTimeout(() => retryRender(tries - 1), 150)
+  }
+}
+
+// 空间图容器只在有数据时才渲染出来：挂载后补观察，否则尺寸变化不会触发重画
+watch(spaceRef, (el) => {
+  if (!el) return
+  if (ro) ro.observe(el)
+  nextTick(() => retryRender())
+})
+
 let timer = null
 let tick = 0
 let ro = null
 let roTimer = null
 let themeObs = null
 onMounted(() => {
-  load(true)
+  load()
+  loadSpace()
   connectWs()
   // 10 秒刷新统计/最近记录；115 空间每 60 秒才查一次，避免频繁请求 115 接口
   timer = setInterval(() => {
     tick += 1
-    load(tick % 6 === 0)
+    load()
+    if (tick % 6 === 0) loadSpace()
   }, 10000)
   window.addEventListener('resize', onResize)
   // ResizeObserver：容器尺寸从 0 变为可用（或任何尺寸变化）时自动重画 —— 空白修复的关键
   ro = new ResizeObserver(() => {
     clearTimeout(roTimer)
-    roTimer = setTimeout(() => { renderPie(); renderSpace() }, 100) // 防抖，避免拖拽窗口时频繁重画
+    roTimer = setTimeout(() => retryRender(), 100) // 防抖，避免拖拽窗口时为频繁重画
   })
   if (pieRef.value) ro.observe(pieRef.value)
   if (spaceRef.value) ro.observe(spaceRef.value)
+  nextTick(() => retryRender()) // 首屏补画：路由/卡片动画结束后尺寸才稳定
   // 主题切换（html.dark 类变化）时用新配色重画图表
-  themeObs = new MutationObserver(() => { renderPie(); renderSpace() })
+  themeObs = new MutationObserver(() => renderAll())
   themeObs.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] })
 })
 onUnmounted(() => {
@@ -313,6 +348,7 @@ onUnmounted(() => {
   clearInterval(timer)
   clearTimeout(wsTimer)
   clearTimeout(roTimer)
+  clearTimeout(renderRetryTimer)
   window.removeEventListener('resize', onResize)
   if (ro) ro.disconnect()
   if (themeObs) themeObs.disconnect()
@@ -336,8 +372,8 @@ const onResize = () => { if (pieChart) pieChart.resize(); if (spaceChart) spaceC
 .ring-chart { width: 100%; height: 280px; flex: 1; min-height: 240px; }
 @media (max-width: 768px) { .ring-chart { height: 220px; min-height: 200px; } }
 .space-text.center { text-align: center; margin-top: 0; padding-bottom: 8px; }
-.space-ratio-tag { margin-left: auto; font-size: 12px; font-weight: 600; }
-.space-empty { text-align: center; color: #999; font-size: 13px; padding: 60px 0; }
+.space-ratio-tag { margin-left: auto; font-size: var(--fs-caption); font-weight: 600; }
+.space-empty { text-align: center; color: #999; font-size: var(--fs-body); padding: 60px 0; }
 .stat-card :deep(.el-card__body) { padding: 18px; }
 .stat-top { display: flex; align-items: center; gap: 10px; }
 .stat-icon {
@@ -345,14 +381,14 @@ const onResize = () => { if (pieChart) pieChart.resize(); if (spaceChart) spaceC
   display: flex; align-items: center; justify-content: center;
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .35), 0 3px 10px rgba(31, 45, 90, .08);
 }
-.stat-label { color: var(--saas-text-sub); font-size: 13px; }
+.stat-label { color: var(--saas-text-sub); font-size: var(--fs-body); }
 .stat-value {
-  font-size: 26px; font-weight: 700; margin-top: 10px; letter-spacing: .3px;
+  font-size: var(--fs-stat); font-weight: 700; margin-top: 10px; letter-spacing: .3px;
   font-variant-numeric: tabular-nums;
 }
 .module-chips { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
 .m-chip {
-  padding: 3px 14px; border-radius: 999px; font-size: 12px; cursor: pointer; user-select: none;
+  padding: 3px 14px; border-radius: 999px; font-size: var(--fs-caption); cursor: pointer; user-select: none;
   border: 1px solid var(--saas-line); color: var(--saas-text-sub);
   background: var(--glass-bg-strong); transition: all .15s ease;
 }
@@ -363,7 +399,7 @@ const onResize = () => { if (pieChart) pieChart.resize(); if (spaceChart) spaceC
 }
 .space-bar { height: 10px; border-radius: 5px; background: #e9eefb; margin-top: 16px; overflow: hidden; }
 .space-used { height: 100%; border-radius: 5px; transition: width .6s ease; min-width: 3%; }
-.space-text { font-size: 12px; color: var(--saas-text-sub); margin-top: 8px; }
+.space-text { font-size: var(--fs-caption); color: var(--saas-text-sub); margin-top: 8px; }
 .space-ratio { float: right; font-weight: 600; }
 .pie-chart { width: 100%; height: 280px; }
 </style>

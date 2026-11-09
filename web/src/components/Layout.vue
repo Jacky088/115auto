@@ -20,10 +20,11 @@
           <el-menu-item index="/account"><el-icon><User /></el-icon>账号管理</el-menu-item>
           <el-menu-item index="/settings"><el-icon><Setting /></el-icon>系统设置</el-menu-item>
         </el-menu>
-        <div class="aside-footer">
-          <div>Telegram → 115 自动化</div>
-          <div v-if="version" class="aside-ver">v{{ version }}</div>
-        </div>
+        <a v-if="version" class="footer-ver aside-foot" href="https://github.com/Jacky088/115auto"
+           target="_blank" rel="noopener" title="GitHub 仓库">
+          <svg class="gh-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+          <span>v{{ version }}</span>
+        </a>
       </div>
     </el-drawer>
     <!-- 桌面端侧边栏 -->
@@ -44,10 +45,11 @@
         <el-menu-item index="/account"><el-icon><User /></el-icon>账号管理</el-menu-item>
         <el-menu-item index="/settings"><el-icon><Setting /></el-icon>系统设置</el-menu-item>
       </el-menu>
-      <div class="aside-footer">
-        <div>Telegram → 115 自动化</div>
-        <div v-if="version" class="aside-ver">v{{ version }}</div>
-      </div>
+      <a v-if="version" class="footer-ver aside-foot" href="https://github.com/Jacky088/115auto"
+         target="_blank" rel="noopener" title="GitHub 仓库">
+        <svg class="gh-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+        <span>v{{ version }}</span>
+      </a>
     </el-aside>
     <el-container>
       <el-header height="52px" class="header">
@@ -56,8 +58,10 @@
         </el-button>
           <div class="header-left">
           <div class="header-title">
-            {{ title }}
-            <el-tag v-if="sysRunning && !sysPaused" type="success" size="small" effect="dark" class="run-tag">运行中</el-tag>
+            <span class="title-text">{{ title }}</span>
+            <el-tag v-if="sysRunning && !sysPaused" type="primary" size="small" effect="dark" class="run-tag run-tag--live">
+              <span class="live-dot"></span>运行中
+            </el-tag>
             <el-tag v-else-if="sysRunning && sysPaused" type="warning" size="small" effect="dark" class="run-tag">已暂停</el-tag>
             <el-tag v-else-if="sysReady" type="warning" size="small" effect="dark" class="run-tag">待启动</el-tag>
             <el-tag v-else type="info" size="small" effect="dark" class="run-tag">未就绪</el-tag>
@@ -66,7 +70,7 @@
                       :content="sysReasons.length ? '无法开始运行：' + sysReasons.join('；') : ''">
             <span class="start-wrap">
               <el-button v-if="!sysRunning" type="primary" class="start-btn"
-                         :disabled="!sysReady" :loading="toggling" @click="startSystem">开始运行</el-button>
+                         :disabled="!sysReady" :loading="toggling" @click="startSystem">运行</el-button>
               <el-button v-else-if="sysPaused" type="warning" class="start-btn"
                          :loading="toggling" @click="resumeSystem">恢复转存</el-button>
               <el-button v-else type="danger" plain class="start-btn"
@@ -105,7 +109,7 @@
         </template>
         <div class="auto-stop-body">
           <div>原因：{{ autoStop }}</div>
-          <div>处理：按上述原因修正后，点击网页顶栏「开始运行」恢复（队列与配置已保留，任务不会丢失）。</div>
+          <div>处理：按上述原因修正后，点击网页顶栏「运行」恢复（队列与配置已保留，任务不会丢失）。</div>
         </div>
       </el-alert>
       <el-main style="padding: 0; overflow-y: auto; overflow-x: hidden">
@@ -229,7 +233,7 @@ const check = async () => {
       autoStop.value = ''
       ElMessage.success(sysRunning.value
         ? '✅ 115 Cookie 已恢复有效，转存继续进行'
-        : '✅ 115 Cookie 已恢复有效；点顶栏「开始运行」恢复转存')
+        : '✅ 115 Cookie 已恢复有效；点顶栏「运行」恢复转存')
     }
     // 记录本次已知状态：只有确认有效/失效才更新，未知（null）保持原状
     if (bad) prevCookieOk = false
@@ -303,7 +307,7 @@ const username = ref('')
 const loadUsername = async () => {
   try { username.value = (await api.get('/api/auth/me')).data.username || 'admin' } catch { /* ignore */ }
 }
-const onCommand = (cmd) => {
+const onCommand = async (cmd) => {
   if (cmd === 'pwd') {
     pwdForm.username = username.value
     pwdForm.old = ''; pwdForm.new = ''; pwdForm.confirm = ''
@@ -311,6 +315,8 @@ const onCommand = (cmd) => {
     nextTick(() => pwdFormRef.value?.clearValidate())
   }
   if (cmd === 'logout') {
+    // 同时清除服务端海报 HttpOnly Cookie；网络失败不影响前端退出
+    try { await api.post('/api/auth/logout') } catch { /* ignore */ }
     localStorage.removeItem('token')
     resetWizardCache()  // 下次登录重新检查向导状态（可能换账号/重置数据）
     router.push('/login')
@@ -335,15 +341,17 @@ const changePwd = async () => {
 </script>
 
 <style scoped>
-.auto-stop-body { font-size: 12px; line-height: 1.7; color: #606266; margin-top: 2px; }
+.auto-stop-body { font-size: var(--fs-caption); line-height: 1.7; color: #606266; margin-top: 2px; }
 .pwd-tips {
   margin-top: 4px; padding: 10px 12px; border-radius: 8px;
   background: #f6f9ff; border: 1px solid #e9eefb;
 }
-.pwd-tips-title { margin: 0 0 6px; font-size: 12px; font-weight: 600; color: #3a4661; }
+.pwd-tips-title { margin: 0 0 6px; font-size: var(--fs-caption); font-weight: 600; color: #3a4661; }
 .pwd-tips ul { margin: 0; padding-left: 16px; }
-.pwd-tips li { font-size: 12px; line-height: 1.8; color: #7c8aa5; list-style: disc; }
+.pwd-tips li { font-size: var(--fs-caption); line-height: 1.8; color: #7c8aa5; list-style: disc; }
 .aside {
+  height: 100%;
+  display: flex; flex-direction: column;
   background: var(--saas-sidebar-1);
   -webkit-backdrop-filter: var(--glass-blur);
   backdrop-filter: var(--glass-blur);
@@ -356,12 +364,52 @@ const changePwd = async () => {
   display: flex; align-items: center; justify-content: center; color: #fff;
   box-shadow: 0 4px 12px rgba(79, 107, 255, .45);
 }
-.logo-text { color: var(--saas-text-main); font-weight: 600; font-size: 15px; letter-spacing: .5px; }
-.aside-menu { flex: 1; }
-.aside-footer {
-  color: var(--saas-text-sub); opacity: .6; font-size: 11px; text-align: center; padding: 14px 0;
+.logo-text { color: var(--saas-text-main); font-weight: 600; font-size: var(--fs-title); letter-spacing: .5px; }
+/* 菜单撑满剩余空间，把版本号压到侧栏最底部；菜单过长时自身滚动 */
+.aside-menu { flex: 1; min-height: 0; overflow-y: auto; }
+/* 版本号 + GitHub 链接：固定在侧边栏最下方，水平居中 */
+.aside-foot { flex: none; display: flex; justify-content: center; padding: 12px 0 14px; }
+.footer-ver {
+  display: inline-flex; align-items: center; gap: 6px;
+  color: var(--saas-text-sub); font-size: var(--fs-caption);
+  text-decoration: none; opacity: .75; transition: opacity .2s;
 }
-.aside-ver { margin-top: 3px; letter-spacing: .5px; }
+.footer-ver:hover { opacity: 1; color: var(--saas-text-main); }
+.gh-icon { width: 14px; height: 14px; fill: currentColor; flex: none; }
+/* 运行状态标签与旁边按钮同高同圆角，避免"扁标签"观感 */
+.run-tag {
+  height: 32px; padding: 0 12px; border-radius: 10px;
+  display: inline-flex; align-items: center; font-size: var(--fs-body);
+}
+/* 运行中：渐变流动 + 白点脉动 + 呼吸光环，明确是"活动状态"而非可点击按钮，
+   避免与旁边真正的「运行/停止」按钮混淆。
+   注意：背景必须用 background-image 而非 background 简写——简写带 !important
+   会把 background-size 一起重置为 auto!important，导致 200% 尺寸失效、
+   background-position 动画推不动（渐变看起来静止） */
+.run-tag--live {
+  background-image: linear-gradient(120deg, var(--el-color-primary), var(--el-color-primary-light-3)) !important;
+  background-size: 200% 100% !important;
+  border: none;
+  animation: tag-breathe 2.2s ease-in-out infinite;
+}
+.run-tag--live .live-dot {
+  /* 空内容的圆点必须是 inline-block，否则行内 span 的 width/height 无效、塌缩为 0 不可见 */
+  display: inline-block;
+  width: 7px; height: 7px; border-radius: 50%; background: #fff;
+  margin-right: 6px; flex: none;
+  animation: live-pulse 1.4s ease-in-out infinite;
+}
+@keyframes tag-breathe {
+  0%, 100% { background-position: 0% 50%; box-shadow: 0 0 0 0 rgba(79, 107, 255, .40); }
+  50%      { background-position: 100% 50%; box-shadow: 0 0 0 6px rgba(79, 107, 255, 0); }
+}
+@keyframes live-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: .45; transform: scale(.72); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .run-tag--live, .run-tag--live .live-dot { animation: none; }
+}
 .theme-btn { padding: 8px; color: var(--saas-text-main); }
 /* 告警条是 el-container（flex 列）的子项，而 el-alert 自带 overflow:hidden：
    顶栏 + 多条告警 + 内容超过视口高度时 flex 会把告警压缩裁掉正文（表现为"被折叠"）。
@@ -376,17 +424,20 @@ const changePwd = async () => {
 }
 .header-left { flex: 1; display: flex; align-items: center; gap: 10px; min-width: 0; }
 .header-right { display: flex; align-items: center; gap: 6px; flex: none; }
-.header-title { font-weight: 600; font-size: 15px; color: var(--saas-text-main); flex: none; }
+.header-title { font-weight: 600; font-size: var(--fs-title); color: var(--saas-text-main);
+                flex: 0 1 auto; min-width: 0; display: flex; align-items: center; gap: 8px; }
+/* 标题文字单独收缩省略：状态标在省略区外，窄屏不会被裁掉 */
+.header-title .title-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .user-chip { display: flex; align-items: center; gap: 8px; cursor: pointer; padding: 4px 6px; border-radius: 999px; }
 .user-chip:hover { background: var(--saas-hover, rgba(79, 107, 255, .10)); }
 .avatar {
   width: 30px; height: 30px; border-radius: 50%;
   background: var(--grad-brand);
   color: #fff; display: flex; align-items: center; justify-content: center;
-  font-size: 13px; font-weight: 600;
+  font-size: var(--fs-body); font-weight: 600;
   box-shadow: 0 3px 10px rgba(79, 107, 255, .35);
 }
-.user-name { color: var(--saas-text-main); font-size: 13px; }
+.user-name { color: var(--saas-text-main); font-size: var(--fs-body); }
 .menu-btn { display: none; padding: 6px; }
 .run-tag { margin-left: 8px; vertical-align: 1px; }
 .start-wrap { display: inline-flex; flex: none; }
@@ -396,9 +447,13 @@ const changePwd = async () => {
 @media (max-width: 768px) {
   .pc-only { display: none; }
   .menu-btn { display: inline-flex; }
-  .header-title { font-size: 14px; }
+  .header-title { font-size: var(--fs-title); }
   .user-name { display: none; }
   .page-card, :deep(.page-card) { margin: 10px !important; }
+  /* 防顶栏重叠：间距收紧。标题可收缩省略（.header-title/.title-text），
+     状态标在省略区外始终可见；任何屏宽下运行按钮都不会再被右侧压住 */
+  .header, .header-left { gap: 5px; }
+  .run-tag { margin-left: 0; }
 }
 </style>
 

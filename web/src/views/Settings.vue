@@ -575,7 +575,7 @@ onMounted(load)
   background: #fbfdff;
 }
 .section-title {
-  font-weight: 600; font-size: 14px; color: var(--el-color-primary-dark-2);
+  font-weight: 600; font-size: var(--fs-body); color: var(--el-color-primary-dark-2);
   margin-bottom: 12px; display: flex; align-items: center; gap: 6px;
 }
 .section-title::before {
@@ -583,7 +583,6 @@ onMounted(load)
   background: linear-gradient(180deg, #2f6bff, #5d8bff);
 }
 @media (max-width: 768px) {
-  .settings-form :deep(.el-form-item__label) { font-size: 12px; line-height: 1.4; }
   .switch-row { flex-wrap: wrap; }
   .switch-row .tip { flex-basis: 100%; }
   .range-row { flex-wrap: wrap; }
@@ -594,7 +593,7 @@ onMounted(load)
 .settings-flow > .section-card { break-inside: avoid; }
 @media (max-width: 1100px) { .settings-flow { column-count: 1; } }
 @media (max-width: 768px) { .section-card { padding: 12px 14px 2px; } }
-.tip { color: #999; font-size: 12px; }
+.tip { color: #999; font-size: var(--fs-caption); }
 /* 警示性提示文字：加粗 + 琥珀色，一眼可见（全局样式 .warn-text 的本地兜底） */
 .warn-text { font-weight: 600; color: #b45309; }
 .switch-row { display: flex; align-items: center; gap: 10px; }

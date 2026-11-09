@@ -88,7 +88,7 @@
             全盘转存 = 该频道的所有资源链接都转存；仅订阅 = 只转存命中订阅关键词的内容
             （与 Bot 指令 /add 的 on|off 一致）
           </div>
-          <div v-if="addForm.subOnly === null" class="warn-text" style="font-size: 12px; margin-top: 4px">
+          <div v-if="addForm.subOnly === null" class="warn-text" style="font-size: var(--fs-caption); margin-top: 4px">
             ⚠️ 必须选择订阅模式（全盘转存 或 仅订阅），选择后才能确定
           </div>
         </div>
@@ -219,7 +219,7 @@ const changeType = async (row, v) => {
     if (!st.running) return doSave()
     ElMessageBox.confirm(
       `系统正在运行中，修改「@${row.name}」的接入方式需要停止后再启动才能完全生效。` +
-      `是否保存修改？（保存后请点击顶栏「停止」，再点击「开始运行」）`,
+      `是否保存修改？（保存后请点击顶栏「停止」，再点击「运行」）`,
       '修改接入方式',
       { confirmButtonText: '保存并稍后重启', cancelButtonText: '取消', type: 'warning' }
     ).then(doSave).catch(() => {})
@@ -264,14 +264,14 @@ onMounted(load)
 
 <style scoped>
 .ch-actions { display: flex; align-items: center; flex-wrap: nowrap; gap: 6px; white-space: nowrap; }
-.ch-actions :deep(.el-button) { margin-left: 0 !important; }
+.ch-actions :deep(.el-button) { margin-left: 0 !important; flex: none; }
 .ch-actions :deep(.el-tooltip__trigger) { display: inline-flex; }
 .msg-item { border: 1px solid #e9eefb; border-radius: 10px; padding: 12px 14px; margin-bottom: 12px;
             background: #fff; }
 .msg-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
 .msg-head-right { display: flex; align-items: center; gap: 8px; }
-.health-ok { color: #16a34a; font-size: 12px; font-weight: 600; }
-.health-bad { color: #dc2626; font-size: 12px; font-weight: 600; }
-.msg-body { font-size: 13px; line-height: 1.8; color: #3a4661; white-space: pre-wrap;
+.health-ok { color: #16a34a; font-size: var(--fs-caption); font-weight: 600; }
+.health-bad { color: #dc2626; font-size: var(--fs-caption); font-weight: 600; }
+.msg-body { font-size: var(--fs-body); line-height: 1.8; color: #3a4661; white-space: pre-wrap;
             word-break: break-word; }
 </style>

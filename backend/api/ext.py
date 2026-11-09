@@ -124,11 +124,20 @@ def enqueue_transfer(body: dict):
     if row:
         return {"queued": False, "duplicate": True, "id": row["id"],
                 "reason": f"已存在记录 #{row['id']}（{row['status']}）"}
-    db.execute(
-        "INSERT INTO transfers(kind,share_code,receive_code,share_url,title,category,target_dir,"
-        "status,bypass_filters,created_at) VALUES('share',?,?,?,?,'','','queued',0,?)",
-        (code, rc, share_url, title, time.time()))
-    row = db.query("SELECT id FROM transfers WHERE share_code=? AND status='queued'"
-                   " ORDER BY id DESC LIMIT 1", (code,), one=True)
+    # 并发兜底：两个请求可能同时通过上方查重，随后触发部分唯一索引冲突；
+    # 捕获后按 duplicate 返回，而不是把 IntegrityError 抛成 500。
+    import sqlite3
+    try:
+        new_id = db.insert(
+            "INSERT INTO transfers(kind,share_code,receive_code,share_url,title,category,target_dir,"
+            "status,bypass_filters,created_at) VALUES('share',?,?,?,?,'','','queued',0,?)",
+            (code, rc, share_url, title, time.time()))
+    except sqlite3.IntegrityError:
+        row = db.query("SELECT id, status FROM transfers WHERE share_code=?"
+                       " AND status IN ('queued','running','submitted','success')"
+                       " ORDER BY id LIMIT 1", (code,), one=True)
+        return {"queued": False, "duplicate": True,
+                "id": row["id"] if row else None,
+                "reason": f"已存在记录 #{row['id']}（{row['status']}）" if row else "该分享已在队列中"}
     logstream.info("transfer", f"对外 API 入队分享转存: {code}" + (f"（{title[:40]}）" if title else ""))
-    return {"queued": True, "duplicate": False, "id": row["id"] if row else None}
+    return {"queued": True, "duplicate": False, "id": new_id}
