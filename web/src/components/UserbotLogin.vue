@@ -12,7 +12,7 @@
     </div>
 
     <!-- 登录流程：api_id/api_hash → 验证码 →（可选）两步验证密码 -->
-    <el-form v-if="!st.connected || flowStep > 0" label-width="90px" size="default" class="ub-form"
+    <el-form v-if="!st.connected || flowStep > 0" label-width="96px" size="default" class="ub-form"
              @submit.prevent>
       <template v-if="flowStep === 0">
         <el-form-item label="API ID">

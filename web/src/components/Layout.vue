@@ -11,7 +11,6 @@
         <el-menu :default-active="$route.path" router class="aside-menu" @select="menuOpen = false">
           <el-menu-item index="/dashboard"><el-icon><Odometer /></el-icon>仪表盘</el-menu-item>
           <el-menu-item index="/files"><el-icon><FolderOpened /></el-icon>网盘文件</el-menu-item>
-          <el-menu-item index="/channels"><el-icon><Connection /></el-icon>频道管理</el-menu-item>
           <el-menu-item index="/subscriptions"><el-icon><VideoPlay /></el-icon>订阅追剧</el-menu-item>
           <el-menu-item index="/dirs"><el-icon><Collection /></el-icon>转存目录</el-menu-item>
           <el-menu-item index="/match"><el-icon><Sort /></el-icon>匹配规则</el-menu-item>
@@ -36,7 +35,6 @@
       <el-menu :default-active="$route.path" router class="aside-menu">
         <el-menu-item index="/dashboard"><el-icon><Odometer /></el-icon>仪表盘</el-menu-item>
         <el-menu-item index="/files"><el-icon><FolderOpened /></el-icon>网盘文件</el-menu-item>
-        <el-menu-item index="/channels"><el-icon><Connection /></el-icon>频道管理</el-menu-item>
         <el-menu-item index="/subscriptions"><el-icon><VideoPlay /></el-icon>订阅追剧</el-menu-item>
         <el-menu-item index="/dirs"><el-icon><Collection /></el-icon>转存目录</el-menu-item>
         <el-menu-item index="/match"><el-icon><Sort /></el-icon>匹配规则</el-menu-item>
@@ -59,19 +57,25 @@
           <div class="header-left">
           <div class="header-title">
             <span class="title-text">{{ title }}</span>
-            <el-tag v-if="sysRunning && !sysPaused" type="primary" size="small" effect="dark" class="run-tag run-tag--live">
+            <el-tag disable-transitions v-if="sysRunning && !sysPaused" size="small" class="run-tag run-tag--live">
               <span class="live-dot"></span>运行中
             </el-tag>
-            <el-tag v-else-if="sysRunning && sysPaused" type="warning" size="small" effect="dark" class="run-tag">已暂停</el-tag>
-            <el-tag v-else-if="sysReady" type="warning" size="small" effect="dark" class="run-tag">待启动</el-tag>
-            <el-tag v-else type="info" size="small" effect="dark" class="run-tag">未就绪</el-tag>
+            <el-tag disable-transitions v-else-if="sysRunning && sysPaused" size="small" class="run-tag run-tag--paused">
+              <span class="paused-dot"></span>已暂停
+            </el-tag>
+            <el-tag disable-transitions v-else-if="sysReady" size="small" class="run-tag run-tag--ready">
+              <span class="ready-dot"></span>待启动
+            </el-tag>
+            <el-tag disable-transitions v-else size="small" class="run-tag run-tag--not-ready">
+              <span class="not-ready-dot"></span>未就绪
+            </el-tag>
           </div>
           <el-tooltip :disabled="sysRunning || sysReady" placement="bottom"
                       :content="sysReasons.length ? '无法开始运行：' + sysReasons.join('；') : ''">
             <span class="start-wrap">
               <el-button v-if="!sysRunning" type="primary" class="start-btn"
                          :disabled="!sysReady" :loading="toggling" @click="startSystem">运行</el-button>
-              <el-button v-else-if="sysPaused" type="warning" class="start-btn"
+              <el-button v-else-if="sysPaused" type="warning" class="start-btn start-btn--resume"
                          :loading="toggling" @click="resumeSystem">恢复转存</el-button>
               <el-button v-else type="danger" plain class="start-btn"
                          :loading="toggling" @click="stopSystem">停止</el-button>
@@ -118,8 +122,8 @@
     </el-container>
   </el-container>
 
-  <el-dialog v-model="pwdVisible" title="修改用户名 / 密码" width="420px" class="pc-dialog">
-    <el-form ref="pwdFormRef" :rules="pwdRules" :model="pwdForm" label-width="80px" @submit.prevent>
+  <el-dialog v-model="pwdVisible" title="修改用户名 / 密码" :width="'min(440px, 94vw)'" class="pc-dialog">
+    <el-form ref="pwdFormRef" :rules="pwdRules" :model="pwdForm" label-width="96px" @submit.prevent>
       <el-form-item label="用户名" prop="username">
         <el-input v-model="pwdForm.username" maxlength="32" placeholder="登录用户名" />
       </el-form-item>
@@ -160,7 +164,7 @@ import { resetWizardCache } from '../router'
 
 const route = useRoute()
 const router = useRouter()
-const titles = { dashboard: '仪表盘', files: '网盘文件', channels: '频道管理', subscriptions: '订阅追剧',
+const titles = { dashboard: '仪表盘', files: '网盘文件', channels: '账号管理', subscriptions: '订阅追剧',
                  dirs: '转存目录', match: '匹配规则',
                  transfers: '转存记录', history: '日志查询',
                  account: '账号管理', settings: '系统设置', setup: '初始化向导' }
@@ -193,7 +197,7 @@ const startSystem = async () => {
   try {
     await api.post('/api/system/start')
     saveOk('系统已启动', '开始监控频道并自动转存')
-    loadSys()
+    await loadSys()
   } catch (e) { ElMessage.error(errMsg(e)) } finally { toggling.value = false }
 }
 const resumeSystem = async () => {
@@ -201,15 +205,15 @@ const resumeSystem = async () => {
   try {
     await api.post('/api/system/resume')
     saveOk('已恢复转存', '队列继续按优先级处理')
-    loadSys()
+    await loadSys()
   } catch (e) { ElMessage.error(errMsg(e)) } finally { toggling.value = false }
 }
 const stopSystem = async () => {
   toggling.value = true
   try {
     await api.post('/api/system/stop')
-    ElMessage.success('系统已停止，配置与队列保留')
-    loadSys()
+    saveOk('系统已停止', '配置与队列保留')
+    await loadSys()
   } catch (e) { ElMessage.error(errMsg(e)) } finally { toggling.value = false }
 }
 
@@ -376,40 +380,7 @@ const changePwd = async () => {
 }
 .footer-ver:hover { opacity: 1; color: var(--saas-text-main); }
 .gh-icon { width: 14px; height: 14px; fill: currentColor; flex: none; }
-/* 运行状态标签与旁边按钮同高同圆角，避免"扁标签"观感 */
-.run-tag {
-  height: 32px; padding: 0 12px; border-radius: 10px;
-  display: inline-flex; align-items: center; font-size: var(--fs-body);
-}
-/* 运行中：渐变流动 + 白点脉动 + 呼吸光环，明确是"活动状态"而非可点击按钮，
-   避免与旁边真正的「运行/停止」按钮混淆。
-   注意：背景必须用 background-image 而非 background 简写——简写带 !important
-   会把 background-size 一起重置为 auto!important，导致 200% 尺寸失效、
-   background-position 动画推不动（渐变看起来静止） */
-.run-tag--live {
-  background-image: linear-gradient(120deg, var(--el-color-primary), var(--el-color-primary-light-3)) !important;
-  background-size: 200% 100% !important;
-  border: none;
-  animation: tag-breathe 2.2s ease-in-out infinite;
-}
-.run-tag--live .live-dot {
-  /* 空内容的圆点必须是 inline-block，否则行内 span 的 width/height 无效、塌缩为 0 不可见 */
-  display: inline-block;
-  width: 7px; height: 7px; border-radius: 50%; background: #fff;
-  margin-right: 6px; flex: none;
-  animation: live-pulse 1.4s ease-in-out infinite;
-}
-@keyframes tag-breathe {
-  0%, 100% { background-position: 0% 50%; box-shadow: 0 0 0 0 rgba(79, 107, 255, .40); }
-  50%      { background-position: 100% 50%; box-shadow: 0 0 0 6px rgba(79, 107, 255, 0); }
-}
-@keyframes live-pulse {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50%      { opacity: .45; transform: scale(.72); }
-}
-@media (prefers-reduced-motion: reduce) {
-  .run-tag--live, .run-tag--live .live-dot { animation: none; }
-}
+
 .theme-btn { padding: 8px; color: var(--saas-text-main); }
 /* 告警条是 el-container（flex 列）的子项，而 el-alert 自带 overflow:hidden：
    顶栏 + 多条告警 + 内容超过视口高度时 flex 会把告警压缩裁掉正文（表现为"被折叠"）。
@@ -424,12 +395,14 @@ const changePwd = async () => {
 }
 .header-left { flex: 1; display: flex; align-items: center; gap: 10px; min-width: 0; }
 .header-right { display: flex; align-items: center; gap: 6px; flex: none; }
-.header-title { font-weight: 600; font-size: var(--fs-title); color: var(--saas-text-main);
-                flex: 0 1 auto; min-width: 0; display: flex; align-items: center; gap: 8px; }
-/* 标题文字单独收缩省略：状态标在省略区外，窄屏不会被裁掉 */
-.header-title .title-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.user-chip { display: flex; align-items: center; gap: 8px; cursor: pointer; padding: 4px 6px; border-radius: 999px; }
-.user-chip:hover { background: var(--saas-hover, rgba(79, 107, 255, .10)); }
+.header-title {
+  font-weight: 600; font-size: var(--fs-title); color: var(--saas-text-main);
+  flex: none; display: inline-flex; align-items: center; gap: 8px;
+}
+/* 标题文字不折行；窄屏时允许必要收缩 */
+.header-title .title-text { flex: none; white-space: nowrap; }
+.user-chip { display: flex; align-items: center; gap: 8px; cursor: pointer; padding: 4px 6px; border-radius: 999px; transition: background .15s ease; }
+.user-chip:hover { background: rgba(79, 107, 255, .14); }
 .avatar {
   width: 30px; height: 30px; border-radius: 50%;
   background: var(--grad-brand);
@@ -439,9 +412,16 @@ const changePwd = async () => {
 }
 .user-name { color: var(--saas-text-main); font-size: var(--fs-body); }
 .menu-btn { display: none; padding: 6px; }
-.run-tag { margin-left: 8px; vertical-align: 1px; }
-.start-wrap { display: inline-flex; flex: none; }
-.start-btn { flex: none; }
+.start-wrap { display: inline-flex; flex: none; align-items: center; }
+.start-btn {
+  width: 68px; min-width: 68px; height: 28px; padding: 0 8px;
+  justify-content: center; flex: none; box-sizing: border-box;
+  /* 仅过渡背景/边框/文字色，绝不过渡宽高/内外边距，杜绝点击伸缩跳动 */
+  transition: background-color .15s ease, border-color .15s ease, color .15s ease, box-shadow .15s ease !important;
+}
+.start-btn.start-btn--resume {
+  width: 88px; min-width: 88px;
+}
 
 /* 移动端 */
 @media (max-width: 768px) {
@@ -453,7 +433,6 @@ const changePwd = async () => {
   /* 防顶栏重叠：间距收紧。标题可收缩省略（.header-title/.title-text），
      状态标在省略区外始终可见；任何屏宽下运行按钮都不会再被右侧压住 */
   .header, .header-left { gap: 5px; }
-  .run-tag { margin-left: 0; }
 }
 </style>
 

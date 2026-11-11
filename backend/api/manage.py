@@ -1,14 +1,15 @@
 """主业务路由：登录/向导/仪表盘/频道/规则/黑名单/转存记录/设置/日志。"""
+import asyncio
 import json
 import re
 import threading
 import time
 from ipaddress import ip_address, ip_network
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
 
 from .. import auth, config, database as db
-from ..core import classifier, filters, logstream, patguard, pipeline, subscribe as submod
+from ..core import classifier, filters, logstream, patguard, pipeline, subscribe as submod, transfer_gate
 from ..pan115 import client as pan
 from ..worker import jobs
 from .deps import require_user
@@ -53,10 +54,10 @@ def _client_ip(request: Request) -> str:
 
 
 def _set_poster_cookie(response: Response, request: Request, token: str) -> None:
-    """下发海报鉴权 Cookie（HttpOnly + SameSite=Strict，路径仅海报接口）。"""
+    """下发海报鉴权 Cookie（HttpOnly + SameSite=Lax，路径仅海报接口）。"""
     response.set_cookie(
         POSTER_COOKIE, token, max_age=auth.TOKEN_TTL,
-        httponly=True, samesite="strict", path="/api/tmdb/poster",
+        httponly=True, samesite="lax", path="/api/tmdb/poster",
         secure=request.url.scheme == "https",
     )
 
@@ -102,7 +103,10 @@ def logout(response: Response):
 
 
 @router.get("/auth/me")
-def me(_=Depends(require_user)):
+def me(request: Request, response: Response, authorization: str = Header(default="")):
+    username = require_user(authorization, response)
+    if authorization.startswith("Bearer "):
+        _set_poster_cookie(response, request, authorization[7:])
     return {"username": _web_username()}
 
 
@@ -218,10 +222,11 @@ def system_start(_=Depends(require_user)):
 
 @router.post("/system/stop")
 def system_stop(_=Depends(require_user)):
-    """停止运行：暂停监听与转存（队列与配置保留）。"""
+    """停止运行：暂停监听与转存（队列与配置保留）。联动关闭自动整理功能。"""
     db.set_setting("running", False)
     db.set_setting("auto_stop_reason", "")  # 手动停止时清除自动停止标记
-    logstream.warn("system", "⏸ 系统已停止运行（队列与配置已保留，任务不会丢失）")
+    db.set_setting("auto_move_enabled", False)  # 顶部停止时，自动归档功能联动关闭
+    logstream.warn("system", "⏸ 系统已停止运行（自动归档功能已联动关闭，开关已重置为禁用状态）")
     return {"ok": True}
 
 
@@ -377,10 +382,15 @@ def update_channel(ch_id: int, body: dict, _=Depends(require_user)):
                            f" → {label[new_type]}")
     if "enabled" in body:
         ch = db.query("SELECT name FROM channels WHERE id=?", (ch_id,), one=True)
-        db.execute("UPDATE channels SET enabled=? WHERE id=?", (1 if body["enabled"] else 0, ch_id))
+        is_en = 1 if body["enabled"] else 0
+        if not is_en:
+            # 停用频道时，下级「仅订阅」联动关闭并归零
+            db.execute("UPDATE channels SET enabled=0, sub_only=0 WHERE id=?", (ch_id,))
+        else:
+            db.execute("UPDATE channels SET enabled=1 WHERE id=?", (ch_id,))
         if ch:
-            state = "启用" if body["enabled"] else "停用"
-            logstream.info("channels", f"已{state}监控频道 @{ch['name']}")
+            state = "启用" if is_en else "停用"
+            logstream.info("channels", f"已{state}监控频道 @{ch['name']}" + ("（订阅模式已联动关闭）" if not is_en else ""))
     if "sub_only" in body:
         ch = db.query("SELECT name FROM channels WHERE id=?", (ch_id,), one=True)
         if not ch:
@@ -900,43 +910,100 @@ def tmdb_search(query: str = "", kind: str = "all", page: int = 1, _=Depends(req
     return {"items": items[:24]}
 
 
-@router.get("/tmdb/poster")
-def tmdb_poster(request: Request, path: str = "", authorization: str = Header(default="")):
-    """后端代理 TMDB 海报图片（大陆无法直连 image.tmdb.org，走 TG 代理）。
+# LRU 内存海报缓存，最多缓存 300 张海报（约 10~15MB 内存），避免重复并发请求 TMDB
+_POSTER_CACHE: dict[str, tuple[bytes, str]] = {}
+_POSTER_CACHE_MAX = 300
 
-    浏览器 <img> 无法带 Authorization 头：登录时下发路径仅限本接口的 HttpOnly Cookie，
-    不再把长期登录 JWT 放进 URL（避免进入访问日志/浏览器历史/Referer）。
-    """
+
+@router.get("/tmdb/poster")
+def tmdb_poster(
+    request: Request,
+    path: str = "",
+    token: str = Query(default=""),
+    authorization: str = Header(default=""),
+):
+    """后端代理 TMDB 海报图片（支持 Token 参数、HttpOnly Cookie 与 Bearer 头三重鉴权，带内存缓存与海外直连保底）。"""
     from fastapi.responses import Response
     user = ""
     if authorization.startswith("Bearer "):
         user = auth.check_token(authorization[7:]) or ""
+    if not user and token:
+        user = auth.check_token(token) or ""
     if not user:
         user = auth.check_token(request.cookies.get(POSTER_COOKIE, "")) or ""
     if not user:
         raise HTTPException(401, "登录已过期，请重新登录")
-    if not re.match(r"^/[A-Za-z0-9._-]+(\.jpg|\.png|\.jpeg|\.webp)$", path):
+
+    clean_path = path if path.startswith("/") else f"/{path}"
+    if not re.match(r"^/[A-Za-z0-9._-]+(\.jpg|\.png|\.jpeg|\.webp)$", clean_path):
         raise HTTPException(400, "海报路径不合法")
+
+    # 1. 命中内存缓存直接返回（0ms 响应，减轻网络与 TMDB 压力）
+    if clean_path in _POSTER_CACHE:
+        content, media_type = _POSTER_CACHE[clean_path]
+        return Response(
+            content=content,
+            media_type=media_type,
+            headers={
+                "Cache-Control": "public, max-age=2592000, immutable",
+                "X-Poster-Cache": "HIT",
+            },
+        )
+
     proxy = None
     try:
         proxy = jobs._tg_proxy()
     except Exception:
         pass
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+    }
+    url = f"{_TMDB_IMG_BASE}/w200{clean_path}"
+    resp = None
+    import httpx
+
+    # 2. 拉取逻辑：若配置了代理，先尝试代理；代理失败/超时/报错时自动降级直连（海外 VPS 直连 TMDB 极快）
     try:
-        import httpx
-        resp = httpx.get(f"{_TMDB_IMG_BASE}/w200{path}", proxy=proxy, timeout=15)
-        ct = (resp.headers.get("content-type") or "").lower()
-        if resp.status_code != 200 or not ct.startswith("image/"):
-            raise HTTPException(404, "海报获取失败")
-        if len(resp.content) > 6 * 1024 * 1024:
-            raise HTTPException(404, "海报体积过大")
-        return Response(content=resp.content, media_type=resp.headers.get(
-            "content-type", "image/jpeg"),
-            headers={"Cache-Control": "private, max-age=604800"})
-    except HTTPException:
-        raise
+        resp = httpx.get(url, headers=headers, proxy=proxy, timeout=12)
+        if resp.status_code != 200 and proxy:
+            resp = httpx.get(url, headers=headers, proxy=None, timeout=12)
     except Exception as e:
-        raise HTTPException(502, f"海报获取失败: {str(e)[:120]}")
+        if proxy:
+            try:
+                resp = httpx.get(url, headers=headers, proxy=None, timeout=12)
+            except Exception as e2:
+                raise HTTPException(502, f"海报获取失败: {str(e2)[:120]}")
+        else:
+            raise HTTPException(502, f"海报获取失败: {str(e)[:120]}")
+
+    if not resp or resp.status_code != 200:
+        raise HTTPException(resp.status_code if resp else 404, "海报获取失败")
+
+    ct = (resp.headers.get("content-type") or "").lower()
+    if not ct.startswith("image/"):
+        raise HTTPException(404, "海报格式错误")
+
+    if len(resp.content) > 6 * 1024 * 1024:
+        raise HTTPException(404, "海报体积过大")
+
+    media_type = resp.headers.get("content-type", "image/jpeg")
+
+    # 3. 写入内存 LRU 缓存
+    if len(_POSTER_CACHE) >= _POSTER_CACHE_MAX:
+        for k in list(_POSTER_CACHE.keys())[:50]:
+            _POSTER_CACHE.pop(k, None)
+    _POSTER_CACHE[clean_path] = (resp.content, media_type)
+
+    return Response(
+        content=resp.content,
+        media_type=media_type,
+        headers={
+            "Cache-Control": "public, max-age=2592000, immutable",
+            "X-Poster-Cache": "MISS",
+        },
+    )
 
 
 # ---------- version ----------
@@ -984,6 +1051,8 @@ def save_rules(body: dict, _=Depends(require_user)):
                 priority = int(r.get("priority", i + 1))
             except (TypeError, ValueError):
                 raise HTTPException(400, f"第 {i + 1} 条规则的优先级必须是数字")
+            if priority < 1:
+                raise HTTPException(400, f"第 {i + 1} 条规则的优先级必须是大于等于 1 的整数")
             cleaned.append((pattern, category, priority, 1 if r.get("enabled", 1) else 0))
         # 整批一个事务：避免删+插逐条 commit（几十次写锁获取）
         with db.transaction() as con:
@@ -1289,13 +1358,22 @@ def _norm_setting(k: str, v):
             n = int(v)
         except (TypeError, ValueError):
             raise HTTPException(400, f"{k} 必须是整数")
-        return max(lo, min(hi, n))
+        if not (lo <= n <= hi):
+            if k == "daily_limit":
+                raise HTTPException(400, f"每日转存上限必须在 {lo} ~ {hi} 之间（整数）")
+            elif k == "auto_backup_days":
+                raise HTTPException(400, f"自动备份间隔必须在 {lo} ~ {hi} 天之间（整数）")
+            else:
+                raise HTTPException(400, f"{k} 必须在 {lo} ~ {hi} 之间（整数）")
+        return n
     if k == "min_size_gb":
         try:
             f = float(v)
         except (TypeError, ValueError):
-            raise HTTPException(400, "min_size_gb 必须是数字")
-        return max(0.0, min(1000.0, f))
+            raise HTTPException(400, "分享体积下限必须是数字")
+        if f < 0 or f > 1000:
+            raise HTTPException(400, "分享体积下限必须在 0 ~ 1000 GB 之间")
+        return round(f, 2)
     if k == "retry_backoff":
         if not isinstance(v, (list, tuple)) or not v:
             raise HTTPException(400, "重试退避至少需要填写一个大于 0 的秒数")
@@ -1310,7 +1388,7 @@ def _norm_setting(k: str, v):
                 raise HTTPException(400, "重试退避的秒数不能小于 30（避免过密重试触发风控）")
             vals.append(min(n, 86400))
         return vals[:10]
-    if k in ("schedule_start", "schedule_end", "digest_time"):
+    if k in ("schedule_start", "schedule_end", "digest_time", "auto_backup_time"):
         s = str(v).strip()
         if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", s):
             raise HTTPException(400, f"{k} 需为 HH:MM 格式（如 08:30）")
@@ -1332,6 +1410,52 @@ def _norm_setting(k: str, v):
         if s and not re.match(r"^https?://[^\s]+$", s, re.IGNORECASE):
             raise HTTPException(400, f"{k} 需为 http(s):// 开头的完整 URL")
         return s.rstrip("/")
+    if k == "schedule_jitter_min":
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "开工随机扰动必须是整数（分钟）")
+        if not (0 <= n <= 30):
+            raise HTTPException(400, "开工随机扰动必须在 0 ~ 30 分钟之间")
+        return n
+    if k == "batch_rest_enabled":
+        return bool(v)
+    if k == "batch_rest_count":
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "连存小憩笔数必须是整数")
+        if not (2 <= n <= 20):
+            raise HTTPException(400, "连存小憩笔数必须在 2 ~ 20 笔之间")
+        return n
+    if k in ("batch_rest_min_min", "batch_rest_max_min"):
+        lbl = "最短" if k == "batch_rest_min_min" else "最长"
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            raise HTTPException(400, f"{lbl}小憩时间必须是整数（分钟）")
+        if not (1 <= n <= 60):
+            raise HTTPException(400, f"{lbl}小憩时间必须在 1 ~ 60 分钟之间")
+        return n
+    if k == "health_check_interval_min":
+        try:
+            return max(1, min(60, int(float(v))))
+        except (TypeError, ValueError):
+            return 10
+    if k == "auto_move_mode":
+        return "exact" if str(v).strip().lower() == "exact" else "library"
+    if k in ("auto_move_season_folder", "auto_move_fuzzy_t2s", "auto_move_enabled", "auto_move_scan_subdirs", "auto_move_notify"):
+        return bool(v)
+    if k == "auto_move_interval_hours":
+        try:
+            return max(1, min(168, int(float(v))))
+        except Exception:
+            return 6
+    if k == "dedup_cache_ttl_sec":
+        try:
+            return max(0, min(600, int(float(v))))
+        except (TypeError, ValueError):
+            return 90
     if v is None:
         return ""
     return v if isinstance(v, str) else str(v)
@@ -1346,23 +1470,30 @@ def get_settings(_=Depends(require_user)):
             "unclassified_action", "notify_token", "notify_chat_id",
             "notify_transfer_success", "proxy",
             "schedule_enabled", "schedule_start", "schedule_end",
+            "schedule_jitter_min", "batch_rest_enabled", "batch_rest_count",
+            "batch_rest_min_min", "batch_rest_max_min", "health_check_interval_min",
+            "dedup_cache_ttl_sec",
             "tg_api_id", "tg_api_hash", "tg_phone",
             "subscription_only", "dedup_by_name", "organize_enabled",
             "share_update_enabled",
             "tmdb_api_key",
             "bark_url", "pushplus_token", "pushplus_topic", "ntfy_url", "ntfy_token",
             "digest_enabled", "digest_time",
-            "auto_backup_enabled", "auto_backup_days",
-            "api_token"]
+            "auto_backup_enabled", "auto_backup_days", "auto_backup_time",
+            "api_token", "auto_move_mode", "auto_move_season_folder", "auto_move_fuzzy_t2s", "auto_move_enabled"]
     # 未配置过的键必须回代码默认值而非 null：前端会把 null 当「关」显示，
     # 且保存时 bool(null)=false 落库，把默认开启的功能（如每日摘要）悄悄关掉
     defaults = {"enable_share_transfer": True, "enable_offline_download": True,
                 "notify_transfer_success": True, "schedule_enabled": False,
                 "schedule_start": "22:00", "schedule_end": "08:00",
+                "schedule_jitter_min": 5, "batch_rest_enabled": True,
+                "batch_rest_count": 3, "batch_rest_min_min": 2, "batch_rest_max_min": 5,
+                "health_check_interval_min": 10, "dedup_cache_ttl_sec": 90,
                 "subscription_only": False, "dedup_by_name": True,
                 "organize_enabled": False, "share_update_enabled": True,
                 "digest_enabled": True, "digest_time": "21:00",
-                "auto_backup_enabled": False, "auto_backup_days": 7,
+                "auto_backup_enabled": False, "auto_backup_days": 7, "auto_backup_time": "04:00",
+                "auto_move_enabled": False,
                 "running_timeout_min": 60}
     return {k: db.get_setting(k, defaults.get(k)) for k in keys}
 
@@ -1376,14 +1507,17 @@ def put_settings(body: dict, _=Depends(require_user)):
                "unclassified_action", "notify_token", "notify_chat_id",
                "notify_transfer_success", "proxy",
                "schedule_enabled", "schedule_start", "schedule_end",
+               "schedule_jitter_min", "batch_rest_enabled", "batch_rest_count",
+               "batch_rest_min_min", "batch_rest_max_min", "health_check_interval_min",
+               "dedup_cache_ttl_sec",
                "tg_api_id", "tg_api_hash", "tg_phone",
                "subscription_only", "dedup_by_name", "organize_enabled",
                "share_update_enabled",
                "tmdb_api_key",
                "bark_url", "pushplus_token", "pushplus_topic", "ntfy_url", "ntfy_token",
                "digest_enabled", "digest_time",
-               "auto_backup_enabled", "auto_backup_days",
-               "api_token"}
+               "auto_backup_enabled", "auto_backup_days", "auto_backup_time",
+               "api_token", "auto_move_mode", "auto_move_season_folder", "auto_move_fuzzy_t2s", "auto_move_enabled"}
     # 先整体校验再落库：任一字段非法时不写入，避免半新半旧配置。
     # null 表示「前端从未配置过该键」，跳过不写，防止 bool(null)=false 把默认开启的功能关掉
     updates = {k: _norm_setting(k, v) for k, v in body.items()
@@ -1393,6 +1527,30 @@ def put_settings(body: dict, _=Depends(require_user)):
                        ("transfer_interval_min", "transfer_interval_max")):
         if lo_k in updates and hi_k in updates and updates[lo_k] > updates[hi_k]:
             updates[lo_k], updates[hi_k] = updates[hi_k], updates[lo_k]
+    if "batch_rest_min_min" in updates and "batch_rest_max_min" in updates:
+        if updates["batch_rest_min_min"] > updates["batch_rest_max_min"]:
+            raise HTTPException(400, f"小憩时间区间有误：最短小憩时间（{updates['batch_rest_min_min']}分）不能大于最长小憩时间（{updates['batch_rest_max_min']}分）")
+
+    # 1. 115防风控定时计划校验：开启时开始时间与结束时间不能相同
+    sched_on = updates.get("schedule_enabled")
+    if sched_on is None:
+        sched_on = bool(db.get_setting("schedule_enabled", False))
+    if sched_on:
+        s_start = str(updates.get("schedule_start", db.get_setting("schedule_start", "22:00")) or "22:00").strip()
+        s_end = str(updates.get("schedule_end", db.get_setting("schedule_end", "08:00")) or "08:00").strip()
+        if s_start == s_end:
+            raise HTTPException(400, "防风控定时计划的开始时间与结束时间不能相同（如需全天候运行请关闭定时计划开关）！")
+
+    # 2. 定时自动备份校验：开启时必须配置有效 Telegram Bot
+    backup_on = updates.get("auto_backup_enabled")
+    if backup_on is None:
+        backup_on = bool(db.get_setting("auto_backup_enabled", False))
+    if backup_on:
+        tg_token = str(updates.get("notify_token", db.get_setting("notify_token", "")) or "").strip()
+        tg_chat_id = str(updates.get("notify_chat_id", db.get_setting("notify_chat_id", "")) or "").strip()
+        if not tg_token or not tg_chat_id:
+            raise HTTPException(400, "开启「定时自动备份」必须先配置并保存 Telegram Bot Token 与 Chat ID，否则备份文件无法送达！")
+
     for k, v in updates.items():
         db.set_setting(k, v)
     logstream.info("system", f"系统设置已更新（共 {len(updates)} 项）" if updates else "系统设置已保存（无变更）")
@@ -1464,15 +1622,18 @@ async def backfill_episodes(body: dict, _=Depends(require_user)):
         tid = 0
     row = None
     if tid:
-        row = db.query("SELECT id, title, channel, message_id, status, kind, category, target_dir"
-                       " FROM transfers WHERE id=?", (tid,), one=True)
+        row = await asyncio.to_thread(
+            db.query,
+            "SELECT id, title, channel, message_id, status, kind, category, target_dir"
+            " FROM transfers WHERE id=?", (tid,), one=True)
         if not row:
             raise HTTPException(404, "转存记录不存在")
         if row["status"] != "success" or row["kind"] != "share" \
                 or not row["channel"] or not row["message_id"]:
             raise HTTPException(400, "只能以「已成功的分享转存记录」作为锚点（需包含来源频道与消息编号）")
     elif keyword:
-        row = db.query(
+        row = await asyncio.to_thread(
+            db.query,
             "SELECT id, title, channel, message_id, status, kind, category, target_dir FROM transfers"
             " WHERE status='success' AND kind='share' AND message_id>0 AND title LIKE ? ESCAPE '\\'"
             " ORDER BY id DESC LIMIT 1", (f"%{_like_escape(keyword)}%",), one=True)
@@ -1583,6 +1744,7 @@ def export_logs(date: str = "", _=Depends(require_user)):
 
 # ---------- 备份 ----------
 @router.post("/backup/restore")
+@router.post("/settings/backup/restore")
 def backup_restore(body: dict, _=Depends(require_user)):
     """从备份 JSON 恢复数据（整体覆盖）。
 
@@ -1619,3 +1781,184 @@ async def backup_import(_=Depends(require_user)):
     """备份导入为预留接口：网页与 TG Bot 均支持 JSON 恢复。"""
     raise HTTPException(400, "网页「系统设置」与 TG Bot 均支持 JSON 恢复，"
                              "请在网页上传备份文件，或直接把备份 JSON 发送给 Bot")
+
+
+# ---------- auto_move (定时文件整理) ----------
+@router.get("/auto-move/rules")
+def get_auto_move_rules(_=Depends(require_user)):
+    rules = [dict(r) for r in db.query("SELECT * FROM auto_move_rules ORDER BY id ASC")]
+    raw_ft = db.get_setting("auto_move_fixed_times", '["06:00", "12:00", "18:00"]')
+    try:
+        fixed_times = json.loads(raw_ft) if isinstance(raw_ft, str) else raw_ft
+        if not isinstance(fixed_times, list):
+            fixed_times = ["06:00", "12:00", "18:00"]
+    except Exception:
+        fixed_times = ["06:00", "12:00", "18:00"]
+
+    return {
+        "system_running": str(db.get_setting("running", False)).lower() == "true",
+        "rules": rules,
+        "settings": {
+            "auto_move_enabled": bool(db.get_setting("auto_move_enabled", False)),
+            "auto_move_schedule_type": str(db.get_setting("auto_move_schedule_type", "interval") or "interval"),
+            "auto_move_interval_hours": int(db.get_setting("auto_move_interval_hours", 6) or 6),
+            "auto_move_fixed_times": fixed_times,
+            "auto_move_scan_subdirs": bool(db.get_setting("auto_move_scan_subdirs", True)),
+            "auto_move_notify": bool(db.get_setting("auto_move_notify", True)),
+            "auto_move_last_run": float(db.get_setting("auto_move_last_run", 0) or 0),
+            "auto_move_mode": str(db.get_setting("auto_move_mode", "library") or "library"),
+            "auto_move_season_folder": bool(db.get_setting("auto_move_season_folder", True)),
+            "auto_move_fuzzy_t2s": bool(db.get_setting("auto_move_fuzzy_t2s", True)),
+        },
+        "is_organizing": transfer_gate.is_auto_move_running(),
+        "gate_state": transfer_gate.get_gate_state(),
+        "drain_status": transfer_gate.get_drain_status(),
+        "next_runs": jobs.compute_next_runs(),
+        "last_result": jobs.get_last_auto_move_result(),
+    }
+
+
+@router.post("/auto-move/rules")
+def save_auto_move_rule(body: dict, _=Depends(require_user)):
+    source_dir = str(body.get("source_dir", "")).strip().rstrip("/")
+    target_dir = str(body.get("target_dir", "")).strip().rstrip("/")
+    if not source_dir or not target_dir:
+        raise HTTPException(400, "源目录和目标目录不能为空")
+
+    mode = str(body.get("mode", "default")).strip().lower()
+    if mode not in ("default", "library", "exact"):
+        mode = "default"
+
+    raw_kw = str(body.get("keyword", "")).strip()
+    extracted_kw = pan.extract_target_folder_name(target_dir)
+    keyword = raw_kw or extracted_kw
+    if mode == "exact" and not keyword:
+        raise HTTPException(400, "精确模式下目标目录未包含有效文件夹名称，无法提取匹配关键词，不予保存")
+
+    enabled = 1 if body.get("enabled", True) else 0
+    rule_id = body.get("id")
+    if rule_id:
+        db.execute(
+            "UPDATE auto_move_rules SET source_dir=?, target_dir=?, keyword=?, mode=?, enabled=? WHERE id=?",
+            (source_dir, target_dir, keyword, mode, enabled, rule_id)
+        )
+    else:
+        db.execute(
+            "INSERT INTO auto_move_rules(source_dir, target_dir, keyword, mode, enabled, created_at, last_run_at, last_moved_count) "
+            "VALUES(?,?,?,?,?,?,NULL,0)",
+            (source_dir, target_dir, keyword, mode, enabled, time.time())
+        )
+    mode_desc = "总库分流" if mode == "library" else ("精确匹配" if mode == "exact" else "跟随全局")
+    logstream.info("auto_move", f"已保存整理规则 [{source_dir} ➔ {target_dir} / {mode_desc}] (关键词: {keyword or '自动'})")
+    return {"ok": True}
+
+
+@router.delete("/auto-move/rules/{rule_id}")
+def delete_auto_move_rule(rule_id: int, _=Depends(require_user)):
+    db.execute("DELETE FROM auto_move_rules WHERE id=?", (rule_id,))
+    logstream.info("auto_move", f"已删除整理规则 #{rule_id}")
+    rem = db.query("SELECT count(*) c FROM auto_move_rules WHERE enabled=1", one=True)
+    if not rem or int(rem["c"]) == 0:
+        if bool(db.get_setting("auto_move_enabled", False)):
+            db.set_setting("auto_move_enabled", False)
+            logstream.warn("auto_move", "所有启用的整理规则已清空，定时文件整理总开关已自动关闭")
+    return {"ok": True}
+
+
+@router.put("/auto-move/settings")
+def update_auto_move_settings(body: dict, _=Depends(require_user)):
+    sys_running = str(db.get_setting("running", False)).lower() == "true"
+
+    # 提取目标调度类型和固定时段
+    target_sched_type = body.get("auto_move_schedule_type", db.get_setting("auto_move_schedule_type", "interval"))
+
+    parsed_fixed_times = None
+    if "auto_move_fixed_times" in body:
+        ft = body["auto_move_fixed_times"]
+        if isinstance(ft, list):
+            parsed_fixed_times = ft
+        elif isinstance(ft, str):
+            try:
+                parsed_fixed_times = json.loads(ft)
+            except Exception:
+                parsed_fixed_times = []
+    else:
+        ft_raw = db.get_setting("auto_move_fixed_times", '["06:00", "12:00", "18:00"]')
+        try:
+            parsed_fixed_times = json.loads(ft_raw) if isinstance(ft_raw, str) else list(ft_raw)
+        except Exception:
+            parsed_fixed_times = []
+
+    target_enabled = body.get("auto_move_enabled")
+    if target_enabled is None:
+        target_enabled = bool(db.get_setting("auto_move_enabled", False))
+    else:
+        target_enabled = bool(target_enabled)
+
+    # 如果要开启总开关（或在开启状态下变更调度规则），进行闭环校验
+    if target_enabled:
+        if not sys_running:
+            raise HTTPException(400, "系统处于停止状态，请先在顶栏点击「运行」启动系统后再开启定时整理！")
+
+        # 1. 检查固定时间点是否为空
+        if target_sched_type == "fixed_times":
+            if not parsed_fixed_times or len(parsed_fixed_times) == 0:
+                raise HTTPException(400, "每天固定时间点列表为空，请至少添加一个执行时段后再开启总开关！")
+
+        # 2. 检查是否有启用的整理规则
+        rule_cnt = db.query("SELECT count(*) c FROM auto_move_rules WHERE enabled=1", one=True)
+        if not rule_cnt or int(rule_cnt["c"]) == 0:
+            raise HTTPException(400, "当前没有启用的整理规则，请至少添加并启用一条整理规则后再开启总开关！")
+
+    if "auto_move_enabled" in body:
+        db.set_setting("auto_move_enabled", bool(body["auto_move_enabled"]))
+    if "auto_move_schedule_type" in body and body["auto_move_schedule_type"] in ("interval", "fixed_times"):
+        db.set_setting("auto_move_schedule_type", body["auto_move_schedule_type"])
+    if "auto_move_interval_hours" in body:
+        db.set_setting("auto_move_interval_hours", max(int(body["auto_move_interval_hours"] or 6), 1))
+    if "auto_move_fixed_times" in body:
+        ft = body["auto_move_fixed_times"]
+        if isinstance(ft, list):
+            db.set_setting("auto_move_fixed_times", json.dumps(ft))
+        elif isinstance(ft, str):
+            db.set_setting("auto_move_fixed_times", ft)
+    if "auto_move_scan_subdirs" in body:
+        db.set_setting("auto_move_scan_subdirs", bool(body["auto_move_scan_subdirs"]))
+    if "auto_move_notify" in body:
+        db.set_setting("auto_move_notify", bool(body["auto_move_notify"]))
+    if "auto_move_mode" in body and body["auto_move_mode"] in ("library", "exact"):
+        db.set_setting("auto_move_mode", body["auto_move_mode"])
+    if "auto_move_season_folder" in body:
+        db.set_setting("auto_move_season_folder", bool(body["auto_move_season_folder"]))
+    if "auto_move_fuzzy_t2s" in body:
+        db.set_setting("auto_move_fuzzy_t2s", bool(body["auto_move_fuzzy_t2s"]))
+    return {"ok": True, "next_runs": jobs.compute_next_runs()}
+
+
+@router.post("/auto-move/run")
+async def run_auto_move_now(_=Depends(require_user)):
+    if not (str(db.get_setting("running", False)).lower() == "true"):
+        raise HTTPException(400, "系统处于停止状态，请先在顶栏点击「运行」启动系统后再执行！")
+    if not bool(db.get_setting("auto_move_enabled", False)):
+        raise HTTPException(400, "定时文件整理功能未开启，请先打开功能总开关后再执行！")
+
+    lock = jobs._get_auto_move_lock()
+    if lock.locked() or transfer_gate.get_gate_state() != "idle":
+        return {
+            "ok": True,
+            "already_running": True,
+            "gate_state": transfer_gate.get_gate_state(),
+            "drain_status": transfer_gate.get_drain_status(),
+            "msg": "整理任务已在排队执行中，正在等待队列终点并执行移动..."
+        }
+
+    # 异步启动后台执行：即便需要等待转存/云下载/重试数分钟，也不会阻塞 HTTP 接口
+    asyncio.create_task(jobs.execute_auto_move(trigger="manual"))
+    return {
+        "ok": True,
+        "started": True,
+        "gate_state": "draining",
+        "drain_status": transfer_gate.get_drain_status(),
+        "msg": "已触发排队整理：系统正在等待现有转存/云下载及重试全部完成，完成后将自动开启移动归档。"
+    }
+

@@ -1,5 +1,5 @@
 <template>
-  <el-dialog :model-value="modelValue" :title="title" width="600px" top="6vh"
+  <el-dialog :model-value="modelValue" :title="title" :width="'min(600px, 94vw)'" top="6vh"
              :close-on-click-modal="false" @update:model-value="emitVisible" @open="onOpen">
     <!-- 未登录 115 时只提示，不展示目录 -->
     <el-alert v-if="loginErr" type="warning" show-icon :closable="false">
@@ -33,19 +33,20 @@
         </div>
       </div>
 
-      <div class="dp-picked">将选择：<b class="mono">{{ pendingValue }}</b></div>
+      <div class="dp-picked">将选择：<b class="dp-chosen-path">{{ pendingValue }}</b></div>
     </template>
 
     <template #footer>
       <div class="dp-footer">
-        <div class="dp-footer-left" style="gap: 10px">
+        <div class="dp-footer-left">
           <el-button :disabled="needLogin" @click="showMkdir">
-            <el-icon><FolderAdd /></el-icon>新建文件夹
+            <el-icon><FolderAdd /></el-icon>
+            <span>新建文件夹</span>
           </el-button>
           <el-button v-if="allowSkip" @click="pickSpecial('skip')">跳过（不转存）</el-button>
           <el-button v-if="allowEmpty" @click="pickSpecial('')">清空（跟随分享转存）</el-button>
         </div>
-        <div>
+        <div class="dp-footer-right">
           <el-button @click="emitVisible(false)">取消</el-button>
           <el-button type="primary" :disabled="needLogin" @click="confirm">确定</el-button>
         </div>
@@ -165,36 +166,42 @@ const needLogin = computed(() => !!loginErr.value && !dirs.value.length)
 
 <style scoped>
 .dp-crumbs {
-  display: flex; align-items: center; flex-wrap: wrap; gap: 2px;
-  padding: 8px 10px; background: #f5f7fa; border-radius: 6px; font-size: var(--fs-body);
+  display: flex; align-items: center; flex-wrap: wrap; gap: 4px;
+  padding: 8px 12px; background: var(--glass-bg-strong, rgba(245, 247, 250, .85));
+  border: 1px solid var(--saas-line); border-radius: 8px; font-size: var(--fs-body);
 }
-.dp-root-icon { color: #e6a23c; margin-right: 4px; }
+.dp-root-icon { color: #f59e0b; margin-right: 4px; }
 .dp-crumb {
-  border: none; background: none; cursor: pointer; color: #409eff;
+  border: none; background: none; cursor: pointer; color: var(--el-color-primary);
   padding: 2px 4px; font-size: var(--fs-body); max-width: 180px;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border-radius: 4px;
 }
-.dp-crumb.current { color: #303133; font-weight: 600; cursor: default; }
-.dp-sep { color: #999; }
+.dp-crumb:hover { background: rgba(79, 107, 255, .14); color: var(--el-color-primary); }
+.dp-crumb.current { color: var(--saas-text-main); font-weight: 600; cursor: default; }
+.dp-sep { color: var(--saas-text-sub); }
 .dp-list {
   margin-top: 10px; max-height: 320px; overflow-y: auto;
-  border: 1px solid #ebeef5; border-radius: 6px; min-height: 140px;
+  border: 1px solid var(--saas-line); border-radius: 8px; min-height: 140px;
+  background: var(--glass-bg, transparent);
 }
 .dp-row {
-  display: flex; align-items: center; gap: 8px; padding: 7px 12px;
-  cursor: pointer; border-bottom: 1px solid #f5f7fa; font-size: var(--fs-body);
+  display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+  cursor: pointer; border-bottom: 1px solid var(--saas-line); font-size: var(--fs-body);
+  color: var(--saas-text-main); transition: all .15s ease;
 }
 .dp-row:last-child { border-bottom: none; }
-.dp-row:hover { background: #f5f7fa; }
-.dp-row.active { background: #ecf5ff; }
-.dp-radio { width: 14px; height: 14px; border: 1px solid #dcdfe6; border-radius: 50%; flex: none; position: relative; }
-.dp-row.active .dp-radio { border-color: #409eff; }
+.dp-row:hover { background: rgba(79, 107, 255, .12); color: var(--el-color-primary); }
+.dp-row.active { background: rgba(79, 107, 255, .15); }
+.dp-radio { width: 14px; height: 14px; border: 1px solid var(--saas-line); border-radius: 50%; flex: none; position: relative; }
+.dp-row.active .dp-radio { border-color: var(--el-color-primary); }
 .dp-row.active .dp-radio::after {
-  content: ''; position: absolute; inset: 3px; background: #409eff; border-radius: 50%;
+  content: ''; position: absolute; inset: 3px; background: var(--el-color-primary); border-radius: 50%;
 }
-.dp-folder { color: #e6a23c; flex: none; }
+.dp-folder { color: #f59e0b; flex: none; }
 .dp-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.dp-empty { padding: 40px 0; text-align: center; color: #999; font-size: var(--fs-body); }
-.dp-picked { margin-top: 10px; font-size: var(--fs-body); color: #606266; }
-.dp-footer { display: flex; justify-content: space-between; align-items: center; width: 100%; gap: 8px; flex-wrap: wrap; }
+.dp-empty { padding: 40px 0; text-align: center; color: var(--saas-text-sub); font-size: var(--fs-body); }
+.dp-picked { margin-top: 10px; font-size: var(--fs-body); color: var(--saas-text-sub); }
+.dp-footer { display: flex; justify-content: space-between; align-items: center; width: 100%; gap: 12px; flex-wrap: wrap; }
+.dp-footer-left,
+.dp-footer-right { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 </style>

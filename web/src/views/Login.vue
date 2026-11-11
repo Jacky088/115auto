@@ -58,9 +58,9 @@ const submit = async () => {
 .login-head { text-align: center; margin-bottom: 22px; }
 .login-mark {
   width: 52px; height: 52px; border-radius: 14px; margin: 0 auto 12px;
-  background: linear-gradient(135deg, #2f6bff, #5d8bff);
+  background: var(--grad-brand);
   display: flex; align-items: center; justify-content: center; color: #fff;
-  box-shadow: 0 8px 20px rgba(47, 107, 255, .35);
+  box-shadow: 0 8px 24px rgba(79, 107, 255, .42);
 }
 .login-head h2 { margin: 0 0 4px; font-size: var(--fs-page); color: var(--saas-text-main); }
 .login-head p { color: var(--saas-text-sub); font-size: var(--fs-body); margin: 0; }

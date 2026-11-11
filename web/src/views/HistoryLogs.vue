@@ -1,8 +1,12 @@
 <template>
   <el-card shadow="never" class="page-card">
     <template #header>
-      <div class="toolbar" style="margin-bottom: 0">
-        <span>历史日志 <span class="tip">保留 7 天，到期自动删除；「清屏」不影响已保存日志</span></span>
+      <div class="card-head">
+        <div class="title-with-badge">
+          <span class="card-title">历史日志</span>
+          <el-tag size="small" class="count-tag">共 {{ total }} 条日志</el-tag>
+          <span class="tip">保留 7 天，到期自动删除</span>
+        </div>
         <el-button @click="exportTxt">导出选中日志</el-button>
       </div>
     </template>
@@ -27,22 +31,31 @@
     </div>
 
     <!-- 筛选 -->
-    <div class="toolbar" style="margin-top: 14px">
-      <el-select v-model="filter.level" clearable placeholder="级别" style="width: 120px" @change="load">
-        <el-option label="info" value="info" />
-        <el-option label="warn" value="warn" />
-        <el-option label="error" value="error" />
-      </el-select>
-      <el-select v-model="filter.module" clearable filterable placeholder="模块" style="width: 150px" @change="load">
-        <el-option v-for="m in modules" :key="m" :label="m" :value="m" />
-      </el-select>
-      <el-input v-model="filter.search" placeholder="搜索日志内容" clearable style="width: 260px"
-                @keyup.enter="load" @clear="load" />
-      <el-button type="primary" @click="load">查询</el-button>
-      <span class="tip">共 {{ total }} 条</span>
+    <div class="toolbar filter-toolbar" style="margin-top: 14px">
+      <div class="filter-selects">
+        <el-select v-model="filter.level" clearable placeholder="级别" class="filter-level" @change="load">
+          <el-option label="info" value="info" />
+          <el-option label="warn" value="warn" />
+          <el-option label="error" value="error" />
+        </el-select>
+        <el-select v-model="filter.module" clearable filterable placeholder="模块" class="filter-module" @change="load">
+          <el-option v-for="m in modules" :key="m" :label="m" :value="m" />
+        </el-select>
+      </div>
+      <div class="filter-search-row">
+        <el-input v-model="filter.search" placeholder="搜索日志内容" clearable class="filter-search"
+                  @keyup.enter="load" @clear="load">
+          <template #prefix><el-icon><Search /></el-icon></template>
+        </el-input>
+        <el-button type="primary" @click="load">查询</el-button>
+        <span class="tip filter-count">共 {{ total }} 条</span>
+      </div>
     </div>
 
-    <el-table :data="items" size="small" v-loading="loading" empty-text="暂无日志">
+    <el-table :data="items" size="small" v-loading="loading">
+      <template #empty>
+        <el-empty :image-size="60" description="暂无符合条件的日志记录" />
+      </template>
       <el-table-column label="时间" width="160">
         <template #default="{ row }">{{ fmtTime(row.created_at) }}</template>
       </el-table-column>
@@ -56,12 +69,13 @@
       </el-table-column>
       <el-table-column label="内容" min-width="480">
         <template #default="{ row }">
-          <span class="mono msg-text">{{ row.message }}</span>
+          <span class="msg-text">{{ row.message }}</span>
         </template>
       </el-table-column>
     </el-table>
 
-    <el-pagination style="margin-top: 14px; justify-content: flex-end" layout="total, sizes, prev, pager, next, jumper"
+    <el-pagination class="log-pager" style="margin-top: 14px; justify-content: flex-end"
+                   layout="total, sizes, prev, pager, next, jumper"
                    :total="total" :page-size="size" :page-sizes="[20, 50, 100]"
                    v-model:current-page="page" v-model:page-size="size"
                    @current-change="load" @size-change="onSizeChange" />
@@ -71,6 +85,7 @@
 <script setup>
 import { onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
+import { Search } from '@element-plus/icons-vue'
 import { api, errMsg, fmtTime } from '../api'
 
 const days = ref([])
@@ -165,13 +180,20 @@ onMounted(async () => {
 </script>
 
 <style scoped>
-.tip { color: #999; font-size: var(--fs-caption); font-weight: 400; }
+.card-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; }
+.title-with-badge { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.card-title { font-weight: 700; font-size: var(--fs-title); color: var(--saas-text-main); }
+.tip { color: var(--saas-text-sub); font-size: var(--fs-caption); font-weight: 400; }
 .day-chips { display: flex; gap: 10px; flex-wrap: wrap; }
 .day-chip {
   flex: 1; min-width: 150px; padding: 12px 16px; border-radius: 10px; cursor: pointer;
-  border: 1px solid var(--saas-line); background: #fff; transition: all .15s ease;
+  border: 1px solid var(--saas-line); background: var(--glass-bg-strong); color: var(--saas-text-main); transition: all .15s ease;
 }
-.day-chip:hover { border-color: var(--el-color-primary-light-5); }
+.day-chip:hover {
+  border-color: var(--el-color-primary);
+  background: rgba(79, 107, 255, .08);
+  transform: translateY(-1px);
+}
 .day-chip.active {
   border-color: var(--el-color-primary);
   background: var(--el-color-primary-light-9);
@@ -190,4 +212,23 @@ onMounted(async () => {
 .d-warn-text { color: #d97706; font-weight: 500; }
 .d-err-text { color: #dc2626; font-weight: 500; }
 .msg-text { font-size: var(--fs-caption); word-break: break-all; white-space: normal; line-height: 1.6; }
+
+/* 筛选栏：桌面端同一行铺开；移动端拆成双栏下拉 + 搜索按钮行，不撑宽卡片 */
+.filter-selects { display: inline-flex; align-items: center; gap: 10px; }
+.filter-level { width: 120px; }
+.filter-module { width: 150px; }
+.filter-search-row { display: inline-flex; align-items: center; gap: 10px; }
+.filter-search { width: 260px; }
+.filter-count { white-space: nowrap; }
+
+@media (max-width: 768px) {
+  .day-chip { padding: 10px 12px; }
+  .filter-toolbar { flex-direction: column; align-items: stretch; gap: 8px; }
+  .filter-selects { width: 100%; display: flex; gap: 8px; }
+  .filter-level { flex: 1; min-width: 0; width: auto; }
+  .filter-module { flex: 1.25; min-width: 0; width: auto; }
+  .filter-search-row { width: 100%; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .filter-toolbar .filter-search { flex: 1 1 150px; min-width: 0; width: auto; }
+  .log-pager { justify-content: center !important; }
+}
 </style>

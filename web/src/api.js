@@ -46,10 +46,39 @@ export const statusLabel = {
 export const statusTagType = (s) => ({ success: 'success', failed: 'danger', blocked: 'warning',
   queued: 'info', running: 'primary', submitted: 'warning', duplicate: 'info', skipped: 'info' }[s] || 'info')
 
-/** 保存/生效成功统一用顶部胶囊消息（多条例自动向下堆叠，grouping 合并重复消息） */
+/** 保存/生效成功统一用顶部消息（多条自动向下顺延堆叠，不合并角标） */
 export const saveOk = (title = '保存成功', message = '') =>
   ElMessage({ type: 'success', message: message ? `${title}，${message}` : title,
-              duration: 2500, grouping: true })
+              duration: 2500, grouping: false })
+
+// 最近提示去重防抖（防止网络抖动或连续轮询时同一错误瞬间刷屏）
+const _recentToasts = new Map()
+const _canToast = (key, cooldownMs = 2500) => {
+  const now = Date.now()
+  const last = _recentToasts.get(key) || 0
+  if (now - last < cooldownMs) return false
+  _recentToasts.set(key, now)
+  return true
+}
+
+/** 全站统一操作反馈门面（自动防抖、统一持续时间） */
+export const toast = {
+  success: (title, message = '') => saveOk(title, message),
+  error: (err, fallback = '操作失败') => {
+    const msg = typeof err === 'string' ? err : errMsg(err, fallback)
+    if (_canToast(`err:${msg}`, 2000)) {
+      ElMessage({ type: 'error', message: msg, duration: 3500, grouping: false })
+    }
+  },
+  warn: (msg) => {
+    if (_canToast(`warn:${msg}`, 2000)) {
+      ElMessage({ type: 'warning', message: msg, duration: 3000, grouping: false })
+    }
+  },
+  info: (msg) => {
+    ElMessage({ type: 'info', message: msg, duration: 2500, grouping: false })
+  }
+}
 
 const _escape = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 

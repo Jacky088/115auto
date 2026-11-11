@@ -4,15 +4,16 @@
       <div class="toolbar" style="margin-bottom: 0">
         <b>系统设置</b>
         <el-tag v-if="dirty" type="danger" effect="plain" size="small">● 有未保存的更改</el-tag>
+        <el-button v-if="dirty" type="primary" size="small" style="margin-left: 8px" @click="save">保存设置</el-button>
         <span style="margin-left: auto" class="tip">修改需点击「保存设置」后生效</span>
       </div>
     </template>
-    <el-form :label-width="isMobile ? 90 : 130" label-position="right" class="settings-form">
+    <el-form label-position="top" class="settings-form">
       <div class="settings-flow">
           <div class="section-card"><div class="section-title">功能开关</div>
           <el-form-item label="115 分享转存">
             <div class="switch-row">
-              <el-switch v-model="f.enable_share_transfer" />
+              <el-switch v-model="f.enable_share_transfer" @change="onToggleShareTransfer" />
               <span class="tip">关闭后新消息中的分享链接不再转存，排队任务自动跳过</span>
             </div>
           </el-form-item>
@@ -43,7 +44,7 @@
                 <el-option v-for="p in POLL_PRESETS" :key="p.label"
                            :label="p.label" :value="p.label" />
               </el-select>
-              <span class="tip">每轮轮询在区间内随机等待，降低被识别风险；仅作用于网页轮询频道</span>
+              <span class="tip range-tip">每轮轮询在区间内随机等待，降低被识别风险；仅作用于网页轮询频道</span>
             </div>
           </el-form-item>
 
@@ -59,7 +60,7 @@
           </el-form-item>
 
           <el-form-item label="TG 代理">
-            <div class="range-row" style="width: 100%">
+            <div class="range-row input-btn-row" style="width: 100%">
               <el-input v-model="f.proxy" placeholder="socks5://127.0.0.1:1080 或 http://127.0.0.1:7890（仅 TG 流量走代理，留空直连）" />
               <el-button :loading="proxyTesting" @click="testProxy">测试代理</el-button>
             </div>
@@ -79,19 +80,19 @@
                 <el-option v-for="p in TRANSFER_PRESETS" :key="p.label"
                            :label="p.label" :value="p.label" />
               </el-select>
-              <span class="tip">每笔转存在区间内随机等待；频繁触发风控请选「稳健」</span>
+              <span class="tip range-tip">每笔转存在区间内随机等待；频繁触发风控请选「稳健」</span>
             </div>
           </el-form-item>
           <el-form-item label="每日转存上限">
             <div class="range-row">
-              <el-input-number v-model="f.daily_limit" :min="1" :max="50" controls-position="right" />
-              <span class="tip">1~50；115 单账号每日转存的安全上限，不建议设为最大值</span>
+              <el-input-number v-model="f.daily_limit" :min="1" :max="50" :step="1" :step-strictly="true" :precision="0" />
+              <span class="tip range-tip">1~50；115 单账号每日转存的安全上限，不建议设为最大值</span>
             </div>
           </el-form-item>
           <el-form-item label="分享体积下限">
             <div class="range-row">
-              <el-input-number v-model="f.min_size_gb" :min="0" :step="0.1" controls-position="right" />
-              <span class="tip">单位 GB；低于此值的分享视为广告并自动跳过，0 表示关闭</span>
+              <el-input-number v-model="f.min_size_gb" :min="0" :max="1000" :step="0.1" :precision="1" />
+              <span class="tip range-tip">单位 GB；低于此值的分享视为广告并自动跳过，0 表示关闭</span>
             </div>
           </el-form-item>
           <el-form-item label="失败重试">
@@ -100,13 +101,16 @@
                 <el-option v-for="p in RETRY_PRESETS" :key="p.label"
                            :label="p.label" :value="p.label" />
               </el-select>
-              <span class="tip">失败后按预设间隔逐级重试（共 3 次）</span>
+              <span class="tip range-tip">失败后按预设间隔逐级重试（共 3 次）</span>
             </div>
           </el-form-item>
-          <el-form-item label="定时计划">
+          </div>
+
+          <div class="section-card"><div class="section-title">115防风控</div>
+          <el-form-item label="定时计划" id="setting-schedule-item">
             <div class="switch-row">
               <el-switch v-model="f.schedule_enabled" />
-              <span class="tip">开启后仅在允许时段内转存/云下载（队列保留，时段外自动等待）</span>
+              <span class="tip">开启后仅在允许时段内执行转存、云下载与自动文件整理（任务排队保留，时段外自动等待，规避深夜异常特征）</span>
             </div>
             <div class="range-row" style="margin-top: 8px" v-if="f.schedule_enabled">
               <el-time-select v-model="f.schedule_start" start="00:00" step="00:30" end="23:30"
@@ -118,6 +122,66 @@
             </div>
           </el-form-item>
 
+          <el-form-item label="开工随机扰动">
+            <div class="range-row">
+              <el-input-number v-model="f.schedule_jitter_min" :min="0" :max="30" :step="1" :step-strictly="true" :precision="0" :disabled="!f.schedule_enabled" />
+              <span class="tip range-tip">
+                单位：分钟；定时时段到达后随机延迟 0~N 分钟开工，消除整点脚本特征（0 表示不扰动）
+                <template v-if="!f.schedule_enabled">
+                  <span class="warn-text">（需先开启上方「定时计划」开关）</span>
+                  <el-button link type="primary" size="small" style="margin-left: 6px; font-weight: 500" @click="enableSchedule">
+                    一键开启
+                  </el-button>
+                </template>
+              </span>
+            </div>
+          </el-form-item>
+
+          <el-form-item label="拟人化连存小憩">
+            <div class="switch-row">
+              <el-switch v-model="f.batch_rest_enabled" />
+              <span class="tip">连续完成多笔转存后自动插入小憩，模拟真人离开电脑、喝水或浏览，打破固定匀速特征</span>
+            </div>
+            <template v-if="f.batch_rest_enabled">
+              <div class="range-row" style="margin-top: 8px">
+                <span class="tip">每连续完成</span>
+                <el-input-number v-model="f.batch_rest_count" :min="2" :max="20" :step="1" :step-strictly="true" :precision="0" style="width: 126px" />
+                <span class="tip">笔转存，</span>
+              </div>
+              <div class="range-row" style="margin-top: 8px">
+                <span class="tip">随机小憩</span>
+                <el-input-number v-model="f.batch_rest_min_min" :min="1" :max="60" :step="1" :step-strictly="true" :precision="0" style="width: 126px" />
+                <span class="sep">~</span>
+                <el-input-number v-model="f.batch_rest_max_min" :min="1" :max="60" :step="1" :step-strictly="true" :precision="0" style="width: 126px" />
+                <span class="tip">分钟（区间：最短不能大于最长）</span>
+              </div>
+            </template>
+          </el-form-item>
+
+          <el-form-item label="后台巡检周期">
+            <div class="range-row">
+              <el-select v-model="f.health_check_interval_min" style="width: 220px">
+                <el-option label="每 5 分钟" :value="5" />
+                <el-option label="每 10 分钟（推荐）" :value="10" />
+                <el-option label="每 15 分钟" :value="15" />
+                <el-option label="每 30 分钟" :value="30" />
+              </el-select>
+              <span class="tip range-tip">空闲时探测 115 Cookie 存活状态的间隔；适度放宽可削减 80% 的无效背景心跳调用</span>
+            </div>
+          </el-form-item>
+
+          <el-form-item label="查重目录缓存">
+            <div class="range-row">
+              <el-select v-model="f.dedup_cache_ttl_sec" style="width: 220px">
+                <el-option label="不缓存（每次穿透查）" :value="0" />
+                <el-option label="30 秒" :value="30" />
+                <el-option label="60 秒" :value="60" />
+                <el-option label="90 秒（推荐）" :value="90" />
+                <el-option label="180 秒" :value="180" />
+              </el-select>
+              <span class="tip range-tip">同目录多集转存时复用最近读取的目录列表，避免每存一集就重复请求 115 目录接口</span>
+            </div>
+          </el-form-item>
           </div>
 
           <div class="section-card"><div class="section-title">TG 通知</div>
@@ -135,7 +199,7 @@
                           placeholder="TG Bot Token（@BotFather 获取）" />
               </div>
               <div class="range-row" style="width: 100%">
-                <el-input v-model="nf.chat_id" placeholder="Chat ID（你的用户 ID）" style="width: 220px" />
+                <el-input v-model="nf.chat_id" placeholder="Chat ID（你的用户 ID）" style="width: 260px" />
               </div>
               <div class="range-row" style="width: 100%">
                 <el-button type="primary" plain size="small" :loading="testing"
@@ -152,20 +216,26 @@
           <div class="section-card"><div class="section-title">转存增强</div>
           <el-form-item label="分享追更">
             <div class="switch-row">
-              <el-switch v-model="f.share_update_enabled" />
-              <span class="tip">同一分享链接再次出现时不再判重：自动比对目标目录，只转存新增的集数文件，已存过的不重复（适配分享方往同一链接持续加更的追剧场景）</span>
+              <el-switch v-model="f.share_update_enabled" :disabled="!f.enable_share_transfer" />
+              <span class="tip">
+                同一分享链接再次出现时不再判重：自动比对目标目录，只转存新增的集数文件，已存过的不重复（适配分享方往同一链接持续加更的追剧场景）
+                <span v-if="!f.enable_share_transfer" class="warn-text">（需先开启上方「115 分享转存」总开关）</span>
+              </span>
             </div>
           </el-form-item>
           <el-form-item label="按文件名去重">
             <div class="switch-row">
-              <el-switch v-model="f.dedup_by_name" />
+              <el-switch v-model="f.dedup_by_name" :disabled="!f.enable_share_transfer && !f.enable_offline_download" />
               <span class="tip">开启后转存前再按文件名查重：网盘同名目录下已存在同名文件时自动跳过</span>
             </div>
           </el-form-item>
           <el-form-item label="自动整理">
             <div class="switch-row">
-              <el-switch v-model="f.organize_enabled" />
-              <span class="tip">开启后转存完成自动按「剧名/季/集」结构整理文件并重命名</span>
+              <el-switch :model-value="false" disabled />
+              <span class="tip">
+                开启后转存完成自动按「剧名/季/集」结构整理文件并重命名
+                <span class="warn-text">（功能重构升级中，暂不开放）</span>
+              </span>
             </div>
           </el-form-item>
           </div>
@@ -232,7 +302,11 @@
           <el-form-item label="每日摘要">
             <div class="switch-row">
               <el-switch v-model="f.digest_enabled" />
-              <el-button :loading="digestTesting" @click="testDigest">立即推送一次</el-button>
+              <el-tooltip :disabled="!!f.digest_enabled" content="请先开启「每日摘要」总开关" placement="top">
+                <span>
+                  <el-button :loading="digestTesting" :disabled="!f.digest_enabled" @click="testDigest">立即推送一次</el-button>
+                </span>
+              </el-tooltip>
             </div>
             <div class="tip" style="width: 100%">
               开启后每天定时把当日转存汇总推送到已配置的通知渠道（TG / Bark / PushPlus / ntfy）；
@@ -252,10 +326,25 @@
               <span class="tip">开启后定时把设置/频道/规则/黑名单/订阅/转存记录打包推送到 TG Bot，可直接转发回 Bot 恢复</span>
             </div>
           </el-form-item>
-          <el-form-item label="备份间隔（天）">
+          <el-form-item label="备份间隔">
             <div class="range-row">
-              <el-input-number v-model="f.auto_backup_days" :min="1" :max="365" controls-position="right" />
-              <span class="tip">1~365 天</span>
+              <el-input-number v-model="f.auto_backup_days" :min="1" :max="365" :step="1" :step-strictly="true" :precision="0" :disabled="!f.auto_backup_enabled" />
+              <span class="tip">天（1~365 天）</span>
+              <template v-if="f.auto_backup_enabled">
+                <span class="tip">推送时间：</span>
+                <el-time-select v-model="f.auto_backup_time" start="00:00" step="00:30" end="23:30"
+                                placeholder="选择时间" style="width: 120px" />
+                <span class="tip range-tip">周期到达当天在此时间推送（默认 04:00，推荐凌晨闲时备份）</span>
+              </template>
+              <span v-else class="warn-text">（需先开启上方「自动备份」总开关）</span>
+            </div>
+          </el-form-item>
+          <el-form-item label="备份数据">
+            <div class="range-row" style="width: 100%">
+              <el-button @click="backupExport">导出数据备份</el-button>
+            </div>
+            <div class="tip" style="width: 100%">
+              备份含设置/频道/规则/黑名单/订阅/转存记录（JSON，不含登录密码等敏感信息）
             </div>
           </el-form-item>
           <el-form-item label="从备份恢复">
@@ -279,7 +368,7 @@
 
           <div class="section-card"><div class="section-title">对外 API</div>
           <el-form-item label="API Token">
-            <div class="range-row" style="width: 100%">
+            <div class="range-row input-btn-row" style="width: 100%">
               <el-input v-model="f.api_token" type="password" show-password
                         placeholder="未设置时对外 API 关闭" clearable />
               <el-button @click="genToken">生成随机 Token</el-button>
@@ -293,17 +382,13 @@
 
       <div class="btn-row" style="margin-top: 10px">
         <el-button type="primary" :disabled="!dirty" @click="save">保存设置</el-button>
-        <el-button @click="backupExport">导出数据备份</el-button>
-        <span class="tip" style="margin-left: 12px">
-          备份含设置/频道/规则/黑名单/订阅/转存记录（JSON，不含登录密码等敏感信息）
-        </span>
       </div>
     </el-form>
   </el-card>
 </template>
 
 <script setup>
-import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { api, errMsg, saveOk } from '../api'
 import { useUnsavedGuard } from '../composables/unsavedGuard'
@@ -333,6 +418,19 @@ const transferPreset = ref('标准（1~3分）')
 const testing = ref(false)
 const chTesting = ref('') // 正在测试的通知渠道（bark/pushplus/ntfy）
 const dirty = ref(false)
+
+const enableSchedule = () => {
+  f.value.schedule_enabled = true
+  dirty.value = true
+  nextTick(() => {
+    const el = document.getElementById('setting-schedule-item')
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      el.classList.add('highlight-pulse')
+      setTimeout(() => el.classList.remove('highlight-pulse'), 1600)
+    }
+  })
+}
 
 // ---- 密钥类配置的独立编辑/保存（参考 TMDB API Key 的「已配置 + 更换」模式）----
 // 每块用独立 draft，编辑时不联动底部表单，保存成功后同步回 f（避免底部保存把旧值覆盖回去）
@@ -420,7 +518,7 @@ const doRestore = async () => {
       `订阅 ${(data.subscriptions || []).length}、转存记录 ${(data.transfers || []).length}。` +
       `恢复将覆盖当前全部业务数据（登录密码不变），且系统回到停止状态。确定继续？`,
       '确认恢复备份', { confirmButtonText: '确认恢复', cancelButtonText: '取消', type: 'warning' })
-    const { data: resp } = await api.post('/api/settings/backup/restore', data)
+    const { data: resp } = await api.post('/api/backup/restore', data)
     await ElMessageBox.alert(
       `恢复完成：设置 ${resp.stats.settings} 项、频道 ${resp.stats.channels} 个、` +
       `规则 ${resp.stats.rules} 条、订阅 ${resp.stats.subscriptions} 条、转存记录 ${resp.stats.transfers} 条。` +
@@ -432,11 +530,7 @@ const doRestore = async () => {
     restoring.value = false
   }
 }
-const isMobile = ref(window.innerWidth <= 768)
-const onRz = () => { isMobile.value = window.innerWidth <= 768 }
 useUnsavedGuard(dirty)  // 有未保存更改时，离开页面弹窗确认
-onMounted(() => window.addEventListener('resize', onRz))
-onUnmounted(() => window.removeEventListener('resize', onRz))
 let suppressWatch = false
 
 // Userbot 连接状态（接入方式 ≠ 网页轮询时展示）
@@ -452,6 +546,13 @@ const tgModeTip = computed(() => ({
   both: '当前模式：两者——按每个频道自身的接入方式分流处理，互不影响',
 }[f.value.tg_mode] || ''))
 
+// 联动：关闭分享转存总开关时，下级「分享追更」自动关闭
+const onToggleShareTransfer = (val) => {
+  if (!val) {
+    f.value.share_update_enabled = false
+  }
+}
+
 watch([f, retryPreset, pollPreset, transferPreset], () => {
   if (!suppressWatch) dirty.value = true
 }, { deep: true })
@@ -459,6 +560,14 @@ watch([f, retryPreset, pollPreset, transferPreset], () => {
 const load = async () => {
   suppressWatch = true
   f.value = (await api.get('/api/settings')).data
+  if (f.value.schedule_jitter_min === undefined) f.value.schedule_jitter_min = 5
+  if (f.value.batch_rest_enabled === undefined) f.value.batch_rest_enabled = true
+  if (f.value.batch_rest_count === undefined) f.value.batch_rest_count = 3
+  if (f.value.batch_rest_min_min === undefined) f.value.batch_rest_min_min = 2
+  if (f.value.batch_rest_max_min === undefined) f.value.batch_rest_max_min = 5
+  if (f.value.health_check_interval_min === undefined) f.value.health_check_interval_min = 10
+  if (f.value.dedup_cache_ttl_sec === undefined) f.value.dedup_cache_ttl_sec = 90
+  if (!f.value.auto_backup_time) f.value.auto_backup_time = '04:00'
   // 回填三组预设：与已存值完全一致的档位；对不上时回落到标准档（保存时生效）
   const hit = (arr, cur, pick) => {
     const m = arr.find((p) => pick(p).every((n, i) => n === cur[i]))
@@ -475,13 +584,98 @@ const load = async () => {
   suppressWatch = false
   dirty.value = false
 }
+
+const validateForm = () => {
+  // 1. 每日转存上限 (1 ~ 50)
+  const dl = Number(f.value.daily_limit)
+  if (!Number.isInteger(dl) || dl < 1 || dl > 50) {
+    ElMessage.warning('每日转存上限必须是 1 ~ 50 之间的整数')
+    return false
+  }
+
+  // 2. 分享体积下限 (>= 0)
+  const ms = Number(f.value.min_size_gb)
+  if (isNaN(ms) || ms < 0 || ms > 1000) {
+    ElMessage.warning('分享体积下限必须是大于等于 0 的有效数字（GB）')
+    return false
+  }
+
+  // 3. 定时计划与开工随机扰动
+  if (f.value.schedule_enabled) {
+    const sStart = String(f.value.schedule_start || '').trim()
+    const sEnd = String(f.value.schedule_end || '').trim()
+    if (!sStart || !sEnd) {
+      ElMessage.warning('定时计划的开始时间与结束时间不能为空')
+      return false
+    }
+    if (sStart === sEnd) {
+      ElMessage.warning('定时计划的开始时间与结束时间不能相同（如需全天候运行请关闭定时计划开关）')
+      return false
+    }
+    const jm = Number(f.value.schedule_jitter_min)
+    if (!Number.isInteger(jm) || jm < 0 || jm > 30) {
+      ElMessage.warning('开工随机扰动必须是 0 ~ 30 之间的整数（分钟）')
+      return false
+    }
+  }
+
+  // 4. 拟人化连存小憩 (count 2~20, min 1~60, max 1~60, min <= max)
+  if (f.value.batch_rest_enabled) {
+    const rc = Number(f.value.batch_rest_count)
+    if (!Number.isInteger(rc) || rc < 2 || rc > 20) {
+      ElMessage.warning('连存小憩笔数必须是 2 ~ 20 之间的整数')
+      return false
+    }
+    const rmin = Number(f.value.batch_rest_min_min)
+    const rmax = Number(f.value.batch_rest_max_min)
+    if (!Number.isInteger(rmin) || rmin < 1 || rmin > 60) {
+      ElMessage.warning('最短小憩时间必须是 1 ~ 60 之间的整数（分钟）')
+      return false
+    }
+    if (!Number.isInteger(rmax) || rmax < 1 || rmax > 60) {
+      ElMessage.warning('最长小憩时间必须是 1 ~ 60 之间的整数（分钟）')
+      return false
+    }
+    if (rmin > rmax) {
+      ElMessage.warning(`小憩时间区间有误：最短小憩时间（${rmin} 分钟）不能大于最长小憩时间（${rmax} 分钟）`)
+      return false
+    }
+  }
+
+  // 5. 定时自动备份 (1 ~ 365, HH:MM, TG Bot 校验)
+  if (f.value.auto_backup_enabled) {
+    const token = String(f.value.notify_token || '').trim()
+    const chatId = String(f.value.notify_chat_id || '').trim()
+    if (!token || !chatId) {
+      ElMessage.warning('开启「定时自动备份」必须先配置下方 Telegram Bot（Token 与 Chat ID），否则备份文件无法送达')
+      return false
+    }
+    const bd = Number(f.value.auto_backup_days)
+    if (!Number.isInteger(bd) || bd < 1 || bd > 365) {
+      ElMessage.warning('自动备份间隔必须是 1 ~ 365 天之间的整数')
+      return false
+    }
+    if (!f.value.auto_backup_time) {
+      ElMessage.warning('请选择自动备份的推送时间')
+      return false
+    }
+  }
+
+  return true
+}
+
 const save = async () => {
+  if (!validateForm()) return
   const backoff = (RETRY_PRESETS.find((p) => p.label === retryPreset.value) || RETRY_PRESETS[1]).sec
   const poll = (POLL_PRESETS.find((p) => p.label === pollPreset.value) || POLL_PRESETS[1])
   const trans = (TRANSFER_PRESETS.find((p) => p.label === transferPreset.value) || TRANSFER_PRESETS[1])
   try {
+    const payload = { ...f.value }
+    for (const k of Object.keys(payload)) {
+      if (k.startsWith('auto_move_')) delete payload[k]
+    }
     await api.put('/api/settings', {
-      ...f.value,
+      ...payload,
       retry_backoff: backoff,
       poll_interval_min: poll.min, poll_interval_max: poll.max,
       transfer_interval_min: trans.min, transfer_interval_max: trans.max,
@@ -570,36 +764,80 @@ onMounted(load)
 .section-card {
   border: 1px solid var(--saas-line);
   border-radius: 12px;
-  padding: 16px 20px 4px;
+  padding: 0 18px 8px;
   margin-bottom: 16px;
-  background: #fbfdff;
+  background: var(--subcard-bg);
+  overflow: hidden;
 }
 .section-title {
-  font-weight: 600; font-size: var(--fs-body); color: var(--el-color-primary-dark-2);
-  margin-bottom: 12px; display: flex; align-items: center; gap: 6px;
+  margin: 0 -18px 14px;
+  padding: 11px 18px;
+  background: var(--subcard-head-bg);
+  border-bottom: 1px solid var(--saas-line);
+  font-weight: 700; font-size: 15px; line-height: 1.35; color: var(--saas-text-main);
+  display: flex; align-items: center; gap: 9px;
 }
 .section-title::before {
-  content: ""; width: 4px; height: 14px; border-radius: 2px;
-  background: linear-gradient(180deg, #2f6bff, #5d8bff);
+  content: ""; width: 4px; height: 15px; border-radius: 2px;
+  background: var(--grad-brand); flex-shrink: 0;
 }
-@media (max-width: 768px) {
-  .switch-row { flex-wrap: wrap; }
-  .switch-row .tip { flex-basis: 100%; }
-  .range-row { flex-wrap: wrap; }
+/* 方案 A：小标题固定第一行，控件与说明在第二行铺满卡片宽度（桌面双栏与移动端共用） */
+.settings-form :deep(.el-form-item) {
+  margin-bottom: 14px;
+  padding-bottom: 14px;
+  border-bottom: 1px dashed rgba(126, 146, 196, .22);
 }
-.settings-form :deep(.el-form-item__content) { min-width: 0; }
+.settings-form :deep(.el-form-item:last-child) {
+  margin-bottom: 8px;
+  padding-bottom: 0;
+  border-bottom: none;
+}
+.settings-form :deep(.el-form-item__label) {
+  font-weight: 500;
+  font-size: 13px;
+  color: var(--label-secondary);
+  line-height: 1.4;
+  height: auto;
+  margin-bottom: 5px;
+  padding-right: 0;
+  justify-content: flex-start;
+}
+.settings-form :deep(.el-form-item__content) {
+  min-width: 0;
+  line-height: 1.5;
+}
+.settings-form :deep(.el-form-item__content > .tip) {
+  margin-top: 6px;
+  line-height: 1.55;
+}
 /* 左右两栏瀑布流布局：各分区卡片按高度自动分配到两列，窄屏回落单列 */
 .settings-flow { column-count: 2; column-gap: 16px; }
 .settings-flow > .section-card { break-inside: avoid; }
 @media (max-width: 1100px) { .settings-flow { column-count: 1; } }
-@media (max-width: 768px) { .section-card { padding: 12px 14px 2px; } }
-.tip { color: #999; font-size: var(--fs-caption); }
+.tip { color: #999; font-size: var(--fs-caption); line-height: 1.55; }
 /* 警示性提示文字：加粗 + 琥珀色，一眼可见（全局样式 .warn-text 的本地兜底） */
 .warn-text { font-weight: 600; color: #b45309; }
-.switch-row { display: flex; align-items: center; gap: 10px; }
-.ub-inline { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.switch-row {
+  width: 100%;
+  display: flex; align-items: center; gap: 10px;
+}
+.switch-row :deep(.el-switch) { flex: none; }
 .switch-row .tip { flex: 1; min-width: 0; }
-.range-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.range-row :deep(.el-input-number) { width: 130px; }
+.ub-inline { width: 100%; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ub-inline .tip { flex: 1 1 200px; min-width: 0; }
+.range-row { width: 100%; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.range-tip { flex: 1 1 180px; min-width: 0; }
+.input-btn-row :deep(.el-input) { flex: 1 1 220px; min-width: 0; width: auto; }
+.input-btn-row :deep(.el-button) { flex: none; }
+.range-row :deep(.el-input-number) { width: 132px; }
+@media (max-width: 768px) {
+  .section-card { padding: 0 14px 4px; }
+  .section-title { margin: 0 -14px 12px; padding: 11px 14px; }
+  .settings-form :deep(.el-form-item) { margin-bottom: 12px; padding-bottom: 12px; }
+  .switch-row { gap: 10px; }
+  .range-row { flex-wrap: wrap; gap: 8px; }
+  .range-row :deep(.el-input-number) { width: 140px; }
+  .input-btn-row :deep(.el-input) { flex: 1 1 160px; }
+}
 .sep { color: #999; }
 </style>

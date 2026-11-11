@@ -386,7 +386,8 @@ def _register_handlers(c: TelegramClient):
     async def on_new_message(event):
         try:
             chat = await event.get_chat()
-            watched = db.query("SELECT name FROM channels WHERE type='userbot' AND enabled=1")
+            watched = await asyncio.to_thread(
+                db.query, "SELECT name FROM channels WHERE type='userbot' AND enabled=1")
             name = _match_channel(watched, chat)
             if name is None:
                 # 未配置任何 userbot 频道时保持旧行为：处理所有消息
@@ -424,8 +425,8 @@ async def catch_up(c: TelegramClient):
     补偿在连接建立后立即执行，事件流继续实时收新消息，两边互不冲突。
     """
     try:
-        watched = [dict(r) for r in
-                   db.query("SELECT name FROM channels WHERE type='userbot' AND enabled=1")]
+        watched = [dict(r) for r in await asyncio.to_thread(
+            db.query, "SELECT name FROM channels WHERE type='userbot' AND enabled=1")]
         if not watched:
             return
         for r in watched:

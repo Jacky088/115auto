@@ -1,5 +1,8 @@
 """定时巡检：115 cookie 有效性（10 分钟一次）+ 日志 7 天自动清理 + TG 通知。"""
 import asyncio
+import datetime
+import json
+import queue
 import re
 import threading
 import time
@@ -8,10 +11,131 @@ from urllib.parse import unquote
 import httpx
 
 from .. import database as db
-from ..core import classifier, logstream
+from ..core import classifier, logstream, transfer_gate
 from ..pan115 import client as pan
 
 LOG_RETENTION_SECONDS = 7 * 86400  # 日志保留 7 天，到期永久删除
+
+# ---------- Telegram 消息推送排队系统 ----------
+# 线程安全的 FIFO 队列，防止多任务并发或定时任务集中触发 TG 429 频控或消息丢失
+_tg_notify_queue: queue.Queue = queue.Queue(maxsize=1000)
+
+
+def enqueue_tg_message(text: str) -> bool:
+    """将一条文本通知加入 TG 发送队列。"""
+    token = str(db.get_setting("notify_token", "") or "").strip()
+    chat_id = str(db.get_setting("notify_chat_id", "") or "").strip()
+    if not token or not chat_id:
+        return False
+    try:
+        _tg_notify_queue.put_nowait({
+            "type": "text",
+            "token": token,
+            "chat_id": chat_id,
+            "text": text,
+        })
+        return True
+    except queue.Full:
+        logstream.warn("system", "TG 推送队列已满（1000 条），放弃排队新消息")
+        return False
+
+
+def enqueue_tg_document(fname: str, content: bytes, mime: str, caption: str) -> bool:
+    """将一份文档（如定时备份数据）加入 TG 发送队列。"""
+    token = str(db.get_setting("notify_token", "") or "").strip()
+    chat_id = str(db.get_setting("notify_chat_id", "") or "").strip()
+    if not token or not chat_id:
+        return False
+    try:
+        _tg_notify_queue.put_nowait({
+            "type": "document",
+            "token": token,
+            "chat_id": chat_id,
+            "fname": fname,
+            "content": content,
+            "mime": mime,
+            "caption": caption,
+        })
+        return True
+    except queue.Full:
+        logstream.warn("system", "TG 推送队列已满，放弃排队文档")
+        return False
+
+
+async def tg_notify_worker():
+    """TG 通知消费工作协程：单流排队平滑发送、频控退避（429 智能重试）、网络故障重试。"""
+    logstream.info("system", "TG 通知排队消费者已就绪")
+    while True:
+        try:
+            try:
+                item = _tg_notify_queue.get_nowait()
+            except queue.Empty:
+                await asyncio.sleep(0.5)
+                continue
+
+            item_type = item.get("type", "text")
+            token = item["token"]
+            chat_id = item["chat_id"]
+            proxy = _tg_proxy()
+
+            retries = 0
+            max_retries = 3
+            success = False
+
+            while retries < max_retries and not success:
+                try:
+                    if item_type == "text":
+                        async with httpx.AsyncClient(proxy=proxy, timeout=20.0) as client:
+                            resp = await client.post(
+                                f"https://api.telegram.org/bot{token}/sendMessage",
+                                json={
+                                    "chat_id": str(chat_id),
+                                    "text": item["text"],
+                                    "disable_web_page_preview": True,
+                                },
+                            )
+                    else:
+                        async with httpx.AsyncClient(proxy=proxy, timeout=60.0) as client:
+                            resp = await client.post(
+                                f"https://api.telegram.org/bot{token}/sendDocument",
+                                data={"chat_id": str(chat_id), "caption": item["caption"]},
+                                files={"document": (item["fname"], item["content"], item["mime"])},
+                            )
+
+                    if resp.status_code == 200:
+                        success = True
+                        break
+                    elif resp.status_code == 429:
+                        try:
+                            retry_after = int(resp.json().get("parameters", {}).get("retry_after", 3))
+                        except Exception:
+                            retry_after = 5
+                        retry_after = max(1, min(60, retry_after))
+                        logstream.warn("system", f"TG 推送触发 429 限流，等待 {retry_after} 秒后自动接续重试...")
+                        await asyncio.sleep(retry_after)
+                        continue
+                    else:
+                        retries += 1
+                        desc = resp.text[:120]
+                        if retries < max_retries:
+                            await asyncio.sleep(2 * retries)
+                        else:
+                            logstream.warn("system", f"TG 通知推送失败（HTTP {resp.status_code}）：{desc}")
+                except Exception as e:
+                    retries += 1
+                    if retries < max_retries:
+                        await asyncio.sleep(2 * retries)
+                    else:
+                        logstream.warn("system", f"TG 通知推送网络异常：{type(e).__name__} {e}")
+
+            _tg_notify_queue.task_done()
+            # 严格限速保护：TG 单聊限额为 1 条/秒，故每条消息发送完毕后至少等待 1.0 秒（文件 1.5 秒）
+            await asyncio.sleep(1.5 if item_type == "document" else 1.0)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logstream.error("system", f"TG 通知排队消费异常: {logstream.exc(e)}")
+            await asyncio.sleep(1.0)
 
 
 def _tg_proxy() -> str | None:
@@ -20,20 +144,8 @@ def _tg_proxy() -> str | None:
 
 
 def _notify_tg(message: str) -> bool:
-    """TG Bot 通知。失败静默。"""
-    token = db.get_setting("notify_token", "")
-    chat_id = db.get_setting("notify_chat_id", "")
-    if not token or not chat_id:
-        return False
-    try:
-        resp = httpx.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": str(chat_id), "text": message, "disable_web_page_preview": True},
-            proxy=_tg_proxy(), timeout=15,
-        )
-        return resp.status_code == 200
-    except Exception:
-        return False
+    """TG Bot 通知：通过 FIFO 队列排队平滑消费，彻底杜绝瞬间并发 429 限制与漏发。"""
+    return enqueue_tg_message(message)
 
 
 def _notify_bark(message: str) -> bool:
@@ -286,10 +398,11 @@ def notify_transfer(title: str, category: str, source: str, target: str,
 
 
 def stop_system(reason: str):
-    """运行期出现致命故障：自动停止系统，写实时日志，并给用户设定的 TG 推送警示。"""
+    """运行期出现致命故障：自动停止系统，写实时日志，并给用户设定的 TG 推送警示。联动关闭自动归档。"""
     db.set_setting("running", False)
     db.set_setting("auto_stop_reason", reason)  # 供前端仪表盘展示，用户修正后清除
-    logstream.error("system", f"⛔ 系统已自动停止：{reason}")
+    db.set_setting("auto_move_enabled", False)  # 顶部停止时，自动归档功能联动关闭
+    logstream.error("system", f"⛔ 系统已自动停止：{reason}（自动归档功能已联动关闭）")
     logstream.warn("system", "请按上述原因修正后，点击网页顶栏「开始运行」恢复"
                              "（队列与配置已保留，任务不会丢失）。")
     try:
@@ -349,12 +462,14 @@ async def health_check_loop():
     - 连续 2 次（约 4 分钟）确认失败才终止：避免单次网络抖动误杀
     - 恢复后自动清除故障标记
     """
-    logstream.info("system", "运行健康监控任务启动（每 2 分钟检查 115 与 TG 状态）")
+    logstream.info("system", "运行健康监控任务启动（按配置周期检查 115 与 TG 状态）")
     fail_streak: dict[str, int] = {"115": 0, "tg": 0}
     while True:
-        await asyncio.sleep(120)
+        interval_min = max(1, int(float(await asyncio.to_thread(
+            db.get_setting, "health_check_interval_min", 10) or 10)))
+        await asyncio.sleep(interval_min * 60)
         try:
-            if not db.get_setting("running", False):
+            if not await asyncio.to_thread(db.get_setting, "running", False):
                 fail_streak = {"115": 0, "tg": 0}
                 continue
 
@@ -362,8 +477,9 @@ async def health_check_loop():
             # p115client 的 HTTP 栈无默认超时）→ 自动重新排队，避免队列永久停摆。
             # 执行中的任务每 60 秒心跳刷新 running_at；真正卡死才会超过阈值。
             # 旧线程若迟到返回，状态守卫（AND status='running'）会拒绝其回写，不会重复计额。
-            timeout_secs = _running_timeout_secs()
-            requeued = db.execute(
+            timeout_secs = await asyncio.to_thread(_running_timeout_secs)
+            requeued = await asyncio.to_thread(
+                db.execute,
                 "UPDATE transfers SET status='queued', running_at=NULL,"
                 " error='转存超时：115 请求长时间无响应，已自动重新排队'"
                 " WHERE status='running' AND running_at IS NOT NULL AND running_at < ?",
@@ -373,7 +489,12 @@ async def health_check_loop():
                                            f"（>{timeout_secs // 60} 分钟无心跳），已重新排队")
 
             # --- 115 Cookie ---
-            st = await asyncio.to_thread(pan.check_login, True)
+            # 正在执行转存或文件整理时优先复用缓存，避免向繁忙中的 115 并发强刷校验请求
+            in_heavy_115 = (
+                transfer_gate.get_gate_state() == "organizing"
+                or transfer_gate.is_transfer_active()
+            )
+            st = await pan.run_pan_thread(pan.check_login, not in_heavy_115)
             if st.get("ok"):
                 if fail_streak["115"]:
                     logstream.info("115", "115 Cookie 已恢复有效")
@@ -384,7 +505,7 @@ async def health_check_loop():
                                       f"{st.get('err', '')[:200]}")
                 if fail_streak["115"] >= 2:
                     # stop_system 内含同步 TG 通知（httpx 最长 15s）：放线程池，避免阻塞事件循环
-                    await asyncio.to_thread(
+                    await pan.run_pan_thread(
                         stop_system,
                         f"115 Cookie 失效（{st.get('err', '')[:120]}），"
                         "转存已无法进行。请到「账号管理」重新扫码登录或导入 Cookie。")
@@ -392,7 +513,7 @@ async def health_check_loop():
                     continue
 
             # --- TG 状态 ---
-            if _tg_health_ok():
+            if await asyncio.to_thread(_tg_health_ok):
                 if fail_streak["tg"]:
                     logstream.info("system", "TG 通道已恢复正常")
                 fail_streak["tg"] = 0
@@ -402,15 +523,15 @@ async def health_check_loop():
                                          "无法接收频道消息")
                 if fail_streak["tg"] >= 2:
                     # 区分两类 TG 故障给出对应修正指引
-                    rows = db.query("SELECT id, type, enabled FROM channels")
+                    rows = await asyncio.to_thread(db.query, "SELECT id, type, enabled FROM channels")
                     enabled = [dict(r) for r in rows if r["enabled"]]
                     polling = [r for r in enabled if r["type"] == "polling"]
                     stop_reason = ("TG 频道抓取持续失败（频道可能已被删除或转为私密，"
-                                   "或服务器无法访问 t.me）。请到「频道管理」的「消息预览」核对，"
+                                   "或服务器无法访问 t.me）。请到「账号管理」的「消息预览」核对，"
                                    "或检查设置页的 TG 代理。") if polling and _polling_all_failed(polling) \
                         else ("TG Userbot 已断开，监控的私密频道消息无法接收。"
                               "请到「账号管理」重新登录 Userbot。")
-                    await asyncio.to_thread(stop_system, stop_reason)
+                    await pan.run_pan_thread(stop_system, stop_reason)
                     fail_streak = {"115": 0, "tg": 0}
         except Exception as e:
             logstream.error("system", f"健康监控异常（本轮跳过）: {logstream.exc(e)}")
@@ -490,8 +611,24 @@ async def log_cleanup_loop():
 OFFLINE_CONFIRM_WINDOW = 3 * 86400  # 云下载提交后 3 天内跟踪结果
 
 
+def _extract_btih(url: str) -> str:
+    """从磁力链提取 40 位 hex hash，支持 base32 与 hex。"""
+    u = unquote((url or "").strip())
+    m = re.search(r"xt=urn:btih:([0-9A-Za-z]+)", u, re.I)
+    if m:
+        val = m.group(1).lower()
+        if len(val) == 32:
+            try:
+                import base64
+                val = base64.b32decode(val.upper()).hex().lower()
+            except Exception:
+                pass
+        return val
+    return ""
+
+
 def _offline_key(url: str) -> str:
-    """云下载 URL 归一化，用于和 115 任务列表里的 url 匹配。
+    """云下载 URL 归一化，用于和 115 任务列表里的 url / info_hash 匹配。
 
     115 任务列表可能把 URL 做 percent-解码/编码、改大小写或去掉结尾斜杠，
     ED2K/磁力这类带中文文件名的链接（如「厨房春光...iso」）直接字符串比对会匹配失败，
@@ -504,69 +641,185 @@ def _offline_key(url: str) -> str:
         parts = u.split("|")
         if len(parts) >= 5 and parts[4]:
             return "ed2k:" + parts[4].lower()
-    m = re.search(r"xt=urn:btih:([0-9A-Za-z]+)", u, re.I)
-    if m:
-        return "btih:" + m.group(1).lower()
+    btih = _extract_btih(u)
+    if btih:
+        return "btih:" + btih
     return u.rstrip("/").lower()
 
 
 async def offline_check_loop():
-    """每 10 分钟核对"已提交"云下载任务的真实结果（下载完成/失败），防止误报成功。
+    """核对"已提交"云下载任务的真实结果（下载完成/失败），并推送第②条通知。
 
-    115 任务状态：percent>=100、status 10-11、status>=13 为完成；status 1-9 为失败；
-    status 12 为下载中。
+    动态调度：存在已提交任务时每 30 秒轮询一次，空闲时每 60 秒轮询一次。
+    双重确认机制：
+    1. 115 云下载任务列表跟踪（支持 info_hash / btih / ed2k / url / 标题软化归一化）；
+    2. 目标目录落盘反查兜底（即使 115 任务列表已被清空或删除，只要目标目录已有对应文件，立即确认完成）。
     """
-    logstream.info("transfer", "云下载结果跟踪任务启动（每 10 分钟核对一次）")
+    logstream.info("transfer", "云下载结果跟踪任务启动（动态轮询核对）")
     while True:
         try:
-            # 扫描全部「已提交」任务（不只是 3 天内）：超窗且列表里找不到的会在此被判失败，
-            # 避免任务永远卡在 submitted
-            subs = db.query("SELECT * FROM transfers WHERE status='submitted'")
-            if subs:
-                try:
-                    tasks = await asyncio.to_thread(pan.task_list_all)
-                except Exception as e:
-                    # 接口异常时绝不能按「列表中找不到」判失败，本轮直接跳过
-                    logstream.warn("transfer", f"拉取 115 云下载任务列表失败，本轮跳过核对: {e}")
-                    await asyncio.sleep(600)
-                    continue
-                by_url = {}
-                for t in tasks:
-                    key = _offline_key(t.get("url") or "")
-                    if key:
-                        by_url[key] = t
-                for job in subs:
-                    t = by_url.get(_offline_key(job["share_url"]))
-                    if t is None:
-                        # 列表里找不到：超窗后按失败处理，否则继续等
-                        if time.time() - job["created_at"] > OFFLINE_CONFIRM_WINDOW:
-                            await asyncio.to_thread(
-                                _finish_offline, job, False, "",
-                                "提交后 3 天内未在 115 任务列表中找到该任务")
-                        continue
-                    try:
-                        percent = float(t.get("percent", 0) or 0)
-                    except (TypeError, ValueError):
-                        percent = 0.0
-                    try:
-                        status = int(t.get("status", 0) or 0)
-                    except (TypeError, ValueError):
-                        status = 0
-                    if percent >= 100 or status in (10, 11) or status >= 13:
-                        await asyncio.to_thread(_finish_offline, job, True, t.get("name", ""), "")
-                    elif 1 <= status <= 9:
+            subs = [dict(r) for r in await asyncio.to_thread(
+                db.query, "SELECT * FROM transfers WHERE status='submitted'")]
+            if not subs:
+                await asyncio.sleep(60)
+                continue
+
+            # 整理独占移动阶段暂停云下载核对，防止与自动移动并发打 115（draining 排空阶段正常放行）
+            await transfer_gate.wait_transfer_worker_allowed()
+
+            try:
+                tasks = await pan.run_pan_thread(pan.task_list_all)
+            except Exception as e:
+                logstream.warn("transfer", f"拉取 115 云下载任务列表失败，本轮跳过核对: {e}")
+                await asyncio.sleep(30)
+                continue
+
+            by_key: dict[str, dict] = {}
+            by_name: dict[str, dict] = {}
+            for t in tasks:
+                raw_url = t.get("url") or ""
+                if raw_url:
+                    k = _offline_key(raw_url)
+                    if k:
+                        by_key[k] = t
+                ih = str(t.get("info_hash") or "").strip().lower()
+                if ih:
+                    by_key["btih:" + ih] = t
+                t_name = str(t.get("name") or "").strip()
+                if t_name:
+                    clean_t_name = re.sub(r"[^\w\u4e00-\u9fa5]+", "", t_name.lower())
+                    if clean_t_name:
+                        by_name[clean_t_name] = t
+
+            fallback_dir_cache: dict[str, list[dict]] = {}
+            fallback_scanned = False
+
+            for job in subs:
+                t = None
+                job_url = job.get("share_url") or ""
+                job_key = _offline_key(job_url)
+
+                # 1. 优先按 key (btih / ed2k / url) 匹配
+                if job_key:
+                    t = by_key.get(job_key)
+
+                # 1.1 尝试按提交时记录的 receive_code (115 返回的 info_hash) 匹配
+                if not t and job.get("receive_code"):
+                    t = by_key.get("btih:" + str(job["receive_code"]).strip().lower())
+
+                # 2. 次选按标题或磁力 dn 文件名软化匹配
+                job_title = job.get("title") or ""
+                clean_title = re.sub(r"[^\w\u4e00-\u9fa5]+", "", job_title.lower())
+                m_dn = re.search(r"dn=([^&]+)", unquote(job_url))
+                dn_str = unquote(m_dn.group(1)).strip() if m_dn else ""
+                clean_dn = re.sub(r"[^\w]+", "", dn_str.lower())
+
+                if not t:
+                    for cand_key in (clean_title, clean_dn):
+                        if not cand_key or len(cand_key) < 3:
+                            continue
+                        if cand_key in by_name:
+                            t = by_name[cand_key]
+                            break
+                        for kname, t_cand in by_name.items():
+                            if cand_key in kname or kname in cand_key:
+                                t = t_cand
+                                break
+                        if t:
+                            break
+
+                # 3. 目标目录落盘反查兜底（极强健壮性：无论 115 任务列表是否被清空，只要目标目录文件已落盘即判定完成）
+                if not t:
+                    target_dir = (job.get("target_dir") or "").strip()
+                    if target_dir:
+                        try:
+                            if target_dir in fallback_dir_cache:
+                                entries = fallback_dir_cache[target_dir]
+                            else:
+                                # 若此时已进入整理移动阶段，跳过本轮其余目录扫描让位给整理任务
+                                if transfer_gate.get_gate_state() == "organizing":
+                                    break
+                                if fallback_scanned:
+                                    await asyncio.sleep(0.5 * pan.pace_factor())
+                                fallback_scanned = True
+                                dest_cid = await pan.run_pan_thread(pan.mkdirs, target_dir)
+                                if dest_cid is not None:
+                                    entries = await pan.run_pan_thread(pan.list_entries, dest_cid, 500)
+                                    fallback_dir_cache[target_dir] = entries
+                                else:
+                                    entries = []
+                            if entries:
+                                cn_chunks = re.findall(r"[\u4e00-\u9fa5]+", job_title)
+                                cn_subj = max(cn_chunks, key=len) if cn_chunks else ""
+                                found_file = None
+                                for e in entries:
+                                    if e.get("is_dir"):
+                                        continue
+                                    efname = e.get("name", "")
+                                    ext = os.path.splitext(efname)[1].lower()
+                                    if ext in pan._MEDIA_EXTENSIONS:
+                                        clean_efname = re.sub(r"[^\w]+", "", efname.lower())
+                                        if (cn_subj and len(cn_subj) >= 2 and cn_subj in efname) or \
+                                           (clean_title and len(clean_title) >= 3 and clean_title in re.sub(r"[^\w\u4e00-\u9fa5]+", "", efname.lower())) or \
+                                           (clean_dn and len(clean_dn) >= 3 and (clean_dn in clean_efname or clean_efname in clean_dn)):
+                                            found_file = e
+                                            break
+                                if found_file:
+                                    t = {
+                                        "name": found_file.get("name", ""),
+                                        "status": 2,
+                                        "percentDone": 100,
+                                        "file_id": found_file.get("id"),
+                                        "size": int(found_file.get("size", 0) or 0)
+                                    }
+                        except Exception:
+                            pass
+
+                if t is None:
+                    # 仍未找到：超过 3 天确认为失效任务，否则保持 submitted 继续等待
+                    if time.time() - job["created_at"] > OFFLINE_CONFIRM_WINDOW:
                         await asyncio.to_thread(
-                            _finish_offline, job, False, "", "115 下载任务失败（链接无效或无资源）")
-                    # 其余状态 = 下载中，继续等待
+                            _finish_offline, job, False, "",
+                            "提交后 3 天内未在 115 任务列表及目标目录中找到该任务")
+                    continue
+
+                # 提取进度与状态
+                try:
+                    raw_pct = t.get("percentDone") or t.get("percent_done") or t.get("percent") or 0
+                    percent = float(raw_pct or 0)
+                except (TypeError, ValueError):
+                    percent = 0.0
+
+                try:
+                    status = int(t.get("status", 0) or 0)
+                except (TypeError, ValueError):
+                    status = 0
+
+                has_file = bool(t.get("file_id"))
+                task_size = int(t.get("size") or t.get("file_size") or 0)
+                task_name = t.get("name") or ""
+
+                # 完成判定：
+                # 115 官方规范中：percentDone>=100 或 status==2(已完成) 或 status in (10, 11) 或 status>=13 或已生成 file_id
+                if percent >= 100 or status in (2, 10, 11) or status >= 13 or has_file:
+                    await asyncio.to_thread(_finish_offline, job, True, task_name, "", task_size)
+                elif status == -1 or status in (3, 9):
+                    err_msg = t.get("err_msg") or "115 下载任务失败（链接无效或无资源）"
+                    await asyncio.to_thread(_finish_offline, job, False, "", err_msg)
+                # 其余状态 (如 status 1 下载中, status 4 搜索中, status 12 进行中等) 保持 submitted 等待下一轮
+
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            break
         except Exception as e:
             logstream.error("transfer", f"云下载结果核对异常: {logstream.exc(e)}")
-        await asyncio.sleep(600)
+            await asyncio.sleep(30)
 
 
-def _finish_offline(job: dict, ok: bool, name: str = "", reason: str = ""):
+def _finish_offline(job, ok: bool, name: str = "", reason: str = "", size: int = 0):
+    job = dict(job)
     if ok:
-        # 名称优先取频道消息标题，115 返回的文件名仅兜底
-        shown = classifier.headline(job.get("title", "")) or name or job["title"]
+        shown = classifier.headline(job.get("title", "")) or name or job.get("title", "")
         changed = db.execute("UPDATE transfers SET status='success', title=?, finished_at=?"
                              " WHERE id=? AND status='submitted'",
                              (shown[:200], time.time(), job["id"]))
@@ -576,7 +829,7 @@ def _finish_offline(job: dict, ok: bool, name: str = "", reason: str = ""):
         logstream.info("transfer",
                        f"✅ 云下载任务完成：{shown[:60]} → {job['target_dir']}，文件已保存至目标目录")
         notify_transfer(shown, job.get("category", ""), job.get("channel", ""),
-                        job["target_dir"], kind="offline_done")
+                        job["target_dir"], size=size, kind="offline_done")
     else:
         changed = db.execute("UPDATE transfers SET status='failed', error=?"
                              " WHERE id=? AND status='submitted'",
@@ -639,17 +892,18 @@ async def digest_loop():
     """
     while True:
         try:
-            if db.get_setting("digest_enabled", True):
+            if await asyncio.to_thread(db.get_setting, "digest_enabled", True):
                 now = _bj_now()
                 today = now.strftime("%Y-%m-%d")
-                target = str(db.get_setting("digest_time", "21:00") or "21:00")
+                target = str(await asyncio.to_thread(db.get_setting, "digest_time", "21:00") or "21:00")
                 now_hm = now.strftime("%H:%M")
-                last = str(db.get_setting("digest_last_sent", "") or "")
+                last = str(await asyncio.to_thread(db.get_setting, "digest_last_sent", "") or "")
                 if last != today and now_hm >= target:
-                    text = digest_text()
-                    detail = await asyncio.to_thread(notify_detail, text)
+                    # digest_text 内部包含同步 pan.space_info() 网络调用：放到专用线程池防止阻塞事件循环或挤占默认池
+                    text = await pan.run_pan_thread(digest_text)
+                    detail = await pan.run_pan_thread(notify_detail, text)
                     if any(detail.values()):
-                        db.set_setting("digest_last_sent", today)
+                        await asyncio.to_thread(db.set_setting, "digest_last_sent", today)
                         sent = "、".join(k for k, v in detail.items() if v)
                         logstream.info("system", f"已推送每日摘要通知（渠道：{sent}）")
                     else:
@@ -673,31 +927,376 @@ def _backup_json() -> bytes:
 
 
 async def auto_backup_loop():
-    """定时把数据备份（JSON）作为 TG 文档推送给自己的 Bot（默认每 7 天，可关）。
-
-    备份不含登录密码哈希（db.backup_payload 已剔除）；恢复时替换 data 目录或
-    手动导入 JSON。仅配置了 TG Bot 时生效。
+    """定时把数据备份（JSON/Gzip）推送到用户的 TG Bot。
+    按用户设定的间隔天数与具体推送时间点（如每 7 天 04:00）精准执行，并通过 TG 队列平滑推送。
     """
     while True:
         try:
-            days = int(db.get_setting("auto_backup_days", 7) or 0)
-            if db.get_setting("auto_backup_enabled", False) and days > 0:
-                token = str(db.get_setting("notify_token", "") or "").strip()
-                chat_id = str(db.get_setting("notify_chat_id", "") or "").strip()
-                last = float(db.get_setting("backup_last_sent", 0) or 0)
-                if token and chat_id and time.time() - last >= days * 86400:
-                    content = await asyncio.to_thread(_backup_json)
-                    fname = f"autosave_backup_{time.strftime('%Y%m%d_%H%M%S')}.json"
-                    resp = httpx.post(
-                        f"https://api.telegram.org/bot{token}/sendDocument",
-                        data={"chat_id": chat_id, "caption": "🗄 自动备份（设置/频道/规则/订阅/转存记录）"},
-                        files={"document": (fname, content, "application/json")},
-                        proxy=_tg_proxy(), timeout=60)
-                    if resp.status_code == 200:
-                        db.set_setting("backup_last_sent", time.time())
-                        logstream.info("system", f"已推送自动备份到 TG（{fname}，{len(content) // 1024}KB）")
+            def _load_backup_meta():
+                return (
+                    bool(db.get_setting("auto_backup_enabled", False)),
+                    int(db.get_setting("auto_backup_days", 7) or 7),
+                    str(db.get_setting("notify_token", "") or "").strip(),
+                    str(db.get_setting("notify_chat_id", "") or "").strip(),
+                    str(db.get_setting("auto_backup_time", "04:00") or "04:00").strip(),
+                    str(db.get_setting("backup_last_sent_date", "") or "").strip(),
+                    float(db.get_setting("backup_last_sent", 0) or 0),
+                )
+
+            enabled, days, token, chat_id, target_time, last_sent_date, last_ts = await asyncio.to_thread(
+                _load_backup_meta)
+            if enabled and days > 0:
+                now = _bj_now()
+                today_str = now.strftime("%Y-%m-%d")
+                now_hm = now.strftime("%H:%M")
+
+                if not last_sent_date and last_ts > 0:
+                    last_sent_date = datetime.datetime.fromtimestamp(last_ts).strftime("%Y-%m-%d")
+
+                should_send = False
+                if not last_sent_date:
+                    if now_hm >= target_time:
+                        should_send = True
+                else:
+                    try:
+                        last_d = datetime.datetime.strptime(last_sent_date, "%Y-%m-%d").date()
+                        diff_days = (now.date() - last_d).days
+                        if diff_days >= days and now_hm >= target_time and last_sent_date != today_str:
+                            should_send = True
+                    except Exception:
+                        should_send = True
+
+                if should_send and token and chat_id:
+                    raw = await asyncio.to_thread(_backup_json)
+                    # 体积超过 8MB 时自动使用 gzip 压缩，彻底规避 TG Bot 20MB 下载/50MB 发送限制
+                    if len(raw) > 8 * 1024 * 1024:
+                        import gzip
+                        content = gzip.compress(raw, compresslevel=9)
+                        fname = f"autosave_backup_{time.strftime('%Y%m%d_%H%M%S')}.json.gz"
+                        mime = "application/gzip"
+                        caption = f"🗄 定时自动备份（Gzip 压缩，原始 {len(raw) // 1024}KB → 压缩后 {len(content) // 1024}KB）"
                     else:
-                        logstream.warn("system", f"自动备份推送失败: HTTP {resp.status_code}")
+                        content = raw
+                        fname = f"autosave_backup_{time.strftime('%Y%m%d_%H%M%S')}.json"
+                        mime = "application/json"
+                        caption = f"🗄 定时自动备份（设置/频道/规则/订阅/转存记录，{len(content) // 1024}KB）"
+
+                    # 通过 TG 推送队列排队发送
+                    ok = enqueue_tg_document(fname, content, mime, caption)
+                    if ok:
+                        def _mark_backup_sent():
+                            db.set_setting("backup_last_sent", time.time())
+                            db.set_setting("backup_last_sent_date", today_str)
+
+                        await asyncio.to_thread(_mark_backup_sent)
+                        logstream.info("system", f"定时自动备份已加入 TG 发送队列（{fname}，{len(content) // 1024}KB）")
+                    else:
+                        logstream.warn("system", "定时自动备份入队失败（队列已满）")
         except Exception as e:
             logstream.error("system", f"自动备份异常: {logstream.exc(e)}")
-        await asyncio.sleep(3600)
+        await asyncio.sleep(60)
+
+
+# ---------- 定时文件整理（按目录映射移动中文文件）----------
+_auto_move_lock: asyncio.Lock | None = None
+_last_auto_move_result: dict = {}
+
+
+def _get_auto_move_lock() -> asyncio.Lock:
+    global _auto_move_lock
+    if _auto_move_lock is None:
+        _auto_move_lock = asyncio.Lock()
+    return _auto_move_lock
+
+
+def get_last_auto_move_result() -> dict:
+    return _last_auto_move_result
+
+
+def compute_next_runs() -> list[str]:
+    """计算未来 48 小时（2 天）内预计的移动整理触发时间点列表。"""
+    sched_type = str(db.get_setting("auto_move_schedule_type", "interval") or "interval")
+    now = time.time()
+    next_times = []
+
+    if sched_type == "fixed_times":
+        fixed_times_raw = db.get_setting("auto_move_fixed_times", '["06:00", "12:00", "18:00"]')
+        try:
+            if isinstance(fixed_times_raw, str):
+                fixed_times = json.loads(fixed_times_raw)
+            elif isinstance(fixed_times_raw, list):
+                fixed_times = fixed_times_raw
+            else:
+                fixed_times = []
+        except Exception:
+            fixed_times = []
+
+        valid_times = []
+        for item in fixed_times:
+            m = re.match(r"^([01]?\d|2[0-3]):([0-5]\d)$", str(item).strip())
+            if m:
+                valid_times.append(f"{int(m.group(1)):02d}:{int(m.group(2)):02d}")
+        valid_times = sorted(set(valid_times))
+        if not valid_times:
+            return []
+
+        # 遍历今天、明天、后天、大后天（覆盖未来 48 小时）
+        today = datetime.date.today()
+        for day_offset in range(4):
+            d = today + datetime.timedelta(days=day_offset)
+            d_str = d.strftime("%Y-%m-%d")
+            for t_str in valid_times:
+                dt_str = f"{d_str} {t_str}"
+                try:
+                    t_struct = time.strptime(dt_str, "%Y-%m-%d %H:%M")
+                    ts = time.mktime(t_struct)
+                    if now < ts <= now + 48 * 3600:
+                        next_times.append(ts)
+                except Exception:
+                    pass
+    else:
+        interval_hours = max(float(db.get_setting("auto_move_interval_hours", 6) or 6), 1.0)
+        interval_sec = interval_hours * 3600
+        last_run = float(db.get_setting("auto_move_last_run", 0) or 0)
+
+        if last_run <= 0:
+            base_t = now
+        else:
+            base_t = last_run
+            while base_t + interval_sec <= now:
+                base_t += interval_sec
+
+        cur_t = base_t + interval_sec if base_t <= now else base_t
+        while cur_t <= now + 48 * 3600:
+            next_times.append(cur_t)
+            cur_t += interval_sec
+
+    next_times.sort()
+
+    results = []
+    today_str = time.strftime("%Y-%m-%d")
+    tomorrow_str = (datetime.date.today() + datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+    day_after_str = (datetime.date.today() + datetime.timedelta(days=2)).strftime("%Y-%m-%d")
+
+    for ts in next_times:
+        d_part = time.strftime("%Y-%m-%d", time.localtime(ts))
+        hm_part = time.strftime("%H:%M", time.localtime(ts))
+        if d_part == today_str:
+            prefix = "今天"
+        elif d_part == tomorrow_str:
+            prefix = "明天"
+        elif d_part == day_after_str:
+            prefix = "后天"
+        else:
+            prefix = time.strftime("%m月%d日", time.localtime(ts))
+        results.append(f"{prefix} {hm_part}")
+    return results
+
+
+async def execute_auto_move(trigger: str = "scheduled") -> dict:
+    """按 auto_move_rules 顺序排队执行文件移动整理（做好 115 严格防风控与通知推送）。"""
+    global _last_auto_move_result
+
+    def _preflight_cfg():
+        return (
+            str(db.get_setting("running", False)).lower() == "true",
+            bool(db.get_setting("auto_move_enabled", False)),
+        )
+
+    is_running, am_enabled = await asyncio.to_thread(_preflight_cfg)
+    if not is_running:
+        msg = "系统处于停止状态，自动整理取消执行"
+        logstream.warn("auto_move", msg)
+        return {"ok": False, "msg": msg}
+    if not am_enabled:
+        msg = "定时文件整理功能未开启，请先打开功能总开关后再执行！"
+        logstream.warn("auto_move", msg)
+        return {"ok": False, "msg": msg}
+    if trigger == "scheduled" and not await asyncio.to_thread(transfer_gate.is_in_schedule_window):
+        msg = "当前处于防风控静默时段外，定时文件整理暂停执行"
+        logstream.warn("auto_move", msg)
+        return {"ok": False, "msg": msg}
+
+    lock = _get_auto_move_lock()
+    if lock.locked():
+        return {"ok": False, "msg": "整理任务正在执行中，请勿重复发起"}
+
+    async with lock:
+        rules = [dict(r) for r in await asyncio.to_thread(
+            db.query, "SELECT * FROM auto_move_rules WHERE enabled=1 ORDER BY id ASC")]
+        if not rules:
+            res = {"ok": True, "total_rules": 0, "total_moved": 0, "details": []}
+            _last_auto_move_result = res
+            return res
+
+        # 整理准备：停止接收新转存任务，排队消化现有转存队列（包括云下载与重试）直到全部完成终态，再开启移动
+        await transfer_gate.prepare_and_drain_transfers()
+        try:
+            details = []
+
+            def _load_move_opts():
+                return (
+                    bool(db.get_setting("auto_move_scan_subdirs", True)),
+                    db.get_setting("auto_move_mode", "library"),
+                    bool(db.get_setting("auto_move_season_folder", True)),
+                    bool(db.get_setting("auto_move_fuzzy_t2s", True)),
+                )
+
+            scan_subdirs, global_mode, season_folder, fuzzy_t2s = await asyncio.to_thread(_load_move_opts)
+            risk_aborted = False
+
+            for r in rules:
+                s_dir = r.get("source_dir", "").strip()
+                t_dir = r.get("target_dir", "").strip()
+                rule_mode = r.get("mode") or "default"
+                effective_mode = rule_mode if rule_mode in ("library", "exact") else global_mode
+                kw = (r.get("keyword", "") or pan.extract_target_folder_name(t_dir)).strip()
+
+                if effective_mode == "exact" and not kw:
+                    msg = f"规则 #{r['id']} 目标目录「{t_dir}」未能提取有效文件夹名称，跳过"
+                    logstream.warn("auto_move", msg)
+                    details.append({"id": r["id"], "source_dir": s_dir, "target_dir": t_dir,
+                                    "keyword": "", "mode": effective_mode, "moved": 0, "error": "目标文件夹名为空，跳过执行"})
+                    continue
+
+                try:
+                    moved_count, sample_names = await pan.run_pan_thread(
+                        pan.move_matched_files_for_rule,
+                        s_dir, t_dir, kw,
+                        scan_subdirs=scan_subdirs,
+                        mode=effective_mode,
+                        season_folder=season_folder,
+                        fuzzy_t2s=fuzzy_t2s,
+                    )
+                    await asyncio.to_thread(
+                        db.execute,
+                        "UPDATE auto_move_rules SET last_run_at=?, last_moved_count=? WHERE id=?",
+                        (time.time(), moved_count, r["id"]),
+                    )
+                    mode_label = "总库分流" if effective_mode == "library" else f"精确匹配({kw})"
+                    details.append({
+                        "id": r["id"], "source_dir": s_dir, "target_dir": t_dir,
+                        "keyword": kw, "mode": effective_mode, "moved": moved_count, "sample_names": sample_names
+                    })
+                    if moved_count > 0:
+                        logstream.info("auto_move",
+                                       f"整理完成 [{s_dir} ➔ {t_dir} / {mode_label}]：成功移动 {moved_count} 个文件")
+                    else:
+                        logstream.info("auto_move",
+                                       f"整理扫描 [{s_dir} ➔ {t_dir} / {mode_label}]：无新文件需要移动")
+                except Exception as e:
+                    err_str = str(e)
+                    logstream.warn("auto_move", f"规则 #{r['id']} [{s_dir} ➔ {t_dir}] 执行异常: {err_str}")
+                    details.append({"id": r["id"], "source_dir": s_dir, "target_dir": t_dir,
+                                    "keyword": kw, "moved": 0, "error": err_str})
+                    if any(k in err_str.lower() for k in pan._RISK_KEYWORDS):
+                        risk_aborted = True
+                        logstream.error("auto_move", f"⚠️ 检测到 115 风控限制信号，自动熔断停止后续移动操作: {err_str}")
+                        await pan.run_pan_thread(
+                            notify,
+                            f"⚠️ 【115 风控拦截】自动整理文件时检测到 115 限制信号（{err_str[:100]}），已紧急熔断停止后续移动操作，请检查账号状态！"
+                        )
+                        break
+
+                # 规则与规则之间的排队间隔，自适应风控防封号
+                pace = pan.pace_factor()
+                await asyncio.sleep(1.5 * pace)
+
+            total_moved = sum(d.get("moved", 0) for d in details)
+            await asyncio.to_thread(db.set_setting, "auto_move_last_run", time.time())
+
+            # 移动完成推送通知
+            if await asyncio.to_thread(db.get_setting, "auto_move_notify", True) and (
+                    total_moved > 0 or trigger == "manual" or risk_aborted):
+                trig_desc = "手动排队执行" if trigger == "manual" else "定时计划执行"
+                now_str = time.strftime("%Y-%m-%d %H:%M:%S")
+                lines = [
+                    "📁 115 文件整理任务完成",
+                    f"• 触发方式：{trig_desc}",
+                    f"• 完成时间：{now_str}",
+                    f"• 规则统计：共处理 {len(rules)} 条规则，成功移动 {total_moved} 个文件",
+                ]
+                if risk_aborted:
+                    lines.append("⚠️ 注意：任务因触发 115 接口风控而提前中断，部分规则未执行")
+                lines.append("")
+                lines.append("明细：")
+                for d in details:
+                    if d.get("error"):
+                        lines.append(f"• {d['target_dir']}：❌ 执行失败（{d['error'][:50]}）")
+                    elif d.get("moved", 0) > 0:
+                        samples = "、".join(d.get("sample_names", [])[:2])
+                        extra = f"（如 {samples} 等）" if samples else ""
+                        lines.append(f"• {d['target_dir']}（关键词: {d['keyword']}）：移动 {d['moved']} 个文件{extra}")
+                    else:
+                        lines.append(f"• {d['target_dir']}（关键词: {d['keyword']}）：无新文件")
+                lines.append("")
+                lines.append("💡 提示：文件夹均保持原地，仅移动含中文且含目标名称的正片文件。")
+                full_msg = chr(10).join(lines)
+                await pan.run_pan_thread(notify, full_msg)
+
+            res = {"ok": True, "total_rules": len(rules), "total_moved": total_moved, "details": details}
+            _last_auto_move_result = res
+            return res
+        finally:
+            # 整理完成或异常中止，停止移动任务并恢复新任务接收与转存工作器
+            transfer_gate.resume_all()
+
+
+async def auto_move_loop():
+    """定时文件整理异步循环：按配置的间隔或固定时间点定期检查并排队执行移动规则。"""
+    last_fixed_trigger_minute = ""
+    while True:
+        try:
+            await asyncio.sleep(30)  # 每 30 秒巡检一次
+
+            def _poll_auto_move_state():
+                if not db.get_setting("auto_move_enabled", False):
+                    return None
+                if str(db.get_setting("running", False)).lower() != "true":
+                    return None
+                return (
+                    str(db.get_setting("auto_move_schedule_type", "interval") or "interval"),
+                    db.get_setting("auto_move_fixed_times", '["06:00", "12:00", "18:00"]'),
+                    max(float(db.get_setting("auto_move_interval_hours", 6) or 6), 1.0),
+                    float(db.get_setting("auto_move_last_run", 0) or 0),
+                    transfer_gate.is_in_schedule_window(),
+                )
+
+            cfg = await asyncio.to_thread(_poll_auto_move_state)
+            if not cfg:
+                continue  # 功能未开启或系统总开关停止时不执行
+
+            sched_type, fixed_times_raw, interval_hours, last_run, in_win = cfg
+            should_trigger = False
+            now = time.time()
+
+            if sched_type == "fixed_times":
+                try:
+                    if isinstance(fixed_times_raw, str):
+                        fixed_times = json.loads(fixed_times_raw)
+                    elif isinstance(fixed_times_raw, list):
+                        fixed_times = fixed_times_raw
+                    else:
+                        fixed_times = []
+                except Exception:
+                    fixed_times = []
+
+                cur_hm = time.strftime("%H:%M")
+                cur_min_key = time.strftime("%Y-%m-%d %H:%M")
+                if cur_hm in fixed_times and cur_min_key != last_fixed_trigger_minute:
+                    last_fixed_trigger_minute = cur_min_key
+                    should_trigger = True
+            else:
+                if last_run == 0 or (now - last_run >= interval_hours * 3600):
+                    should_trigger = True
+
+            if should_trigger:
+                if not in_win:
+                    logstream.info("auto_move", "⏰ 当前处于防风控时段外，自动文件整理暂停触发，将在进入允许时段后自动执行")
+                    continue
+                await execute_auto_move(trigger="scheduled")
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logstream.warn("auto_move", f"定时整理循环异常: {e}")
+

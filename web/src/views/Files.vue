@@ -23,7 +23,7 @@
           </div>
           <div class="head-actions">
             <el-input v-model="searchInput" class="search-input" clearable
-                      placeholder="搜索网盘中的全部文件" @keyup.enter="doSearch" @clear="clearSearch">
+                      placeholder="搜索网盘文件" @keyup.enter="doSearch" @clear="clearSearch">
               <template #prefix><el-icon><Search /></el-icon></template>
             </el-input>
             <el-button @click="doSearch" :loading="loading">搜索</el-button>
@@ -34,22 +34,27 @@
 
         <div class="files-toolbar">
         <el-button type="primary" plain @click="mkdirVisible = true">
-          <el-icon><FolderAdd /></el-icon>新建文件夹
+          <el-icon><FolderAdd /></el-icon>
+          <span>新建文件夹</span>
         </el-button>
         <template v-if="selected.length">
           <el-divider direction="vertical" />
           <span class="selected-count">已选 {{ selected.length }} 项</span>
           <el-button @click="copySelected">
-            <el-icon><CopyDocument /></el-icon>复制
+            <el-icon><CopyDocument /></el-icon>
+            <span>复制</span>
           </el-button>
           <el-button @click="cutSelected">
-            <el-icon><Scissor /></el-icon>剪切
+            <el-icon><Scissor /></el-icon>
+            <span>剪切</span>
           </el-button>
           <el-button :disabled="selected.length !== 1" @click="startRename(selected[0])">
-            <el-icon><EditPen /></el-icon>重命名
+            <el-icon><EditPen /></el-icon>
+            <span>重命名</span>
           </el-button>
           <el-button type="danger" plain @click="deleteSelected">
-            <el-icon><Delete /></el-icon>删除
+            <el-icon><Delete /></el-icon>
+            <span>删除</span>
           </el-button>
         </template>
         <template v-if="clipboard">
@@ -62,7 +67,7 @@
               <el-button type="primary" :loading="busy"
                         :disabled="isSearching || !clipboard.items.length" @click="paste">
                 <el-icon><DocumentCopy /></el-icon>
-                粘贴到「{{ currentName }}」
+                <span>粘贴到「{{ currentName }}」</span>
               </el-button>
             </span>
           </el-tooltip>
@@ -81,8 +86,10 @@
       </el-alert>
 
       <el-table :data="items" size="small" v-loading="loading" row-key="id"
-                :empty-text="isSearching ? '没有找到匹配的文件' : '当前目录为空'"
                 @selection-change="onSelection" @row-dblclick="onRowDblclick">
+        <template #empty>
+          <el-empty :image-size="60" :description="isSearching ? '没有找到匹配的文件' : '当前目录为空'" />
+        </template>
         <el-table-column type="selection" width="44" />
         <el-table-column label="名称" min-width="280">
           <template #default="{ row }">
@@ -104,19 +111,21 @@
         </el-table-column>
         <el-table-column label="操作" width="185" fixed="right">
           <template #default="{ row }">
-            <el-button v-if="row.is_dir" text type="primary" @click="openDir(row)">打开</el-button>
-            <el-button text @click="showDetail(row)">详情</el-button>
-            <el-dropdown trigger="click" @command="onRowCommand($event, row)">
-              <el-button text class="more-btn"><el-icon><MoreFilled /></el-icon></el-button>
-              <template #dropdown>
-                <el-dropdown-menu>
-                  <el-dropdown-item command="copy">复制</el-dropdown-item>
-                  <el-dropdown-item command="cut">剪切</el-dropdown-item>
-                  <el-dropdown-item command="rename">重命名</el-dropdown-item>
-                  <el-dropdown-item command="delete" divided>删除</el-dropdown-item>
-                </el-dropdown-menu>
-              </template>
-            </el-dropdown>
+            <div class="table-actions">
+              <el-button v-if="row.is_dir" text type="primary" @click="openDir(row)">打开</el-button>
+              <el-button text @click="showDetail(row)">详情</el-button>
+              <el-dropdown trigger="click" @command="onRowCommand($event, row)">
+                <el-button text class="more-btn"><el-icon><MoreFilled /></el-icon></el-button>
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item command="copy">复制</el-dropdown-item>
+                    <el-dropdown-item command="cut">剪切</el-dropdown-item>
+                    <el-dropdown-item command="rename">重命名</el-dropdown-item>
+                    <el-dropdown-item command="delete" divided>删除</el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
+            </div>
           </template>
         </el-table-column>
       </el-table>
@@ -134,8 +143,8 @@
     </el-card>
 
     <!-- 新建文件夹 -->
-    <el-dialog v-model="mkdirVisible" title="新建文件夹" width="420px">
-      <el-form label-width="72px" @submit.prevent>
+    <el-dialog v-model="mkdirVisible" title="新建文件夹" :width="'min(420px, 94vw)'">
+      <el-form label-width="80px" @submit.prevent>
         <el-form-item label="名称">
           <el-input v-model="mkdirName" maxlength="255" placeholder="请输入文件夹名称"
                     @keyup.enter="saveMkdir" />
@@ -148,8 +157,8 @@
     </el-dialog>
 
     <!-- 重命名 -->
-    <el-dialog v-model="renameVisible" title="重命名" width="420px">
-      <el-form label-width="72px" @submit.prevent>
+    <el-dialog v-model="renameVisible" title="重命名" :width="'min(420px, 94vw)'">
+      <el-form label-width="80px" @submit.prevent>
         <el-form-item label="新名称">
           <el-input v-model="renameForm.name" maxlength="255" placeholder="请输入新名称"
                     @keyup.enter="saveRename" />
@@ -162,7 +171,7 @@
     </el-dialog>
 
     <!-- 文件详情 -->
-    <el-dialog v-model="detailVisible" title="文件详情" width="560px">
+    <el-dialog v-model="detailVisible" title="文件详情" :width="'min(560px, 94vw)'">
       <template v-if="detailRow">
         <div class="detail-head">
           <div class="detail-icon" :class="detailRow.is_dir ? 'folder-bg' : 'file-bg'">
@@ -506,17 +515,18 @@ onMounted(load)
 .crumb.current { color: var(--saas-text-main); font-weight: 600; cursor: default; }
 .search-title { max-width: 360px; }
 .crumb-sep { color: #c0cbe3; font-size: var(--fs-caption); }
-.head-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-.search-input { width: 240px; }
+.head-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.search-input { width: 280px; }
 .files-toolbar {
-  display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 14px;
-  padding: 10px 12px; background: #f6f9ff; border: 1px solid var(--saas-line); border-radius: 10px;
+  display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 14px;
+  padding: 10px 12px; background: var(--glass-bg-strong); border: 1px solid var(--saas-line); border-radius: 10px;
+  transition: all .2s cubic-bezier(0.4, 0, 0.2, 1);
 }
-.selected-count { font-size: var(--fs-body); color: #5a6a8a; }
+.selected-count { font-size: var(--fs-body); color: var(--saas-text-main); font-weight: 600; }
 .clip-tag { max-width: 240px; }
 .load-alert { margin-bottom: 14px; }
 .file-name { display: flex; align-items: center; gap: 8px; min-width: 0; cursor: pointer; }
-.file-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #34405c; }
+.file-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--saas-text-main); }
 .file-name:hover .file-text { color: var(--el-color-primary); }
 .folder-icon { color: #f0a020; flex: none; }
 .file-icon { color: #7c8aa5; flex: none; }
@@ -539,7 +549,7 @@ onMounted(load)
 @media (max-width: 768px) {
   .files-head { align-items: flex-start; }
   .head-actions { width: 100%; }
-  .search-input { flex: 1 1 150px; width: auto; }
+  .search-input { flex: 1 1 180px; width: auto; }
   .files-toolbar { padding: 8px; }
   .crumb { max-width: 110px; padding: 4px; }
   .search-title { max-width: 180px; }

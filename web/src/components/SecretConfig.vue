@@ -51,6 +51,6 @@ const onCancel = () => {
 .sc-ok { display: flex; align-items: center; gap: 8px; }
 .sc-ok .el-button { padding: 4px 8px; }
 .sc-fields { display: flex; flex-direction: column; gap: 8px; width: 100%; }
-.sc-btns { display: flex; gap: 8px; }
+.sc-btns { display: flex; align-items: center; gap: 10px; }
 .sc-btns .el-button + .el-button { margin-left: 0; }
 </style>

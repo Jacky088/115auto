@@ -163,15 +163,25 @@ def _check(resp, action: str) -> dict:
     return resp
 
 
-def _call(action: str, func, *args, **kwargs) -> dict:
-    """调用 115 接口，把网络异常/未登录异常统一转成可读的 400 错误。"""
+def _call_impl(action: str, func, serialize: bool, *args, **kwargs) -> dict:
+    """调用 115 接口并统一将网络/业务异常转成可读的 400 错误。"""
     try:
-        resp = func(*args, **kwargs)
+        resp = pan.pan_call(func, *args, **kwargs) if serialize else func(*args, **kwargs)
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(400, f"{action}失败: {e}")
     return _check(resp, action)
+
+
+def _call(action: str, func, *args, **kwargs) -> dict:
+    """写操作入口：经进程级串行队列门闸执行，避免与后台转存/整理并发撞车。"""
+    return _call_impl(action, func, True, *args, **kwargs)
+
+
+def _call_read(action: str, func, *args, **kwargs) -> dict:
+    """只读浏览/搜索入口：直接放行不进后台串行锁，避免网盘文件读取被后台长任务堵死。"""
+    return _call_impl(action, func, False, *args, **kwargs)
 
 
 def _ids(body: dict, max_items: int = 200) -> list[str]:
@@ -207,12 +217,12 @@ def list_files(cid: int = Query(0, ge=0), search: str = Query("", max_length=200
     """列出目录内容（或全局搜索）。"""
     client = _client()
     if search:
-        resp = _call("搜索", client.fs_search,
+        resp = _call_read("搜索", client.fs_search,
                      {"search_value": search, "limit": size, "offset": (page - 1) * size})
         items = _sorted_items(resp.get("data"))
         return {"items": items, "total": _int(resp.get("count"), len(items)), "cid": -1, "path": []}
 
-    resp = _call("读取目录", client.fs_files,
+    resp = _call_read("读取目录", client.fs_files,
                  {"cid": cid, "limit": size, "offset": (page - 1) * size,
                   "o": "file_name", "asc": 1, "show_dir": 1,
                   "fc_mix": 0, "custom_order": 1})
@@ -232,6 +242,7 @@ def mkdir(body: dict, _=Depends(require_user)):
         raise HTTPException(400, "目录名过长")
     resp = _call("新建目录", client.fs_mkdir,
                  {"cname": name, "pid": _int(body.get("pid"), 0)})
+    pan.clear_dir_cache()
     data = resp.get("data", {}) or {}
     cid = data.get("file_id") or data.get("cid") or data.get("fid") or resp.get("cid")
     return {"ok": True, "cid": cid, "name": name}
@@ -248,6 +259,7 @@ def rename(body: dict, _=Depends(require_user)):
     if len(name) > 255:
         raise HTTPException(400, "文件名过长")
     _call("重命名", client.fs_rename, (fid, name))
+    pan.clear_dir_cache()
     return {"ok": True}
 
 
@@ -257,6 +269,7 @@ def delete(body: dict, _=Depends(require_user)):
     client = _client()
     ids = _ids(body)
     _call("删除", client.fs_delete, ids)
+    pan.clear_dir_cache()
     return {"ok": True, "count": len(ids)}
 
 
@@ -268,6 +281,7 @@ def move(body: dict, _=Depends(require_user)):
     if str(target) in ids:
         raise HTTPException(400, "不能将目录移动到其自身内部")
     _call("移动", client.fs_move, ids, pid=target)
+    pan.clear_dir_cache()
     return {"ok": True, "count": len(ids)}
 
 

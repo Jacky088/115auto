@@ -392,7 +392,7 @@ const onResize = () => { if (pieChart) pieChart.resize(); if (spaceChart) spaceC
   border: 1px solid var(--saas-line); color: var(--saas-text-sub);
   background: var(--glass-bg-strong); transition: all .15s ease;
 }
-.m-chip:hover { border-color: var(--el-color-primary-light-5); color: var(--el-color-primary); }
+.m-chip:hover { border-color: var(--el-color-primary); background: rgba(79, 107, 255, .12); color: var(--el-color-primary); }
 .m-chip.active {
   background: var(--grad-brand); border-color: transparent; color: #fff;
   box-shadow: 0 3px 10px rgba(79, 107, 255, .35);

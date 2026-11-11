@@ -12,7 +12,7 @@ import re
 import time
 
 from .. import database as db
-from ..core import classifier, filters, logstream
+from ..core import classifier, filters, logstream, transfer_gate
 from ..pan115 import client as pan
 from . import jobs
 
@@ -110,26 +110,90 @@ def _norm_entry_name(s: str) -> str:
     return re.sub(r"\.(mkv|mp4|avi|ts|m2ts|rmvb|mov|flv|wmv|iso|srt|ass|ssa|zip|rar|7z)$", "", n)
 
 
-def _dedup_by_name(cid: int, title: str) -> str:
-    """同名去重：目标目录（或其下的「名称 (年份)」子目录）已存在时返回原因，否则空串。
+_dir_cache: dict[int, tuple[float, set[str]]] = {}
 
-    cid 由调用方传入（转存前解析目录时顺带完成，避免为去重单独再列一遍目录）。
+
+def _get_dir_names_cached(cid: int) -> set[str]:
+    ttl = max(0, int(float(db.get_setting("dedup_cache_ttl_sec", 90) or 0)))
+    now = time.time()
+    if ttl > 0 and cid in _dir_cache:
+        ts, cached = _dir_cache[cid]
+        if now - ts < ttl:
+            return cached
+    names = pan.list_file_names(cid, limit=5000)
+    if ttl > 0:
+        _dir_cache[cid] = (now, names)
+    return names
+
+
+def _add_to_dir_cache(cid: int, name: str):
+    if cid in _dir_cache:
+        _dir_cache[cid][1].add(name)
+
+
+def _invalidate_dir_cache(cid: int):
+    """转存落盘后主动失效该目录缓存，防并发或连续转存时的假阴性脏读。"""
+    _dir_cache.pop(cid, None)
+
+
+def _dedup_by_name(cid: int, title: str, snap: dict = None) -> str:
+    """同名去重：目标目录已存在同名内容时返回原因，否则空串。
+
+    不仅比对任务标题，还深层比对分享内的真实文件/文件夹名，
+    彻底避免散装单文件（如 1.mp4）直接入库触发 115 自动重命名 (1) 冲突。
     """
     if not db.get_setting("dedup_by_name", True):
         return ""
     if not cid:
         return ""
     try:
-        # 上限与分享快照一致（5000）：目录文件数超过 500 时不能漏判，否则会重复转存
-        names = pan.list_file_names(cid, limit=5000)
+        names = _get_dir_names_cached(cid)
     except Exception:
         return ""  # 检查失败不阻塞转存
+    if not names:
+        return ""
+
+    names_raw = {_norm_filename(n): n for n in names}
+    names_base = {_norm_entry_name(n): n for n in names if _norm_entry_name(n)}
+
+    # 1. 标题比对
     title_raw = _norm_filename(title)
+    if title_raw in names_raw:
+        matched = names_raw[title_raw]
+        return f"目标目录已存在「{matched}」（同名去重），如需强制转存请在「系统设置」关闭「同名去重」后重试"
     title_base = _norm_entry_name(title)
-    for n in names:
-        n_raw = _norm_filename(n)
-        if n_raw == title_raw or (title_base and _norm_entry_name(n) == title_base):
-            return f"目标目录已存在「{n}」（同名去重），如需强制转存请在「系统设置」关闭「同名去重」后重试"
+    if title_base and title_base in names_base:
+        matched = names_base[title_base]
+        return f"目标目录已存在「{matched}」（同名去重），如需强制转存请在「系统设置」关闭「同名去重」后重试"
+
+    # 2. 分享内容深层条目与单文件名比对
+    if snap and isinstance(snap, dict):
+        # 2.1 顶层条目名比对（如合集/剧集文件夹名）
+        for top in (snap.get("top_names") or []):
+            if not top:
+                continue
+            top_raw = _norm_filename(top)
+            if top_raw in names_raw:
+                return f"目标目录已存在「{names_raw[top_raw]}」（同名去重），如需强制转存请在「系统设置」关闭「同名去重」后重试"
+            top_base = _norm_entry_name(top)
+            if top_base and top_base in names_base:
+                return f"目标目录已存在「{names_base[top_base]}」（同名去重），如需强制转存请在「系统设置」关闭「同名去重」后重试"
+
+        # 2.2 散装文件真实文件名比对（对齐 1.mp4 等具体单文件）
+        files = [f for f in (snap.get("files") or []) if f.get("fn")]
+        if files:
+            for f in files[:20]:
+                fn = f.get("fn")
+                if not fn:
+                    continue
+                fn_raw = _norm_filename(fn)
+                if fn_raw in names_raw:
+                    return f"目标目录已存在「{names_raw[fn_raw]}」（同名去重），如需强制转存请在「系统设置」关闭「同名去重」后重试"
+                fn_base = _norm_entry_name(fn)
+                if fn_base and fn_base in names_base:
+                    if len(fn_base) > 3 or not fn_base.isdigit():
+                        return f"目标目录已存在「{names_base[fn_base]}」（同名去重），如需强制转存请在「系统设置」关闭「同名去重」后重试"
+
     return ""
 
 
@@ -166,12 +230,16 @@ def _process_one(job: dict):
                     return
             except Exception:
                 pass  # 查询失败按原流程重新提交
-        pan.offline_download(job["share_url"], cid)
+        resp = pan.offline_download(job["share_url"], cid)
         # 提交成功 ≠ 下载完成：标记 submitted，由 offline_check_loop 跟踪真实结果
         changed = db.execute("UPDATE transfers SET status='submitted', finished_at=NULL"
                              " WHERE id=? AND status='running'", (job["id"],))
         if changed == 0:
             return
+        # 若 115 接口返回了 info_hash，写入 receive_code 方便后续精准核对跟踪
+        ih = str((resp or {}).get("info_hash") or "").strip()
+        if ih:
+            db.execute("UPDATE transfers SET receive_code=? WHERE id=?", (ih, job["id"]))
         display = classifier.headline(job["title"]) or job["title"][:80]
         logstream.info("transfer",
                        f"☁️ 云下载任务已添加：{display[:60]} → {target}（下载完成后推送完成通知）")
@@ -261,7 +329,7 @@ def _process_one(job: dict):
             cid = pan.mkdirs(target)
         except Exception:
             cid = 0
-    dedup_reason = "" if incr else _dedup_by_name(cid, title)
+    dedup_reason = "" if incr else _dedup_by_name(cid, title, snap)
     # 追更任务不做同名去重：增量分支已按真实文件名比对过，标题前缀匹配反而可能误拦
     if dedup_reason:
         db.execute("UPDATE transfers SET status='duplicate', title=?, size=?, error=?"
@@ -310,8 +378,10 @@ def _process_one(job: dict):
         try:
             existing = pan.list_file_names(cid)
         except Exception as e:
-            logstream.warn("transfer", f"重试预检目标目录失败（继续正常提交）: {e}")
-            existing = set()
+            # 修复漏洞 1：网络抖动导致无法读取目录确认状态时，绝不盲目二次提交导致生成 (1) 副本；
+            # 抛出重试异常进入退避，等待网络恢复后再安全校验
+            logstream.warn("transfer", f"重试预检目标目录网络异常（稍后重试，避免盲目提交产生 (1) 副本）: {e}")
+            raise RuntimeError(f"重试预检目标目录网络异常（防重复转存拦截）: {e}")
         existing_n = {_norm_filename(n) for n in existing}
         pre = [f.get("fn") for f in snap["files"][:10] if f.get("fn")]
         pre += (snap.get("top_names") or [])[:10]
@@ -370,6 +440,7 @@ def _process_one(job: dict):
         logstream.warn("transfer",
                        f"任务 #{job['id']} 已不在 running 状态，忽略本次迟到成功回写（防重复计额）")
         return
+    _invalidate_dir_cache(cid)
     db.quota_incr()
     pan.note_115_ok()  # 完整成功：风控退避逐级恢复
     logstream.info("transfer",
@@ -388,6 +459,19 @@ def _process_one(job: dict):
             logstream.warn("transfer", f"转存后整理失败（不影响转存结果）: {e}")
 
 
+def _is_generic_name(name: str) -> bool:
+    """判断是否为无特异性短名称或通用单集名（如 1.mp4, 01.mp4, cover.jpg 等）。
+    全盘搜索这类名称极易匹配到网盘内其他影视资源导致误复制冲突生成 (1) 副本。"""
+    base = re.sub(r"\.[^.]+$", "", name).strip().lower()
+    if len(base) <= 3 or base.isdigit():
+        return True
+    if re.fullmatch(r"(?:ep?|s\d{1,2}e?|第)?\d{1,4}(?:集|话|話)?", base):
+        return True
+    if base in {"cover", "poster", "folder", "fanart", "sample", "trailer", "thumb", "cd1", "cd2"}:
+        return True
+    return False
+
+
 def _recover_misplaced(cid: int, snap: dict) -> int:
     """反查失败后的兜底（「必须要存进去」的最后手段）。
 
@@ -396,8 +480,9 @@ def _recover_misplaced(cid: int, snap: dict) -> int:
     允许重复，只求文件必须出现在目标目录。返回复制的文件数。
     搜索/复制之间留小间隔，与库内其他 115 调用的防风控口径一致。
     """
-    sample = [f.get("fn") for f in snap["files"][:5] if f.get("fn")]
-    sample += (snap.get("top_names") or [])[:3]
+    # 严格过滤无特征通用文件名（如 1.mp4, 01.mp4），防止全盘搜索抓取到其他目录的同名剧集
+    sample = [f.get("fn") for f in snap["files"][:5] if f.get("fn") and not _is_generic_name(f.get("fn"))]
+    sample += [n for n in (snap.get("top_names") or [])[:3] if n and not _is_generic_name(n)]
     sample = [n for n in dict.fromkeys(sample) if n][:5]
     copied = 0
     seen_ids: set[str] = set()
@@ -546,33 +631,72 @@ async def _heartbeat(job_id: int):
     """长任务心跳：每 60 秒刷新 running_at（仅当任务仍为 running），看门狗据此判断是否真卡死。"""
     while True:
         await asyncio.sleep(60)
-        db.execute("UPDATE transfers SET running_at=? WHERE id=? AND status='running'",
-                   (time.time(), job_id))
+        await asyncio.to_thread(
+            db.execute,
+            "UPDATE transfers SET running_at=? WHERE id=? AND status='running'",
+            (time.time(), job_id),
+        )
 
 
 def _in_schedule_window() -> bool:
-    """定时计划：开启后仅允许时段内转存（支持跨零点，如 22:00-08:00）。"""
-    if not db.get_setting("schedule_enabled", False):
-        return True
-    from datetime import datetime
-    now = datetime.now().strftime("%H:%M")
-    start = str(db.get_setting("schedule_start", "22:00"))
-    end = str(db.get_setting("schedule_end", "08:00"))
-    if start <= end:
-        return start <= now <= end
-    return now >= start or now <= end  # 跨零点
+    """定时计划：开启后仅允许时段内转存与云下载（由 transfer_gate 统一判定）。"""
+    return transfer_gate.is_in_schedule_window()
+
+
+def _poll_worker_gates():
+    """在线程池中集中读取工作器调度所需的设置与额度状态，避免事件循环争抢 SQLite 锁。"""
+    running = bool(db.get_setting("running", False))
+    paused = bool(db.get_setting("paused", False))
+    sched_on = bool(db.get_setting("schedule_enabled", False))
+    in_win = _in_schedule_window()
+    jitter_min = int(float(db.get_setting("schedule_jitter_min", 5) or 0))
+    limit = max(1, int(_num_setting("daily_limit", 50)))
+    quota = db.quota_today() if limit > 0 else 0
+    waiting = (
+        db.query("SELECT count(*) c FROM transfers WHERE status='queued'", one=True)["c"]
+        if (limit > 0 and quota >= limit) else 0
+    )
+    return running, paused, sched_on, in_win, jitter_min, limit, quota, waiting
+
+
+def _claim_next_job():
+    """扫描重试并发原子抢占下一个可执行任务；已禁用类型则直接跳过并返回哨兵值。"""
+    _retry_scan()
+    job = _fetch_next()
+    if not job:
+        return None
+    job = dict(job)
+    if skip_if_disabled(job):
+        return "skipped"
+    changed = db.execute(
+        "UPDATE transfers SET status='running', running_at=?, error='', next_retry_at=NULL"
+        " WHERE id=? AND status='queued'",
+        (time.time(), job["id"]),
+    )
+    if changed == 0:
+        return "race"
+    job["status"] = "running"
+    return job
 
 
 async def queue_worker():
     logstream.info("transfer", "转存工作器启动（等待「开始运行」）")
     consecutive_fails = 0
+    consecutive_success = 0
     schedule_logged = False
     pause_logged = False
     stopped_logged = False
+    last_schedule_active = False
     while True:
         try:
+            # 互斥门闸：若文件整理正在运行，暂停转存并在此挂起等待整理完成
+            await transfer_gate.wait_transfer_worker_allowed()
+
+            running, paused, sched_on, in_win, jitter_min, limit, quota, waiting = \
+                await asyncio.to_thread(_poll_worker_gates)
+
             # 总开关：用户未点击「开始运行」前不消费队列
-            if not db.get_setting("running", False):
+            if not running:
                 if not stopped_logged:
                     logstream.info("transfer", "系统未启动（向导完成后点击网页顶栏「开始运行」）")
                     stopped_logged = True
@@ -581,7 +705,7 @@ async def queue_worker():
             stopped_logged = False
 
             # 全局暂停（TG /pause 或设置）
-            if db.get_setting("paused", False):
+            if paused:
                 if not pause_logged:
                     logstream.warn("transfer", "转存已暂停（TG 发送 /resume 恢复）")
                     pause_logged = True
@@ -590,7 +714,8 @@ async def queue_worker():
             pause_logged = False
 
             # 定时计划窗口检查
-            if not _in_schedule_window():
+            if not in_win:
+                last_schedule_active = False
                 if not schedule_logged:
                     logstream.info("transfer", "当前不在允许转存时段，新任务暂不入队"
                                                "（可在设置页调整或关闭定时计划）")
@@ -599,44 +724,48 @@ async def queue_worker():
                 continue
             schedule_logged = False
 
+            # 从「时段外」刚进入「时段内」时触发拟人化开工随机扰动（防整点脚本特征）
+            if sched_on and not last_schedule_active:
+                last_schedule_active = True
+                if jitter_min > 0:
+                    jitter_sec = random.randint(15, max(15, jitter_min * 60))
+                    logstream.info("transfer", f"⏰ 进入允许转存时段，开启拟人化开工随机扰动（等待 {jitter_sec} 秒后开始处理队列）...")
+                    await asyncio.sleep(jitter_sec)
+            elif not sched_on:
+                last_schedule_active = False
+
             # 旧库可能存过 0（旧的「不限制」语义）：现约定限额最小 1，兜底夹紧
-            limit = max(1, int(_num_setting("daily_limit", 50)))
-            if limit > 0 and db.quota_today() >= limit:
-                waiting = db.query("SELECT count(*) c FROM transfers WHERE status='queued'", one=True)["c"]
+            if limit > 0 and quota >= limit:
                 logstream.warn("transfer",
                                f"已达每日限额 {limit}（分享+云下载共享额度），剩余 {waiting} 个任务保留在队列，"
                                "明日 0 点额度重置后自动接续转存")
                 await asyncio.sleep(600)
                 continue
 
-            _retry_scan()
-            job = _fetch_next()
-            if not job:
+            # 领取任务前再次确认互斥门闸
+            await transfer_gate.wait_transfer_worker_allowed()
+            claimed = await asyncio.to_thread(_claim_next_job)
+            if claimed is None:
                 await asyncio.sleep(5)
                 continue
-
-            job = dict(job)
-            # 功能开关：已关闭类型的排队任务直接跳过（无 115 调用，快速流转）
-            if skip_if_disabled(job):
+            if claimed == "skipped":
                 await asyncio.sleep(1)
                 continue
-            # 与其他 queued 抢占：置 running 并记录领取时间（看门狗据此回收卡死任务）
-            # 必须带 AND status='queued'：否则多进程/看门狗重排时会重复接管同一任务
-            changed = db.execute(
-                "UPDATE transfers SET status='running', running_at=?, error='', next_retry_at=NULL"
-                " WHERE id=? AND status='queued'", (time.time(), job["id"]))
-            if changed == 0:
+            if claimed == "race":
                 await asyncio.sleep(0.5)
                 continue
-            job["status"] = "running"
+            job = claimed
 
             # cookie 检查（不消耗重试次数：长时间失效不应把排队任务打成 failed）
-            st = await asyncio.to_thread(pan.check_login)
+            st = await pan.run_pan_thread(pan.check_login)
             if not st.get("ok"):
                 err = f"115 未登录或 Cookie 失效：{st.get('err', '')}"
-                db.execute("UPDATE transfers SET status='queued', error=?, next_retry_at=?"
-                           " WHERE id=? AND status='running'",
-                           (err[:500], time.time() + 60, job["id"]))
+                await asyncio.to_thread(
+                    db.execute,
+                    "UPDATE transfers SET status='queued', error=?, next_retry_at=?"
+                    " WHERE id=? AND status='running'",
+                    (err[:500], time.time() + 60, job["id"]),
+                )
                 logstream.warn("transfer",
                                f"115 Cookie 失效，任务 #{job['id']} 暂缓 60 秒（不计入重试次数）")
                 await asyncio.sleep(60)
@@ -645,14 +774,35 @@ async def queue_worker():
             # 长任务心跳：转存在线程池中运行且无法取消，心跳确保 running_at 持续刷新，
             # 避免看门狗把仍在正常推进的大分享误判为卡死并重排（进而重复转存）
             hb = asyncio.create_task(_heartbeat(job["id"]))
+            transfer_gate.mark_transfer_active(True)
             try:
-                await asyncio.to_thread(_process_one, job)
+                await pan.run_pan_thread(_process_one, job)
                 consecutive_fails = 0
+                consecutive_success += 1
+
+                # 拟人化连存小憩机制
+                def _batch_rest_cfg():
+                    en = bool(db.get_setting("batch_rest_enabled", True))
+                    cnt = max(1, int(float(db.get_setting("batch_rest_count", 3) or 3)))
+                    min_m = max(1, int(float(db.get_setting("batch_rest_min_min", 2) or 2)))
+                    max_m = max(min_m, int(float(db.get_setting("batch_rest_max_min", 5) or 5)))
+                    return en, cnt, min_m, max_m
+
+                rest_on, rest_count, min_m, max_m = await asyncio.to_thread(_batch_rest_cfg)
+                if rest_on:
+                    if consecutive_success >= rest_count:
+                        consecutive_success = 0
+                        rest_sec = random.randint(min_m * 60, max_m * 60)
+                        logstream.info("transfer", f"☕ 已连续完成 {rest_count} 笔转存，触发拟人化小憩（休息 {rest_sec // 60} 分 {rest_sec % 60} 秒后继续）...")
+                        await asyncio.sleep(rest_sec)
             except PermanentTransferError as e:
                 # 确定性失败（格式不支持/地址无效等）：不重试，立即失败并通知
-                db.execute("UPDATE transfers SET status='failed', attempts=?, error=? WHERE id=?"
-                           " AND status='running'",
-                           (job["attempts"] + 1, str(e)[:500], job["id"]))
+                await asyncio.to_thread(
+                    db.execute,
+                    "UPDATE transfers SET status='failed', attempts=?, error=? WHERE id=?"
+                    " AND status='running'",
+                    (job["attempts"] + 1, str(e)[:500], job["id"]),
+                )
                 logstream.error("transfer", f"任务永久失败: {str(e)}")
                 pan.note_115_error(str(e))
                 await asyncio.to_thread(
@@ -663,16 +813,18 @@ async def queue_worker():
                 consecutive_fails = 0  # 任务自身问题不计入熔断
             except Exception as e:
                 consecutive_fails += 1
+                consecutive_success = 0
                 pan.note_115_error(str(e))
-                _fail(job, str(e))
+                await asyncio.to_thread(_fail, job, str(e))
                 if consecutive_fails >= 5:
                     logstream.error("transfer", "连续失败 5 次，暂停转存 30 分钟")
                     await asyncio.sleep(1800)
                     consecutive_fails = 0
             finally:
+                transfer_gate.mark_transfer_active(False)
                 hb.cancel()
 
-            await asyncio.sleep(_interval())
+            await asyncio.sleep(await asyncio.to_thread(_interval))
         except Exception as e:
             logstream.error("transfer", f"工作器异常: {logstream.exc(e)}")
             await asyncio.sleep(30)

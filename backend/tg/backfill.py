@@ -67,7 +67,7 @@ async def backfill_channel(client: httpx.AsyncClient, ch: dict, newest_min_id: i
     """
     name = ch["name"]
     until_id = int(ch["last_message_id"])
-    budget = _daily_backfill_budget()
+    budget = await asyncio.to_thread(_daily_backfill_budget)
     processed = 0
 
     state = _backfill_state.get(ch["id"])
@@ -90,12 +90,15 @@ async def backfill_channel(client: httpx.AsyncClient, ch: dict, newest_min_id: i
     def remember(before_cursor: int):
         _backfill_state[ch["id"]] = {"until_id": until_id, "before": int(before_cursor), "hi": hi}
 
-    def finish_complete() -> bool:
+    async def finish_complete() -> bool:
         """缺口全部覆盖：接缝推进到缺口右端（hi-1）。"""
         marker = max(hi - 1, until_id)
         if marker > until_id:
-            db.execute("UPDATE channels SET last_message_id=?, last_fetch_at=? WHERE id=?",
-                       (marker, time.time(), ch["id"]))
+            await asyncio.to_thread(
+                db.execute,
+                "UPDATE channels SET last_message_id=?, last_fetch_at=? WHERE id=?",
+                (marker, time.time(), ch["id"]),
+            )
             ch["last_message_id"] = marker
         _backfill_state.pop(ch["id"], None)
         logstream.info("backfill", f"[{name}] 缺口补漏完成，本轮共处理 {processed} 条")
@@ -114,7 +117,7 @@ async def backfill_channel(client: httpx.AsyncClient, ch: dict, newest_min_id: i
     while True:
         msgs = await _fetch_before(client, name, before)
         if not msgs:
-            return finish_complete()  # 已到频道最早消息，缺口范围内再没有可补的消息
+            return await finish_complete()  # 已到频道最早消息，缺口范围内再没有可补的消息
         ids = [m["id"] for m in msgs]
         if max(ids) >= before:
             # 防御：服务端偶尔忽略 before 参数。不推进接缝，下一轮重试，避免死循环与漏消息
@@ -132,8 +135,9 @@ async def backfill_channel(client: httpx.AsyncClient, ch: dict, newest_min_id: i
                 # 预算在页中间用完：把游标停在第一条未处理消息上，下一轮从这里继续
                 remember(m["id"] + 1)
                 return partial(m["id"] + 1)
-            exists = db.query("SELECT 1 FROM messages WHERE channel=? AND message_id=?",
-                              (name, m["id"]), one=True)
+            exists = await asyncio.to_thread(
+                db.query, "SELECT 1 FROM messages WHERE channel=? AND message_id=?",
+                (name, m["id"]), True)
             if exists:
                 continue
             if m.get("text") or m.get("buttons"):
@@ -145,17 +149,17 @@ async def backfill_channel(client: httpx.AsyncClient, ch: dict, newest_min_id: i
                         await asyncio.to_thread(
                             pipeline.process_message, name, m["id"], full_text)
                     else:
-                        _remember_message(name, m)
+                        await asyncio.to_thread(_remember_message, name, m)
                 except Exception as e:
                     logstream.error("backfill", f"[{name}] 补漏消息 {m['id']} 处理失败: {e}")
-                    _remember_message(name, m)
+                    await asyncio.to_thread(_remember_message, name, m)
             else:
-                _remember_message(name, m)
+                await asyncio.to_thread(_remember_message, name, m)
             processed += 1
 
         before = min(ids)
         if before <= until_id:
-            return finish_complete()
+            return await finish_complete()
         remember(before)
         if processed >= budget:
             return partial(before)

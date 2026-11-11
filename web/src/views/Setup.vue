@@ -66,6 +66,7 @@
         </div>
         <div class="btn-row end" style="margin-top: 16px">
           <el-button @click="step = 0">上一步</el-button>
+          <el-button plain @click="step = 2">跳过，稍后配置</el-button>
           <el-tooltip :disabled="tgMode === 'polling' || ub.connected" placement="top"
                       content="Userbot 模式必须先完成 TG 账号登录">
             <span>
@@ -92,7 +93,7 @@
           </el-radio-group>
           <p class="ch-type-tip" style="margin: 8px 0 0">
             全盘转存 = 所有资源链接都转存；仅订阅 = 只转存命中订阅关键词的内容。
-            之后可在「频道管理」按频道独立调整
+            之后可在「账号管理」按频道独立调整
           </p>
           <p v-if="wizardSubOnly === null" class="warn-text" style="font-size: var(--fs-caption); margin: 6px 0 0">
             ⚠️ 必须选择订阅模式（全盘转存 或 仅订阅），选择后才能进入下一步
@@ -111,6 +112,7 @@
         </div>
         <div class="btn-row end" style="margin-top: 16px">
           <el-button @click="step = 1">上一步</el-button>
+          <el-button plain @click="step = 3">跳过，稍后配置</el-button>
           <el-button type="primary" :loading="adding" :disabled="wizardSubOnly === null"
                      @click="addChannels">下一步</el-button>
         </div>
@@ -151,7 +153,7 @@
               </div>
               <el-button type="primary" size="large" :loading="starting"
                          :disabled="!ready.data?.ready" @click="startNow">运行</el-button>
-              <el-button plain @click="skipFinish">稍后再启动（顶栏可随时点击「运行」）</el-button>
+              <el-button plain @click="skipFinish">稍后再启动（直接进入系统，顶栏可随时点击「运行」）</el-button>
             </div>
           </template>
         </el-result>
@@ -162,7 +164,7 @@
     <CookieImportDialog v-model="cookieVisible" @success="onCookieImported" />
 
     <!-- Userbot 登录弹窗：选择 Userbot 模式后必须登录 TG 账号，否则校验不通过 -->
-    <el-dialog v-model="ubDialog" title="登录 Telegram Userbot" width="500px"
+    <el-dialog v-model="ubDialog" title="登录 Telegram Userbot" :width="'min(500px, 94vw)'"
                :close-on-click-modal="false">
       <UserbotLogin compact @update="onUbUpdate" />
       <template #footer>
@@ -177,6 +179,7 @@ import { computed, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { api, errMsg } from '../api'
+import { resetWizardCache } from '../router'
 import CookieImportDialog from '../components/CookieImportDialog.vue'
 import UserbotLogin from '../components/UserbotLogin.vue'
 
@@ -294,12 +297,22 @@ const skipFinish = async () => {
   await loadReadiness()
   if (ready.data?.ready) return finish()
   const reasons = (ready.data?.reasons || []).map((r) => `· ${r}`).join('<br/>')
-  ElMessageBox.alert(
-    `<b>必须完成 115 登录并添加频道，才能正常运行本程序。</b><br/><br/>当前还缺：<br/>${reasons}` +
-    `<br/><br/>可继续在向导中补全，或稍后到「账号管理」「频道管理」配置后再启动。`,
-    '配置尚未完成',
-    { dangerouslyUseHTMLString: true, confirmButtonText: '知道了', type: 'warning' },
-  ).catch(() => {})
+  try {
+    await ElMessageBox.confirm(
+      `<b>当前部分配置尚未完成，系统暂未开启运行：</b><br/><br/>当前还缺：<br/>${reasons}` +
+      `<br/><br/>您可以先进入系统，稍后在「账号管理」完成配置后，在顶栏随时点击「运行」。`,
+      '配置尚未完成',
+      {
+        dangerouslyUseHTMLString: true,
+        confirmButtonText: '知道了，直接进入系统',
+        cancelButtonText: '留在向导中补全',
+        type: 'warning',
+      },
+    )
+    await finish()
+  } catch {
+    // 用户选择留在向导中补全
+  }
 }
 
 // ---- TG mode ----
@@ -365,6 +378,7 @@ const startNow = async () => {
   starting.value = true
   try {
     await api.post('/api/wizard/complete')
+    resetWizardCache()
   } catch (e) {
     // 向导完成失败：留在当前页，避免进入未完成初始化的仪表盘
     ElMessage.error(errMsg(e))
@@ -384,6 +398,8 @@ const startNow = async () => {
 const finish = async () => {
   try {
     await api.post('/api/wizard/complete')
+    resetWizardCache()
+    ElMessage.success('已进入系统，可随时在顶栏启动运行')
     router.push('/dashboard')
   } catch (e) { ElMessage.error(errMsg(e)) }
 }
@@ -421,8 +437,9 @@ const finish = async () => {
 .ub-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: var(--fs-body); }
 .ub-warn { margin: 10px 0 0; font-size: var(--fs-caption); color: var(--el-color-warning-dark-2); font-weight: 600; }
 .ch-type-box {
-  margin-top: 12px; border: 1px solid var(--el-border-color-lighter);
-  border-radius: 10px; padding: 12px 14px; max-height: 220px; overflow-y: auto;
+  margin-top: 12px; border: 1px solid var(--saas-line);
+  background: var(--subcard-bg);
+  border-radius: 12px; padding: 12px 14px; max-height: 220px; overflow-y: auto;
 }
 .sub-mode-box {
   margin-top: 12px; border: 1px solid var(--el-color-primary-light-7);
@@ -433,7 +450,8 @@ const finish = async () => {
 .ch-type-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-body); }
 .ready-box {
   display: flex; flex-direction: column; gap: 10px;
-  border: 1px solid var(--el-border-color-lighter); border-radius: 10px; padding: 14px 16px;
+  border: 1px solid var(--saas-line); background: var(--subcard-bg);
+  border-radius: 12px; padding: 14px 16px;
   text-align: left;
 }
 .ready-item { display: flex; align-items: center; gap: 8px; font-size: var(--fs-body); color: var(--saas-text-main); }

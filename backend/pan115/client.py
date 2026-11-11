@@ -2,17 +2,23 @@
 
 注意：所有网络调用是同步阻塞的，调用方（转存 worker）需放到线程池执行。
 """
+import asyncio
+import functools
 import io
 import json
+import os
 import re
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import qrcode
 import qrcode.image.svg
 
 from .. import config, database as db
 from ..core import logstream
+from ..core.t2s import t2s
+from ..core.episode import parse as parse_episode
 
 _lock = threading.Lock()
 _client = None  # P115Client 单例（懒加载）
@@ -47,6 +53,43 @@ def pace_factor() -> int:
     """当前应使用的间隔倍数（1 = 正常）。"""
     with _risk_lock:
         return _PACE_STEPS[_consec_risk]
+
+
+# ---- 进程级 115 后台/写接口串行队列与最小冷却间隔 ----
+# 所有后台重操作与写操作（转存、云下载提交/核对、目录遍历/新建/移动、自动整理、
+# 网页文件写操作）统一经 pan_call 串行化，避免并发撞车触发 115 风控。
+# 轻量交互只读与带锁缓存接口（check_login、space_info、validate_cookie、扫码登录、
+# 网页网盘只读浏览/搜索）放行不进此锁，避免被后台长任务堵死超时。
+_api_lock = threading.RLock()
+_last_api_at = -1000.0
+_MIN_API_GAP = 0.25  # 任意两次串行 115 请求间的最小间隔（秒）
+_MAX_API_GAP = 1.5   # 含风控退避倍数后的单步上限（兼顾交互响应速度）
+
+# 专用线程池：隔离阻塞型 115/网络后台任务，防止占满默认 asyncio 线程池
+# （小核容器上默认仅 5~6 个线程）而饿死 TG 频道轮询、Userbot 与本地 SQLite 读写。
+_pan_executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="pan115")
+
+
+async def run_pan_thread(fn, *args, **kwargs):
+    """在专用线程池中执行阻塞型 115 / 外部网络任务，避免挤占默认 asyncio.to_thread 池。"""
+    loop = asyncio.get_running_loop()
+    if kwargs:
+        return await loop.run_in_executor(_pan_executor, functools.partial(fn, *args, **kwargs))
+    return await loop.run_in_executor(_pan_executor, fn, *args)
+
+
+def pan_call(fn, *args, **kwargs):
+    """进程级 115 后台/写请求串行入口（可重入互斥 + 最小间隔节流）。"""
+    global _last_api_at
+    with _api_lock:
+        gap = min(_MAX_API_GAP, _MIN_API_GAP * pace_factor())
+        wait = (_last_api_at + gap) - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            _last_api_at = time.monotonic()
 
 # 登录态/容量查询缓存：后台仪表盘与文件浏览会频繁调用，避免每次都打 115 接口
 _cache_lock = threading.Lock()
@@ -354,8 +397,8 @@ def _list_dir(pid: int = 0) -> dict[str, int]:
     dirs: dict[str, int] = {}
     offset = 0
     while True:
-        resp = client.fs_files({"cid": pid, "fc_mix": 0, "limit": 1150, "offset": offset,
-                                "o": "user_ptime", "asc": 0, "show_dir": 1})
+        resp = pan_call(client.fs_files, {"cid": pid, "fc_mix": 0, "limit": 1150, "offset": offset,
+                                          "o": "user_ptime", "asc": 0, "show_dir": 1})
         if not resp.get("state"):
             raise Pan115Error(f"fs_files 失败: {str(resp)[:200]}")
         data = resp.get("data") or []
@@ -428,7 +471,7 @@ def mkdirs(path: str) -> int:
         if name in dirs:
             pid = dirs[name]
         else:
-            resp = client.fs_mkdir({"cname": name, "pid": pid})
+            resp = pan_call(client.fs_mkdir, {"cname": name, "pid": pid})
             if not resp.get("state"):
                 raise Pan115Error(f"创建目录 {name} 失败: {str(resp)[:200]}")
             data = resp.get("data", {}) or {}
@@ -458,7 +501,7 @@ def share_snap_all(share_code: str, receive_code: str, max_files: int = 5000) ->
     top_ids: list[str] = []  # 分享顶层条目 id（目录为 cid）：整包转存用，保留目录结构
 
     def snap(cid: int, offset: int):
-        resp = P115Client.share_snap({
+        resp = pan_call(P115Client.share_snap, {
             "share_code": share_code, "receive_code": receive_code,
             "cid": cid, "limit": 1150, "offset": offset,
         })
@@ -553,7 +596,7 @@ def receive(share_code: str, receive_code: str, cid: int, file_ids: list[str]) -
         payload["user_id"] = client.user_id  # 与 115 网页请求一致；取不到时省略
     except Exception:
         pass
-    resp = client.share_receive(payload)
+    resp = pan_call(client.share_receive, payload)
     if not resp.get("state"):
         code = str(resp.get("error_code") or "").strip()
         msg = resp.get("error", "") or str(resp)[:200]
@@ -566,7 +609,7 @@ def receive(share_code: str, receive_code: str, cid: int, file_ids: list[str]) -
 def offline_download(url: str, cid: int) -> dict:
     """提交云下载任务（ED2K/磁力/HTTP），保存到目录 cid。"""
     client = _get_client()
-    resp = client.clouddownload_task_add_url({"url": url, "wp_path_id": cid})
+    resp = pan_call(client.clouddownload_task_add_url, {"url": url, "wp_path_id": cid})
     if not resp.get("state"):
         msg = resp.get("error", "") or str(resp)[:200]
         if "目录" in msg or "cid" in msg.lower() or "wp_path" in msg.lower():
@@ -576,10 +619,9 @@ def offline_download(url: str, cid: int) -> dict:
 
 
 def task_list_all(max_pages: int = 20) -> list[dict]:
-    """拉取 115 云下载任务列表（含 url/name/percent/status 字段）。
+    """拉取 115 云下载任务列表（含 url/name/percentDone/status/info_hash/file_id 字段）。
 
-    全量分页（每页 100，最多 20 页 = 2000 条）：offline_check_loop 靠它在任务
-    列表里核对云下载结果——列表不全会把仍在进行的旧任务误判为「任务不存在 → 失败」。
+    全量分页（每页 50，最多 20 页 = 1000 条），显式传递 stat=0 以拉取全部任务（包含下载中与已完成）。
     任一页接口失败都会抛出 Pan115Error（而不是返回不完整/空列表），
     调用方据此跳过本轮判定，避免把「接口异常」误判成「任务不存在 → 下载失败」。
     """
@@ -587,7 +629,8 @@ def task_list_all(max_pages: int = 20) -> list[dict]:
     out: list[dict] = []
     for page in range(1, max_pages + 1):
         try:
-            resp = client.clouddownload_task_list({"page": page, "page_size": 100})
+            resp = pan_call(client.clouddownload_task_list,
+                            {"page": page, "page_size": 50, "stat": 0})
         except Exception as e:
             raise Pan115Error(f"拉取云下载任务列表失败: {e}")
         if not resp.get("state"):
@@ -595,7 +638,10 @@ def task_list_all(max_pages: int = 20) -> list[dict]:
             raise Pan115Error(f"拉取云下载任务列表失败: {msg}")
         tasks = resp.get("tasks") or []
         out.extend(tasks)
-        if len(tasks) < 100:
+        total = resp.get("total") or resp.get("count")
+        if not tasks or len(tasks) < 50:
+            break
+        if total and len(out) >= int(total):
             break
         time.sleep(0.3)
     return out
@@ -607,9 +653,9 @@ def list_entries(cid: int, limit: int = 2000) -> list[dict]:
     out: list[dict] = []
     offset = 0
     while offset < limit:
-        resp = client.fs_files({"cid": cid, "limit": min(500, limit - offset),
-                                "offset": offset, "o": "user_ptime", "asc": 0,
-                                "show_dir": 1})
+        resp = pan_call(client.fs_files, {"cid": cid, "limit": min(500, limit - offset),
+                                          "offset": offset, "o": "user_ptime", "asc": 0,
+                                          "show_dir": 1})
         if not resp.get("state"):
             raise Pan115Error(f"列目录失败: {str(resp)[:200]}")
         data = resp.get("data") or []
@@ -619,7 +665,8 @@ def list_entries(cid: int, limit: int = 2000) -> list[dict]:
             name = _file_name(f)
             if not name:
                 continue
-            out.append({"id": _file_id(f), "name": name, "is_dir": _is_dir_item(f)})
+            f_size = _to_int(f.get("s") or f.get("fs") or f.get("file_size"), 0)
+            out.append({"id": _file_id(f), "name": name, "is_dir": _is_dir_item(f), "size": f_size})
         if not data:
             break
         offset += len(data)
@@ -657,7 +704,7 @@ def organize_seasons(cid: int, min_files: int = 2) -> int:
         sname = f"Season {season}"
         target = next((e for e in entries if e["is_dir"] and e["name"] == sname), None)
         if target is None:
-            resp = client.fs_mkdir({"cname": sname, "pid": cid})
+            resp = pan_call(client.fs_mkdir, {"cname": sname, "pid": cid})
             if not resp.get("state"):
                 raise Pan115Error(f"创建 {sname} 失败: {str(resp)[:200]}")
             data = resp.get("data", {}) or {}
@@ -667,7 +714,7 @@ def organize_seasons(cid: int, min_files: int = 2) -> int:
             target = {"id": str(new_id), "name": sname, "is_dir": True}
             entries.append(target)
             time.sleep(0.5)
-        client.fs_move([str(i["id"]) for i in items], pid=int(str(target["id"])))
+        pan_call(client.fs_move, [str(i["id"]) for i in items], pid=int(str(target["id"])))
         moved += len(items)
         time.sleep(0.5)
     return moved
@@ -676,7 +723,7 @@ def organize_seasons(cid: int, min_files: int = 2) -> int:
 def search_file(name: str, limit: int = 20) -> list[dict]:
     """按文件名全盘搜索，返回 [{id, name, parent}]（找回误落其他目录的文件用）。"""
     client = _get_client()
-    resp = client.fs_search({"search_value": name, "limit": limit})
+    resp = pan_call(client.fs_search, {"search_value": name, "limit": limit})
     if not resp.get("state"):
         raise Pan115Error(f"搜索失败: {str(resp)[:200]}")
     out: list[dict] = []
@@ -695,7 +742,7 @@ def search_file(name: str, limit: int = 20) -> list[dict]:
 def copy_files_to(ids: list[str], cid: int) -> dict:
     """把文件复制到目标目录（115 服务端秒复制，不动原位置）。"""
     client = _get_client()
-    resp = client.fs_copy(ids, pid=cid)
+    resp = pan_call(client.fs_copy, ids, pid=cid)
     if not resp.get("state"):
         msg = resp.get("error", "") or str(resp)[:200]
         raise Pan115Error(f"复制失败: {msg}")
@@ -715,9 +762,10 @@ def list_file_names(cid: int, limit: int = 500) -> set[str]:
     names: set[str] = set()
     offset = 0
     while offset < limit:
-        resp = client.fs_files({"cid": cid, "limit": min(500, limit - offset),
-                                "offset": offset, "o": "user_ptime", "asc": 0,
-                                "show_dir": 1})
+        page_size = min(500, limit - offset)
+        resp = pan_call(client.fs_files, {"cid": cid, "limit": page_size,
+                                          "offset": offset, "o": "user_ptime", "asc": 0,
+                                          "show_dir": 1})
         if not resp.get("state"):
             raise Pan115Error(f"列目录失败: {str(resp)[:200]}")
         data = resp.get("data") or []
@@ -727,9 +775,400 @@ def list_file_names(cid: int, limit: int = 500) -> set[str]:
             name = _file_name(f)
             if name:
                 names.add(name)
-        if not data:
+        if not data or len(data) < page_size:
             break
+        count = int(resp.get("count") or 0)
         offset += len(data)
+        if count and offset >= count:
+            break
         if offset < limit:
             time.sleep(0.4)  # 多页翻页间隔，降低请求频率
     return names
+
+_CHINESE_CHAR_RE = re.compile(r"[一-龥]")
+
+_MEDIA_EXTENSIONS = {
+    ".mp4", ".mkv", ".ts", ".mov", ".avi", ".flv", ".wmv", ".m2ts", ".rmvb", ".iso",
+    ".srt", ".ass", ".vtt", ".sub"
+}
+_EXTRA_KEYWORDS = (
+    "预告", "预告片", "花絮", "特辑", "彩蛋", "片段", "宣传片", "制作特辑",
+    "sample", "trailer", "preview", "teaser", "extra", "behindthescenes", "featurette"
+)
+_ROMAN_NUMS = {
+    "Ⅰ": "1", "Ⅱ": "2", "Ⅲ": "3", "Ⅳ": "4", "Ⅴ": "5",
+    "Ⅵ": "6", "Ⅶ": "7", "Ⅷ": "8", "Ⅸ": "9", "Ⅹ": "10",
+    "ⅰ": "1", "ⅱ": "2", "ⅲ": "3", "ⅳ": "4", "ⅴ": "5",
+}
+_CN_NUM_MAP = {
+    "一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10,
+    "十一": 11, "十二": 12, "十三": 13, "十四": 14, "十五": 15, "十六": 16, "十七": 17, "十八": 18, "十九": 19, "二十": 20
+}
+_GENERIC_CN_TERMS = {
+    "第一季", "第二季", "第三季", "第四季", "第五季", "第六季", "第七季", "第八季",
+    "特别篇", "剧场版", "全集", "完结", "合集", "更新", "重制版", "电影版"
+}
+
+
+def extract_chinese_subject(kw: str) -> str:
+    """从包含中英文的关键词中提取最长连续纯中文主体（排除通用词缀，长度>=2）。"""
+    if not kw:
+        return ""
+    cn_chunks = re.findall(r"[\u4e00-\u9fa5]+", kw)
+    if not cn_chunks:
+        return ""
+    valid_chunks = [c for c in cn_chunks if len(c) >= 2 and c not in _GENERIC_CN_TERMS]
+    if not valid_chunks:
+        return ""
+    return max(valid_chunks, key=len)
+
+
+_GENERIC_LIBRARY_SKIP_FOLDERS = {
+    "其他", "未整理", "待整理", "待分类", "临时", "新建文件夹", "temp", "trash", "recycle", "lost+found"
+}
+
+_DUP_SUFFIX_RE = re.compile(r"[\s\._-]*[\(\[（【]\s*([1-9]\d{0,2})\s*[\)\]）】]$")
+
+
+def strip_duplicate_suffix(filename: str) -> tuple[str, int]:
+    """剥离 115 重复转存时自动追加的 (1)、(2)、（1）、（2）、 (1) 等冲突后缀。
+    返回 (clean_name, dup_index)：
+    - 若无后缀：返回 (原文件名, 0)
+    - 若有后缀：返回 (去除后缀后的规范文件名, 后缀编号数字)
+    同时兼容半角括号 ()、全角括号（）、中括号 []、全角中括号【】及有无前置空格。
+    排除 4 位年份（如 2019、2024），避免误伤正片标题年份。
+    """
+    root, ext = os.path.splitext(filename or "")
+    m = _DUP_SUFFIX_RE.search(root)
+    if m:
+        clean_root = root[:m.start()].rstrip()
+        try:
+            dup_idx = int(m.group(1))
+        except ValueError:
+            dup_idx = 1
+        return f"{clean_root}{ext}", dup_idx
+    return filename or "", 0
+
+
+def parse_season_number(folder_name: str) -> int | None:
+    """从文件夹名称中解析季度数字（1, 2, ...），特别篇为 0，解析不到返回 None。
+    完全兼容：Season01, Season 01, Season.01, Season1, S01, S1, season01, s01, s1,
+             第一季, 第1季, 第01季, 第 1 季, 特别篇, SP 等（大小写不敏感）。
+    """
+    name = (folder_name or "").strip()
+    if not name:
+        return None
+    cleaned = re.sub(r"^[\(\[\{（【《「『]|[\)\]\}）】》」』]$", "", name).strip()
+    if cleaned != name:
+        return parse_season_number(cleaned)
+    m = re.search(r"^(?:season[\s\.\-_]*|[sS])0*(\d{1,2})$", name.strip(), re.IGNORECASE)
+    if m:
+        return int(m.group(1))
+    m = re.search(r"^第\s*([一二三四五六七八九十\d]+)\s*季$", name.strip())
+    if m:
+        val = m.group(1).strip()
+        if val.isdigit():
+            return int(val)
+        return _CN_NUM_MAP.get(val)
+    if re.search(r"^(?:特别篇|specials?|sp(?:\s*\d{1,3})?)$", name.strip(), re.IGNORECASE):
+        return 0
+    return None
+
+
+def normalize_title(s: str, fuzzy_t2s: bool = True) -> str:
+    """标题软化归一化：小写 + 简繁自适应 + 罗马数字转阿拉伯数字 + 去除所有标点符号与空白字符。"""
+    if not s:
+        return ""
+    if fuzzy_t2s:
+        s = t2s(s)
+    s = s.lower()
+    for rom, arab in _ROMAN_NUMS.items():
+        s = s.replace(rom.lower(), arab)
+    return re.sub(r"[^\w\u4e00-\u9fa5]+|_", "", s)
+
+
+def extract_target_folder_name(target_dir: str) -> str:
+    """从目标目录路径中提取匹配关键词：
+    1. 优先取末级目录，若末级为季目录（如 Season 1、第1季、特别篇等），自动回溯上级剧名目录；
+    2. 若回溯后仍无中文（如 /电视剧/Drama/Season 1），尝试继续向上找包含中文的目录；
+    3. 自动剥离常见的年份后缀（如 (2023)、[2024]、.2023 等），提取出纯净剧名。
+    """
+    parts = [p.strip() for p in (target_dir or "").strip().strip("/").split("/") if p.strip()]
+    if not parts:
+        return ""
+    idx = len(parts) - 1
+    if idx > 0 and parse_season_number(parts[idx]) is not None:
+        idx -= 1
+    candidate = parts[idx]
+    if not _CHINESE_CHAR_RE.search(candidate) and idx > 0 and _CHINESE_CHAR_RE.search(parts[idx - 1]):
+        candidate = parts[idx - 1]
+    cleaned = re.sub(r"(?:[\s\.\-_]*[\(\[\{（【]?\s*(?:19\d{2}|20\d{2})\s*[\)\]\}）】]?)+$", "", candidate).strip()
+    return cleaned or candidate
+
+
+def move_matched_files_for_rule(source_dir: str, target_dir: str,
+                                keyword: str | None = None,
+                                scan_subdirs: bool = True,
+                                mode: str = "library",
+                                season_folder: bool = True,
+                                fuzzy_t2s: bool = True) -> tuple[int, list[str]]:
+    """按映射规则排队移动满足条件的文件（做好 115 严格风控）：
+
+    模式支持：
+    - library（总库智能分流模式）：目标目录作为媒体总库（如 /电视剧），自动识别库内所有一级剧集子文件夹
+      （如 折月亮 (2026)、繁花 (2023)），根据文件名智能归入对应剧目文件夹；若剧目下有季子目录（如 Season 1/第一季），
+      且开启了 season_folder，自动分流入季目录。
+    - exact（一对一精确匹配模式）：目标目录作为具体剧目目录（如 /电视剧/折月亮 (2026)），仅移动匹配此剧名的文件。
+
+    防风控与安全原则：
+    1. 只移动文件，文件夹绝不移动（is_dir == False）
+    2. 文件名必须包含中文（_CHINESE_CHAR_RE.search(name)）
+    3. 媒体扩展名白名单（_MEDIA_EXTENSIONS），过滤广告与非媒体文件
+    4. 排除预告/花絮/sample 等非正片文件
+    5. 分批 fs_move（每批最多 30 个），批次间休眠 0.5s * pace_factor()
+    6. 目标目录若已存在同名文件，跳过移动，防止覆盖或报错
+    7. 捕获 115 异常并检测风控关键词，一旦命中记录风控状态并抛出
+    """
+    if mode == "exact":
+        kw = (keyword or extract_target_folder_name(target_dir)).strip()
+        if not kw:
+            raise ValueError(f"目标目录「{target_dir}」未包含有效文件夹名称，无法提取匹配关键词，不予执行")
+
+    target_cid = mkdirs(target_dir)
+    if target_cid is None:
+        raise RuntimeError(f"无法获取或创建目标目录: {target_dir}")
+
+    source_cid = mkdirs(source_dir)
+    if source_cid is None:
+        raise RuntimeError(f"无法获取源目录: {source_dir}")
+
+    if mode == "exact" and source_cid == target_cid:
+        logstream.info("auto_move", f"精确模式下源目录与目标目录相同「{target_dir}」，无需移动")
+        return 0, []
+
+    pace = pace_factor()
+    client = _get_client()
+
+    drama_targets: list[dict] = []
+
+    if mode == "library":
+        # 总库智能分流模式：列出目标总库下的一级子文件夹构建剧目映射
+        time.sleep(0.2 * pace)
+        root_targets = list_entries(target_cid, limit=2000)
+        sub_dramas = [e for e in root_targets if e.get("is_dir")]
+        for sd in sub_dramas:
+            sd_name = sd.get("name", "").strip()
+            if not sd_name or sd_name.lower() in _GENERIC_LIBRARY_SKIP_FOLDERS:
+                continue
+            if parse_season_number(sd_name) is not None:
+                continue  # 排除裸露的季目录
+            if not _CHINESE_CHAR_RE.search(sd_name):
+                continue  # 必须包含中文汉字，排除纯英文/纯数字目录
+            sd_kw = extract_target_folder_name(sd_name)
+            sd_norm_kw = normalize_title(sd_kw, fuzzy_t2s=fuzzy_t2s)
+            if len(sd_norm_kw) < 2:
+                continue  # 剧名关键词过短跳过，避免单字严重误匹配
+            sd_cn = extract_chinese_subject(sd_kw)
+            sd_norm_cn = normalize_title(sd_cn, fuzzy_t2s=fuzzy_t2s) if sd_cn else ""
+            drama_targets.append({
+                "cid": int(str(sd["id"])),
+                "name": sd_name,
+                "kw": sd_kw,
+                "norm_kw": sd_norm_kw,
+                "norm_cn_kw": sd_norm_cn,
+            })
+        # 按关键词长度降序排序，长剧名优先匹配（如「流浪地球2」优先于「流浪地球」）
+        drama_targets.sort(key=lambda x: len(x["norm_kw"]), reverse=True)
+        if not drama_targets:
+            logstream.info("auto_move", f"总库「{target_dir}」下暂未发现包含中文的剧集子文件夹，跳过本次分流")
+            return 0, []
+    else:
+        # 一对一精确匹配模式
+        norm_kw = normalize_title(kw, fuzzy_t2s=fuzzy_t2s)
+        cn_subj = extract_chinese_subject(kw)
+        norm_cn_subj = normalize_title(cn_subj, fuzzy_t2s=fuzzy_t2s) if cn_subj else ""
+        drama_targets = [{
+            "cid": target_cid,
+            "name": os.path.basename(target_dir.rstrip("/")),
+            "kw": kw,
+            "norm_kw": norm_kw,
+            "norm_cn_kw": norm_cn_subj,
+        }]
+
+    # 1. 扫描源目录直属项
+    time.sleep(0.2 * pace)
+    root_entries = list_entries(source_cid, limit=2000)
+    candidate_files: list[dict] = []
+    sub_dirs: list[dict] = []
+
+    for e in root_entries:
+        if not e.get("is_dir"):
+            candidate_files.append({**e, "_parent_cid": source_cid})
+        else:
+            sub_dirs.append(e)
+
+    # 2. 如果开启穿透子文件夹，扫描子目录内的文件（子目录本身绝不移动）
+    if scan_subdirs and sub_dirs:
+        for sd in sub_dirs[:30]:
+            time.sleep(0.3 * pace)
+            try:
+                sub_cid = int(str(sd["id"]))
+                sub_entries = list_entries(sub_cid, limit=1000)
+                for se in sub_entries:
+                    if not se.get("is_dir"):
+                        candidate_files.append({**se, "_parent_cid": sub_cid})
+            except Exception:
+                pass
+
+    if not candidate_files:
+        return 0, []
+
+    # 季子目录与目标文件查重缓存（原始文件名 + 剥离副本后缀规范名）
+    drama_season_cache: dict[int, dict[int, int]] = {}
+    dest_file_cache: dict[int, set[str]] = {}
+    dest_canon_cache: dict[int, set[str]] = {}
+
+    def get_dest_file_names(cid: int) -> tuple[set[str], set[str]]:
+        if cid not in dest_file_cache:
+            try:
+                raw_names = list_file_names(cid, limit=2000)
+                canon_names = {strip_duplicate_suffix(n)[0] for n in raw_names}
+                dest_file_cache[cid] = raw_names
+                dest_canon_cache[cid] = canon_names
+            except Exception:
+                dest_file_cache[cid] = set()
+                dest_canon_cache[cid] = set()
+        return dest_file_cache[cid], dest_canon_cache[cid]
+
+    def get_season_subdirs(drama_cid: int) -> dict[int, int]:
+        if drama_cid not in drama_season_cache:
+            mapping: dict[int, int] = {}
+            try:
+                time.sleep(0.2 * pace)
+                entries = list_entries(drama_cid, limit=100)
+                for item in entries:
+                    if item.get("is_dir"):
+                        s_idx = parse_season_number(item.get("name", ""))
+                        if s_idx is not None:
+                            mapping[s_idx] = int(str(item["id"]))
+            except Exception:
+                pass
+            drama_season_cache[drama_cid] = mapping
+        return drama_season_cache[drama_cid]
+
+    seen_ids: set[str] = set()
+    # 同一目标目录下同一规范基准名 (final_dest_cid, clean_name) 聚类去重
+    candidates_by_group: dict[tuple[int, str], list[dict]] = {}
+
+    for f in candidate_files:
+        fid = str(f.get("id"))
+        fname = f.get("name", "")
+        if not fid or not fname or fid in seen_ids:
+            continue
+        # 扩展名白名单校验
+        ext = os.path.splitext(fname)[1].lower()
+        if ext not in _MEDIA_EXTENSIONS:
+            continue
+        # 中文硬指标：必须含有汉字（纯数字、纯英文坚决不移动）
+        if not _CHINESE_CHAR_RE.search(fname):
+            continue
+        # 预告/花絮非正片过滤
+        fname_lower = fname.lower()
+        if any(extra in fname_lower for extra in _EXTRA_KEYWORDS):
+            continue
+
+        # 软化标题比对（支持中英文混合双层匹配）
+        norm_name = normalize_title(fname, fuzzy_t2s=fuzzy_t2s)
+        matched_drama = None
+        # 第一轮：优先精确匹配完整体关键词（如 doctorx白色黑手党时代 命中）
+        for dt in drama_targets:
+            if dt["norm_kw"] in norm_name:
+                matched_drama = dt
+                break
+        # 第二轮：若完整体未命中，回落比对纯中文主体（如发布组仅写 白色黑手党时代 时命中）
+        if not matched_drama:
+            for dt in drama_targets:
+                if dt.get("norm_cn_kw") and len(dt["norm_cn_kw"]) >= 2 and dt["norm_cn_kw"] in norm_name:
+                    matched_drama = dt
+                    break
+        if not matched_drama:
+            continue
+
+        # 目标 cid 确定：若开启按季归档且剧目下有季子目录，按季落入季目录
+        final_dest_cid = matched_drama["cid"]
+        if season_folder:
+            s_num, ep_num, _ = parse_episode(fname)
+            if s_num is None and ep_num is not None:
+                s_num = 1  # 电视剧单集默认第 1 季
+            if s_num is not None:
+                seasons_map = get_season_subdirs(matched_drama["cid"])
+                if s_num in seasons_map:
+                    final_dest_cid = seasons_map[s_num]
+
+        # 若文件已经在目标目录，无需移动
+        if f.get("_parent_cid") == final_dest_cid:
+            continue
+
+        # 剥离 (1)、(2)、（1）、（2）等重复转存后缀，提取基准规范名与副本编号
+        clean_name, dup_idx = strip_duplicate_suffix(fname)
+
+        # 目标目录查重：目标库已有原始文件或任一历史副本时，源目录全部副本均跳过
+        dest_raw_names, dest_canon_names = get_dest_file_names(final_dest_cid)
+        if fname in dest_raw_names or clean_name in dest_raw_names or clean_name in dest_canon_names:
+            continue
+
+        seen_ids.add(fid)
+        group_key = (final_dest_cid, clean_name)
+        candidates_by_group.setdefault(group_key, []).append({
+            "id": fid,
+            "name": fname,
+            "clean_name": clean_name,
+            "dup_idx": dup_idx,
+            "size": int(f.get("s", 0) or 0),
+            "dest_cid": final_dest_cid,
+            "drama_name": matched_drama["name"]
+        })
+
+    if not candidates_by_group:
+        return 0, []
+
+    # 择优提取：每组仅移动一份文件！
+    # 优先级：dup_idx 升序（0 原版最优先，其次 (1)、(2)）；同编号时大文件优先
+    files_to_move: list[dict] = []
+    for (dest_cid, clean_name), items in candidates_by_group.items():
+        items.sort(key=lambda x: (x["dup_idx"], -x["size"]))
+        best = items[0]  # 仅取最优的一份
+        files_to_move.append(best)
+        dest_raw_names, dest_canon_names = get_dest_file_names(dest_cid)
+        dest_raw_names.add(best["name"])
+        dest_canon_names.add(clean_name)
+
+    # 按目标目录分组移动
+    by_dest: dict[int, list[dict]] = {}
+    for item in files_to_move:
+        by_dest.setdefault(item["dest_cid"], []).append(item)
+
+    moved_count = 0
+    sample_names: list[str] = []
+
+    for dest_cid, items in by_dest.items():
+        for i in range(0, len(items), 30):
+            batch = items[i:i + 30]
+            ids = [x["id"] for x in batch if x.get("id")]
+            if not ids:
+                continue
+            time.sleep(0.5 * pace_factor())
+            try:
+                resp = pan_call(client.fs_move, ids, pid=dest_cid)
+                if not resp.get("state"):
+                    msg = resp.get("error", "") or resp.get("msg", "") or str(resp)[:200]
+                    note_115_error(msg)
+                    raise Pan115Error(f"移动文件被 115 拒绝: {msg}")
+                moved_count += len(ids)
+                sample_names.extend([x["name"] for x in batch][:2])
+                note_115_ok()
+            except Exception as e:
+                note_115_error(str(e))
+                raise
+
+    return moved_count, sample_names[:5]

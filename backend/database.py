@@ -1,12 +1,18 @@
 """SQLite 数据层：所有表、设置读写、种子数据。同步 sqlite3 + WAL，小数据量足够。"""
 import json
+import logging
+import os
+import shutil
 import sqlite3
 import threading
 import time
 from contextlib import contextmanager
 from datetime import date
+from pathlib import Path
 
 from . import config
+
+logger = logging.getLogger("database")
 
 _lock = threading.Lock()
 _conn: sqlite3.Connection | None = None
@@ -112,6 +118,17 @@ CREATE TABLE IF NOT EXISTS logs(
     level TEXT, module TEXT, message TEXT, created_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_logs_created ON logs(created_at);
+CREATE TABLE IF NOT EXISTS auto_move_rules(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_dir TEXT NOT NULL,
+    target_dir TEXT NOT NULL,
+    keyword TEXT NOT NULL,
+    mode TEXT NOT NULL DEFAULT 'default',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at REAL NOT NULL,
+    last_run_at REAL,
+    last_moved_count INTEGER NOT NULL DEFAULT 0
+);
 """
 
 LOG_RETENTION_DAYS = 7  # 日志保留天数，到期自动永久删除
@@ -162,10 +179,31 @@ DEFAULT_SETTINGS = {
     "digest_enabled": True,           # 每日摘要通知
     "digest_time": "21:00",
     "auto_backup_enabled": False,     # 定时把数据备份 JSON 推送到 TG
-    "auto_backup_days": 7,
+    "auto_backup_days": 7,            # 备份间隔天数（1~365）
+    "auto_backup_time": "04:00",       # 备份推送时间（HH:MM，默认凌晨 04:00）
     "digest_last_sent": "",           # 内部状态：上次摘要日期
     "backup_last_sent": 0,            # 内部状态：上次备份时间戳
+    "backup_last_sent_date": "",      # 内部状态：上次备份日期 YYYY-MM-DD
     "api_token": "",                  # 对外 API token（留空 = 对外 API 关闭）
+    # ---- 115 防风控与拟人化 ----
+    "schedule_jitter_min": 5,          # 开工随机扰动（分钟，0~30）
+    "batch_rest_enabled": True,        # 拟人化连存小憩开关
+    "batch_rest_count": 3,             # 连续完成 N 笔后小憩
+    "batch_rest_min_min": 2,           # 小憩最短时长（分钟）
+    "batch_rest_max_min": 5,           # 小憩最长时长（分钟）
+    "health_check_interval_min": 10,   # 后台健康检查周期（分钟，默认10）
+    "dedup_cache_ttl_sec": 90,         # 同名查重目录缓存（秒，默认90）
+    # ---- 定时文件整理（按目录映射移动中文文件）----
+    "auto_move_enabled": False,       # 定时整理总开关
+    "auto_move_schedule_type": "interval", # 整理调度方式：interval 固定间隔 | fixed_times 每天固定时间点
+    "auto_move_interval_hours": 6,    # 整理轮询间隔（小时）
+    "auto_move_fixed_times": '["06:00", "12:00", "18:00"]', # 每天固定时间点（JSON数组）
+    "auto_move_scan_subdirs": True,   # 穿透源目录下的子文件夹
+    "auto_move_notify": True,         # 整理完成后推送通知
+    "auto_move_last_run": 0,          # 上次定时整理时间戳
+    "auto_move_mode": "library",      # 整理模式：library 总库智能分流 | exact 一对一精确匹配
+    "auto_move_season_folder": True,  # 季目录分流：若剧集目录下存在对应季文件夹（如 Season 1/第一季），自动归入
+    "auto_move_fuzzy_t2s": True,      # 简繁互通：标题匹配时自动兼容繁体与简体
 }
 
 DEFAULT_RULES = [
@@ -215,16 +253,72 @@ DEFAULT_BLACKLIST_KEYWORDS = [
 ]
 
 
-def init():
+def _init_db():
     global _conn
     _conn = sqlite3.connect(config.DB_PATH, check_same_thread=False)
     _conn.row_factory = sqlite3.Row
     _conn.execute("PRAGMA journal_mode=WAL")
     _conn.execute("PRAGMA synchronous=NORMAL")  # WAL 下的安全档位：高频小事务（写日志）收益明显
+    # 快速结构完整性校验，拦截损坏页或异常头
+    res = _conn.execute("PRAGMA quick_check").fetchone()
+    if res and res[0] != "ok":
+        raise sqlite3.DatabaseError(f"quick_check failed: {res[0]}")
     _conn.executescript(SCHEMA)
     _migrate()
     _seed()
     _conn.commit()
+
+
+def _handle_corrupt_db(err: Exception):
+    global _conn
+    if _conn is not None:
+        try:
+            _conn.close()
+        except Exception:
+            pass
+        _conn = None
+
+    db_path = Path(config.DB_PATH).resolve()
+    db_dir = db_path.parent
+    db_dir.mkdir(parents=True, exist_ok=True)
+    db_name = db_path.name
+    ts = time.strftime("%Y%m%d_%H%M%S")
+
+    corrupted_files = []
+    # 查找 app.db, app.db-wal, app.db-shm 及相关临时文件
+    for target in [db_path, db_dir / f"{db_name}-wal", db_dir / f"{db_name}-shm"]:
+        if target.exists():
+            backup_file = db_dir / f"{target.name}.corrupted_{ts}.bak"
+            try:
+                shutil.copy2(target, backup_file)
+                corrupted_files.append(str(backup_file.name))
+                target.unlink(missing_ok=True)
+            except Exception as ex:
+                logger.warning(f"处理损坏数据库文件 {target} 失败: {ex}")
+
+    # 写入修复通知文件方便用户排查
+    notice_file = db_dir / "DATABASE_RECOVERY_NOTICE.txt"
+    try:
+        with open(notice_file, "a", encoding="utf-8") as f:
+            f.write(
+                f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 数据库损坏自动容灾自愈触发\n"
+                f"错误原因: {err}\n"
+                f"原损坏文件已安全备份为: {', '.join(corrupted_files)}\n"
+                f"系统已自动重建空白健康数据库，服务恢复正常启动运行。\n\n"
+            )
+    except Exception:
+        pass
+
+    logger.warning("数据库已自动重建，损坏备份已归档至: %s", corrupted_files)
+    _init_db()
+
+
+def init():
+    try:
+        _init_db()
+    except sqlite3.DatabaseError as e:
+        logger.error(f"数据库初始化检测到严重损坏 (DatabaseError: {e})，正在启动自动容灾自愈机制...")
+        _handle_corrupt_db(e)
 
 
 def _migrate():
@@ -261,6 +355,23 @@ def _migrate():
         done = _conn.execute("SELECT value FROM settings WHERE key='setup_completed'").fetchone()
         running = 'true' if (done and done[0] == 'true') else 'false'
         _conn.execute("INSERT INTO settings VALUES('running',?)", (running,))
+
+    # 定时整理规则表
+    _conn.execute("""
+    CREATE TABLE IF NOT EXISTS auto_move_rules(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        source_dir TEXT NOT NULL,
+        target_dir TEXT NOT NULL,
+        keyword TEXT NOT NULL,
+        mode TEXT NOT NULL DEFAULT 'default',
+        enabled INTEGER NOT NULL DEFAULT 1,
+        created_at REAL NOT NULL,
+        last_run_at REAL,
+        last_moved_count INTEGER NOT NULL DEFAULT 0
+    )""")
+    am_cols = {r["name"] for r in _conn.execute("PRAGMA table_info(auto_move_rules)")}
+    if "mode" not in am_cols:
+        _conn.execute("ALTER TABLE auto_move_rules ADD COLUMN mode TEXT NOT NULL DEFAULT 'default'")
 
     # 活动任务唯一性：同一分享码同时最多一个 排队/转存中/已提交 任务。
     # 先清理历史竞态产生的重复活动行（保留优先级最高、最早入队的一条），再建部分唯一索引；
@@ -406,14 +517,14 @@ def restore_payload(data: dict) -> dict:
     """
     if not isinstance(data, dict) or not isinstance(data.get("_meta"), dict):
         raise ValueError("不是有效的备份文件（缺少 _meta 段）")
-    tables = ("channels", "rules", "routes", "blacklist", "subscriptions", "transfers")
+    tables = ("channels", "rules", "routes", "blacklist", "subscriptions", "transfers", "auto_move_rules")
+    for t in tables:
+        data.setdefault(t, [])
     if "settings" not in data:
         raise ValueError("备份缺少 settings 段")
     if not isinstance(data["settings"], dict):
         raise ValueError("备份 settings 段格式不正确")
     for t in tables:
-        if t not in data:
-            raise ValueError(f"备份缺少 {t} 段")
         if not isinstance(data[t], list):
             raise ValueError(f"备份 {t} 段格式不正确")
 
@@ -514,4 +625,5 @@ def backup_payload() -> dict:
         "blacklist": dump("SELECT * FROM blacklist"),
         "subscriptions": dump("SELECT * FROM subscriptions"),
         "transfers": dump("SELECT * FROM transfers ORDER BY id"),
+        "auto_move_rules": dump("SELECT * FROM auto_move_rules ORDER BY id"),
     }

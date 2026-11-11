@@ -20,7 +20,7 @@ import re
 import httpx
 
 from .. import database as db
-from ..core import classifier, episode, logstream, pipeline
+from ..core import classifier, episode, logstream, pipeline, transfer_gate
 from ..worker import jobs
 from . import polling, resolver
 
@@ -134,7 +134,7 @@ async def submit_backfill(channel: str, message_id: int, title: str,
     channel = str(channel or "").strip().lstrip("@")
     if not channel or message_id <= 0:
         raise ValueError("缺少来源频道或消息锚点，无法向前翻页")
-    ch = db.query("SELECT type FROM channels WHERE name=?", (channel,), one=True)
+    ch = await asyncio.to_thread(db.query, "SELECT type FROM channels WHERE name=?", (channel,), True)
     if ch and ch["type"] != "polling":
         # 发起时就明确拒绝，避免"回执成功但永远没有结果"的假成功
         raise ValueError("该频道为 Userbot 接入，暂不支持向前补全（仅网页轮询频道可翻页查找）")
@@ -146,7 +146,7 @@ async def submit_backfill(channel: str, message_id: int, title: str,
            "anchor_category": str(anchor_category or ""),
            "anchor_target": str(anchor_target or "")}
     await _queue.put(req)
-    _persist_add(req)
+    await asyncio.to_thread(_persist_add, req)
     episodes = (f"S{season:02d} " if season is not None else "") + f"E01~E{ep - 1:02d}"
     return {"base": base, "ep": int(ep), "episodes": episodes, "channel": channel}
 
@@ -157,7 +157,7 @@ async def episode_backfill_loop():
     if _queue is None:
         _queue = asyncio.Queue()
     try:  # 重启恢复：上次未处理完的补全请求重新入队
-        pending = db.get_setting(_PENDING_KEY, []) or []
+        pending = await asyncio.to_thread(db.get_setting, _PENDING_KEY, []) or []
         for req in pending:
             await _queue.put(req)
         if pending:
@@ -167,8 +167,10 @@ async def episode_backfill_loop():
     while True:
         req = await _queue.get()
         try:
+            # 门闸协同：处于整理排空或独占移动期时挂起等待，避免向排空中队列插入新任务
+            await transfer_gate.wait_intake_allowed()
             await _process_request(req)
-            _persist_done(req)
+            await asyncio.to_thread(_persist_done, req)
         except Exception as e:
             logstream.error("backfill", f"追剧向前补全异常: {logstream.exc(e)}")
 
@@ -183,7 +185,7 @@ async def _process_request(req: dict) -> None:
               if req.get("anchor_category") or req.get("anchor_target") else None)
 
     # Userbot 接入的频道不可翻页（t.me/s 仅公开频道）；发起时已在 submit 校验，此处兜底
-    ch = db.query("SELECT type FROM channels WHERE name=?", (channel,), one=True)
+    ch = await asyncio.to_thread(db.query, "SELECT type FROM channels WHERE name=?", (channel,), True)
     if ch and ch["type"] != "polling":
         logstream.info("backfill", f"向前补全跳过：频道 @{channel} 非网页轮询接入（暂不支持向前翻页）")
         return
@@ -245,10 +247,12 @@ async def _process_request(req: dict) -> None:
         logstream.info("backfill",
                        f"[{channel}] 《{base}》向前翻找 {pages} 页：未找到第 1~{cur_ep - 1} 集的历史分集帖"
                        "（可能超出翻页预算或频道未发过）")
-        jobs.notify("🔎 追剧向前补全\n\n"
-                    f"📺 《{base}》当前已转存第 {cur_ep} 集\n"
-                    f"向前翻找 {pages} 页历史：未找到第 1~{cur_ep - 1} 集的分集帖"
-                    "（可能超出翻页预算，或频道从未发过这些集）")
+        await asyncio.to_thread(
+            jobs.notify,
+            "🔎 追剧向前补全\n\n"
+            f"📺 《{base}》当前已转存第 {cur_ep} 集\n"
+            f"向前翻找 {pages} 页历史：未找到第 1~{cur_ep - 1} 集的分集帖"
+            "（可能超出翻页预算，或频道从未发过这些集）")
         return
 
     # 逐集补全：老集数先入队；同一集的全部候选帖子都交给管道（增量标记保证
@@ -259,6 +263,8 @@ async def _process_request(req: dict) -> None:
     for epn in sorted(found):
         episodes.append(f"E{epn:02d}")
         for p in sorted(found[epn], key=lambda x: x["id"]):
+            # 翻页耗时较长，正式入队前再次确认未进入排空/整理阶段
+            await transfer_gate.wait_intake_allowed()
             try:
                 full_text = await resolver.resolve_message(p["text"] or "", p.get("buttons") or [])
             except Exception as e:

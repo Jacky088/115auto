@@ -3,20 +3,26 @@
     <template #header>
       <div class="toolbar" style="margin-bottom: 0">
         <span>订阅追剧</span>
-        <span class="tip">「仅订阅 / 全盘转存」已改为按频道独立设置，到「频道管理」页按频道开关</span>
+        <span class="tip">「仅订阅 / 全盘转存」已改为按频道独立设置，可到「账号管理」页按频道开关</span>
       </div>
     </template>
 
     <!-- 订阅关键词列表：命中频道消息即按关键词自动追剧；操作含补全/重置（与转存记录、频道页按钮文案统一） -->
     <div class="sub-section">
       <div class="sub-title">
-        📋 订阅关键词
+        <div style="display: flex; align-items: center; gap: 8px">
+          <span>📋 订阅关键词</span>
+          <el-tag size="small" class="count-tag">共 {{ items.length }} 条订阅</el-tag>
+        </div>
         <span class="tip">命中频道消息后自动转存并追更；在下方 TMDB 海报墙点选「订阅」即可添加</span>
       </div>
-      <el-table :data="items" empty-text="还没有订阅，可在下方浏览或搜索后点击「订阅」添加">
+      <el-table :data="items">
+        <template #empty>
+          <el-empty :image-size="60" description="还没有订阅，可在下方浏览或搜索后点击「订阅」添加" />
+        </template>
         <el-table-column prop="keyword" label="关键词" min-width="170" show-overflow-tooltip>
           <template #default="{ row }">
-            <span class="mono">{{ row.keyword }}</span>
+            <span class="sub-keyword">{{ row.keyword }}</span>
             <div v-if="row.aliases && row.aliases.length" class="sub-alias"
                  :title="row.aliases.join('、')">别名：{{ row.aliases.join('、') }}</div>
           </template>
@@ -41,28 +47,21 @@
             <span v-else>-</span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="210">
+        <el-table-column label="操作" width="180" fixed="right">
           <template #default="{ row }">
-            <div class="sub-actions">
+            <div class="table-actions">
               <el-button type="primary" text @click="openBackfill(row)">补全</el-button>
               <el-popconfirm title="重置后将清除该订阅的追更进度记录，下次命中重新记录。确认重置？"
                              confirm-button-text="重置" cancel-button-text="取消" confirm-button-type="warning"
                              width="280" @confirm="resetProgress(row)">
                 <template #reference><el-button type="warning" text>重置</el-button></template>
               </el-popconfirm>
+              <el-popconfirm title="删除后将不再按该关键词自动追剧。确认删除？"
+                             confirm-button-text="删除" cancel-button-text="取消" confirm-button-type="danger"
+                             width="260" @confirm="del(row)">
+                <template #reference><el-button type="danger" text>删除</el-button></template>
+              </el-popconfirm>
             </div>
-          </template>
-        </el-table-column>
-        <!-- 删除单独一列：避免和「补全/重置」挤在一起被裁切 -->
-        <el-table-column label="删除" width="90" align="center" fixed="right">
-          <template #default="{ row }">
-            <el-popconfirm title="删除后将不再按该关键词自动追剧。确认删除？"
-                           confirm-button-text="删除" cancel-button-text="取消" confirm-button-type="danger"
-                           width="260" @confirm="del(row)">
-              <template #reference>
-                <el-button type="danger" size="small" plain>删除</el-button>
-              </template>
-            </el-popconfirm>
           </template>
         </el-table-column>
       </el-table>
@@ -75,17 +74,19 @@
       <div class="tmdb-title">
         🔍 从 TMDB 选剧订阅
         <span class="tip">API Key 在 themoviedb.org 免费申请</span>
-        <!-- 搜索框固定在右上角：未配置 Key 时置灰 -->
-        <el-tooltip :disabled="!!tmdbKey" content="先填写并保存 TMDB API Key" placement="top">
-          <el-input v-model="searchWord" maxlength="80" :disabled="!tmdbKey"
-                    :placeholder="tmdbKey ? '搜索片名精确查找，如：庆余年' : '配置 API Key 后可搜索'"
-                    class="title-search" clearable @keyup.enter="doSearch" @clear="exitSearch">
-            <template #prefix><el-icon><Search /></el-icon></template>
-          </el-input>
-        </el-tooltip>
-        <el-button type="primary" :disabled="!tmdbKey" :loading="searching" @click="doSearch">
-          搜索
-        </el-button>
+        <!-- 搜索框固定在右上角（移动端独占一行与搜索按钮对齐）：未配置 Key 时置灰 -->
+        <div class="tmdb-search-row">
+          <el-tooltip :disabled="!!tmdbKey" content="先填写并保存 TMDB API Key" placement="top">
+            <el-input v-model="searchWord" maxlength="80" :disabled="!tmdbKey"
+                      :placeholder="tmdbKey ? '搜索片名，如：庆余年' : '配置 API Key 后可搜索'"
+                      class="title-search" clearable @keyup.enter="doSearch" @clear="exitSearch">
+              <template #prefix><el-icon><Search /></el-icon></template>
+            </el-input>
+          </el-tooltip>
+          <el-button type="primary" :disabled="!tmdbKey" :loading="searching" class="tmdb-search-btn" @click="doSearch">
+            搜索
+          </el-button>
+        </div>
       </div>
       <!-- Key 输入：未配置或点「更换」时显示；已配置态只读展示 -->
       <div class="toolbar">
@@ -95,8 +96,8 @@
         </template>
         <template v-else>
           <el-input v-model="tmdbKeyInput" type="password" show-password
-                    :placeholder="tmdbKey ? '输入新 Key 后点击「保存 Key」' : 'TMDB API Key (v3)'"
-                    style="width: 280px" clearable />
+                    :placeholder="tmdbKey ? '输入新 Key（留空不修改）' : 'TMDB API Key (v3)'"
+                    class="tmdb-key-input" clearable />
           <el-button :loading="savingKey" @click="saveTmdbKey">保存 Key</el-button>
           <el-button v-if="tmdbKey" text @click="editingKey = false">取消</el-button>
         </template>
@@ -136,7 +137,13 @@
             <div class="tmdb-poster">
               <el-image v-if="it.poster_path" :src="posterUrl(it.poster_path)"
                         fit="cover" lazy class="poster-img">
-                <template #error><div class="poster-err">海报加载失败</div></template>
+                <template #error>
+                  <div class="poster-err" title="点击重试海报" @click.stop="retryPoster(it.poster_path)">
+                    <el-icon :size="16"><RefreshRight /></el-icon>
+                    <span>加载失败</span>
+                    <span class="retry-hint">点击重试</span>
+                  </div>
+                </template>
               </el-image>
               <div v-else class="poster-none">无海报</div>
             </div>
@@ -166,36 +173,19 @@
           <el-button :loading="gridLoading" @click="loadMore">加载更多</el-button>
         </div>
       </template>
-      <div v-else class="tmdb-empty">填写并保存 API Key 后，这里会自动展示正在播出 / 即将上线的剧集和电影供点选订阅</div>
+      <div v-else class="tmdb-empty">填写并保存 API Key 后，这里会自动展示正在播出 / 即将上线剧集和电影供点选订阅</div>
     </div>
   </el-card>
 
-  <el-dialog v-model="bfVisible" title="向前补全早期分集" width="460px">
-    <el-form label-width="90px">
-      <el-form-item label="剧名关键词">
-        <el-input v-model="bfForm.keyword" placeholder="用于匹配频道历史帖子的剧名" />
-      </el-form-item>
-      <el-form-item label="锚点记录">
-        <span class="bf-line">将自动查找该剧最近一次成功转存，以其来源频道与消息为向前翻页起点</span>
-      </el-form-item>
-    </el-form>
-    <div class="bf-tip">
-      将向前翻找频道历史里同一剧集的早期分集（最多 50 页）并加入转存队列；
-      补全任务优先消耗每日额度，已存过的集数不会重复。
-      早期链接已失效的集数会失败并注明原因，之后补发的新链接会照常转存。
-    </div>
-    <template #footer>
-      <el-button @click="bfVisible = false">取消</el-button>
-      <el-button type="primary" :loading="bfLoading" @click="doBackfill">开始补全</el-button>
-    </template>
-  </el-dialog>
+  <BackfillDialog ref="backfillDialogRef" />
 </template>
 
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Search, Close } from '@element-plus/icons-vue'
+import { Search, Close, RefreshRight } from '@element-plus/icons-vue'
 import { api, errMsg, fmtTime, saveOk } from '../api'
+import BackfillDialog from '../components/BackfillDialog.vue'
 
 const items = ref([])
 const loading = ref(false)
@@ -317,9 +307,18 @@ const exitSearch = () => {
   mode.value = 'browse'
 }
 
+const posterRetries = reactive({})
+const retryPoster = (path) => {
+  if (!path) return
+  posterRetries[path] = Date.now()
+}
+
 const posterUrl = (path) => {
-  // 鉴权走登录时下发的 HttpOnly Cookie（路径仅限本接口），不再把长期 token 拼进 URL
-  return `/api/tmdb/poster?path=${encodeURIComponent(path)}`
+  if (!path) return ''
+  const token = localStorage.getItem('sa_token') || ''
+  const base = `/api/tmdb/poster?path=${encodeURIComponent(path)}`
+  const withToken = token ? `${base}&token=${encodeURIComponent(token)}` : base
+  return posterRetries[path] ? `${withToken}&_r=${posterRetries[path]}` : withToken
 }
 
 // 已订阅判定：关键词或别名与片名/原始名一致（去空白、忽略大小写）
@@ -400,23 +399,9 @@ const resetProgress = async (row) => {
     load()
   } catch (e) { ElMessage.error(errMsg(e)) }
 }
-// ---- 向前补全：以该订阅对应剧的最近一次成功转存为锚点，补全早期分集 ----
-const bfVisible = ref(false)
-const bfLoading = ref(false)
-const bfForm = reactive({ keyword: '' })
-const openBackfill = (row) => {
-  bfForm.keyword = row.keyword || ''
-  bfVisible.value = true
-}
-const doBackfill = async () => {
-  if (!bfForm.keyword.trim()) { ElMessage.warning('请填写剧名关键词'); return }
-  bfLoading.value = true
-  try {
-    const { data } = await api.post('/api/backfill/episodes', { keyword: bfForm.keyword.trim() })
-    saveOk('已开始向前补全', `《${data.base}》${data.episodes}，任务将优先入队`)
-    bfVisible.value = false
-  } catch (e) { ElMessage.error(errMsg(e)) } finally { bfLoading.value = false }
-}
+// ---- 向前补全：通过统一 BackfillDialog 组件处理 ----
+const backfillDialogRef = ref(null)
+const openBackfill = (row) => backfillDialogRef.value?.openForSubscription(row)
 
 const del = async (row) => {
   try {
@@ -430,50 +415,80 @@ onMounted(load)
 </script>
 
 <style scoped>
+.sub-keyword { font-weight: 500; font-size: var(--fs-body); }
 .tip { color: #999; font-size: var(--fs-caption); font-weight: 400; }
-.sub-actions { display: flex; align-items: center; flex-wrap: nowrap; gap: 6px; white-space: nowrap; }
-/* flex:none 防止列宽不足时按钮被压扁导致文字溢出；内边距收窄以适应列宽 */
-.sub-actions :deep(.el-button) { margin-left: 0 !important; flex: none; padding: 6px 8px; }
 .hit-title { font-size: var(--fs-caption); color: #999; margin-top: 2px; word-break: break-all; }
 .sub-alias { font-size: var(--fs-caption); color: #999; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ---- TMDB 选剧 ---- */
-.sub-section { margin-bottom: 4px; }
-.sub-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-weight: 600; margin-bottom: 10px; }
-.sub-title .tip { font-weight: 400; }
-.tmdb-section { margin-bottom: 4px; }
-.tmdb-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-weight: 600; margin-bottom: 10px; }
+.sub-section,
+.tmdb-section { margin-bottom: 4px; min-width: 0; }
+.sub-title,
+.tmdb-title {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  font-weight: 700; font-size: 15px; color: var(--saas-text-main);
+  margin-bottom: 12px; padding: 9px 14px;
+  background: var(--subcard-head-bg);
+  border: 1px solid var(--saas-line);
+  border-radius: 10px;
+}
+.sub-title .tip,
 .tmdb-title .tip { font-weight: 400; }
-.title-search { margin-left: auto; width: 240px; }
+.tmdb-search-row { display: inline-flex; align-items: center; gap: 8px; margin-left: auto; max-width: 100%; }
+.title-search { width: 320px; max-width: 100%; }
+.tmdb-search-btn { flex: none; }
+.tmdb-key-input { width: 300px; max-width: 100%; }
 .k-chips { display: inline-flex; gap: 6px; margin-left: auto; }
 .k-chip { font-size: var(--fs-caption); padding: 1px 10px; }
 .tmdb-empty { color: #999; font-size: var(--fs-body); padding: 12px 0 4px; }
 .tmdb-cats { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
 .cat-chip {
-  padding: 5px 14px; border-radius: 16px; font-size: var(--fs-body); cursor: pointer; user-select: none;
-  background: var(--saas-hover, #f4f7fe); color: var(--saas-text-main, #1f2d3d);
-  border: 1px solid transparent; transition: all .15s;
+  padding: 5px 14px; border-radius: 999px; font-size: var(--fs-caption); cursor: pointer; user-select: none;
+  background: var(--glass-bg-strong); color: var(--saas-text-sub);
+  border: 1px solid var(--saas-line); transition: all .18s cubic-bezier(0.4, 0, 0.2, 1);
 }
-.cat-chip:hover { border-color: var(--el-color-primary-light-5, #a0cfff); }
+.cat-chip:hover {
+  border-color: var(--el-color-primary);
+  background: rgba(79, 107, 255, .12);
+  color: var(--el-color-primary);
+}
 .cat-chip.active {
-  background: var(--el-color-primary, #2f6bff); color: #fff; font-weight: 600;
+  background: var(--grad-brand); border-color: transparent; color: #fff; font-weight: 600;
+  box-shadow: 0 3px 12px rgba(79, 107, 255, .38);
 }
 .search-chip { display: inline-flex; align-items: center; gap: 6px; }
 .clear-search { cursor: pointer; }
 .clear-search:hover { opacity: .75; }
 .tmdb-more { text-align: center; margin-top: 14px; }
-.tmdb-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 12px; margin-top: 12px; }
+.tmdb-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 340px), 1fr)); gap: 12px; margin-top: 12px; }
 .tmdb-card {
   display: flex; gap: 12px; padding: 12px; border-radius: 10px;
-  background: var(--saas-card, #fff); border: 1px solid var(--saas-border, #e5e8f0);
-  transition: border-color .15s;
+  background: var(--saas-card, #fff); border: 1px solid var(--saas-line);
+  transition: all .2s ease;
 }
-.tmdb-card:hover { border-color: var(--el-color-primary-light-5, #a0cfff); }
+.tmdb-card:hover {
+  border-color: var(--el-color-primary-light-3);
+  box-shadow: 0 6px 20px rgba(79, 107, 255, .15);
+  transform: translateY(-2px);
+}
 .tmdb-poster { flex: none; }
 .poster-img { width: 96px; height: 144px; border-radius: 8px; display: block; background: var(--saas-hover, #f4f7fe); }
 .poster-err, .poster-none {
-  width: 96px; height: 144px; border-radius: 8px; display: flex; align-items: center; justify-content: center;
+  width: 96px; height: 144px; border-radius: 8px; display: flex; flex-direction: column; align-items: center; justify-content: center;
   background: var(--saas-hover, #f4f7fe); color: #999; font-size: var(--fs-caption); text-align: center; padding: 6px;
+  user-select: none; transition: background .15s, color .15s;
+}
+.poster-err {
+  cursor: pointer; gap: 4px;
+}
+.poster-err:hover {
+  background: var(--saas-active, #eaeeff);
+  color: var(--el-color-primary, #4f6bff);
+}
+.poster-err .retry-hint {
+  font-size: 11px;
+  color: var(--el-color-primary, #4f6bff);
+  opacity: .9;
 }
 .tmdb-info { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .tmdb-name { font-weight: 600; font-size: var(--fs-body); color: var(--saas-text-main, #1f2d3d); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -484,4 +499,22 @@ onMounted(load)
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
 }
 .tmdb-sub-btn { margin-top: auto; align-self: flex-start; }
+
+@media (max-width: 768px) {
+  .tmdb-search-row {
+    width: 100%;
+    margin-left: 0;
+  }
+  .tmdb-search-row .title-search {
+    flex: 1 1 0%;
+    min-width: 0;
+    width: auto;
+  }
+  .tmdb-key-input {
+    width: auto;
+  }
+  .tmdb-grid {
+    grid-template-columns: 1fr;
+  }
+}
 </style>

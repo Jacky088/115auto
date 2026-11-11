@@ -4,8 +4,12 @@
     <el-card shadow="never" class="page-card">
       <template #header>
         <div class="toolbar" style="margin-bottom: 0">
-          <span>匹配规则（按优先级从小到大，首条命中生效）</span>
+          <div style="display: flex; align-items: center; gap: 8px">
+            <span>匹配规则</span>
+            <el-tag size="small" class="count-tag">共 {{ rules.length }} 条规则</el-tag>
+          </div>
           <el-tag v-if="dirtyRules" type="danger" effect="plain" size="small">● 有未保存的更改</el-tag>
+          <el-button v-if="dirtyRules" type="primary" size="small" style="margin-left: 6px" @click="saveRules">保存规则</el-button>
           <el-popconfirm title="确认恢复默认规则？当前自定义规则将被覆盖，目录映射保留。"
                          confirm-button-text="恢复默认" cancel-button-text="取消"
                          confirm-button-type="danger" width="260" @confirm="resetRules">
@@ -18,8 +22,8 @@
         </div>
       </template>
       <el-table :data="rules" size="small">
-        <el-table-column label="优先级" width="90">
-          <template #default="{ row }"><el-input-number v-model="row.priority" :min="1" controls-position="right" style="width: 80px" /></template>
+        <el-table-column label="优先级" width="136">
+          <template #default="{ row }"><el-input-number v-model="row.priority" :min="1" :max="9999" :step="1" :step-strictly="true" :precision="0" style="width: 116px" /></template>
         </el-table-column>
         <el-table-column label="正则" min-width="280">
           <template #default="{ row }"><el-input v-model="row.pattern" class="mono" placeholder="正则表达式" /></template>
@@ -34,7 +38,7 @@
         <el-table-column label="启用" width="70">
           <template #default="{ row }"><el-switch v-model="row.enabled" :active-value="1" :inactive-value="0" /></template>
         </el-table-column>
-        <el-table-column label="操作" width="90">
+        <el-table-column label="操作" width="84" fixed="right">
           <template #default="{ $index }">
             <el-popconfirm title="确认删除该规则？保存后生效。" confirm-button-text="删除"
                            cancel-button-text="取消" confirm-button-type="danger" width="220"
@@ -118,12 +122,14 @@
         </p>
         <el-table :data="blItems" size="small" empty-text="暂无条目">
           <el-table-column prop="value" label="内容" min-width="300" show-overflow-tooltip>
-            <template #default="{ row }"><span class="mono">{{ row.value }}</span></template>
+            <template #default="{ row }">
+              <span :class="{ mono: blTab === 'file_pattern' }">{{ row.value }}</span>
+            </template>
           </el-table-column>
           <el-table-column prop="created_at" label="添加时间" width="160">
             <template #default="{ row }">{{ fmtTime(row.created_at) }}</template>
           </el-table-column>
-          <el-table-column label="操作" width="90">
+          <el-table-column label="操作" width="84" fixed="right">
             <template #default="{ row }">
               <el-popconfirm title="确认删除该条目？删除后不再拦截。" confirm-button-text="删除"
                              cancel-button-text="取消" confirm-button-type="danger" width="220"
@@ -161,9 +167,9 @@
               </span>
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="150" fixed="right">
+          <el-table-column label="操作" width="144" fixed="right">
             <template #default="{ row }">
-              <div class="hit-actions">
+              <div class="table-actions">
                 <el-button text type="primary" @click="openDetail(row)">详情</el-button>
                 <el-popconfirm title="确认放行？将忽略黑名单重新处理该消息。" confirm-button-text="放行"
                                cancel-button-text="取消" confirm-button-type="primary" width="240"
@@ -178,7 +184,7 @@
     </el-card>
 
     <!-- 使用帮助（匹配规则） -->
-    <el-dialog v-model="helpVisible" title="匹配规则使用帮助" width="780px" top="4vh"
+    <el-dialog v-model="helpVisible" title="匹配规则使用帮助" :width="'min(780px, 94vw)'" top="4vh"
                class="help-dialog">
       <div class="help-body">
         <h4>一、工作原理</h4>
@@ -197,7 +203,7 @@
         <el-table :data="builtinRules" size="small" border>
           <el-table-column prop="category" label="分类" width="80" />
           <el-table-column label="匹配特征" min-width="200">
-            <template #default="{ row }"><span class="mono" style="font-size:var(--fs-caption)">{{ row.desc }}</span></template>
+            <template #default="{ row }"><span style="font-size:var(--fs-caption)">{{ row.desc }}</span></template>
           </el-table-column>
           <el-table-column label="标题示例" min-width="180">
             <template #default="{ row }">{{ row.example }}</template>
@@ -240,7 +246,7 @@
     </el-dialog>
 
     <!-- 拦截详情弹窗 -->
-    <el-dialog v-model="detailVisible" title="拦截详情" width="640px" top="6vh">
+    <el-dialog v-model="detailVisible" title="拦截详情" :width="'min(640px, 94vw)'" top="6vh">
       <el-descriptions :column="2" border size="small" v-if="detailRow">
         <el-descriptions-item label="时间">{{ fmtTime(detailRow.created_at) }}</el-descriptions-item>
         <el-descriptions-item label="来源频道">
@@ -255,9 +261,9 @@
       </el-descriptions>
       <div class="detail-content" v-html="detailHtml"></div>
       <template #footer>
-        <div style="display: flex; justify-content: space-between; align-items: center">
+        <div style="display: flex; justify-content: space-between; align-items: center; width: 100%; gap: 10px; flex-wrap: wrap">
           <el-button text @click="copyLinks">复制消息中的资源链接</el-button>
-          <div>
+          <div style="display: flex; align-items: center; gap: 10px">
             <el-button @click="detailVisible = false">关闭</el-button>
             <el-popconfirm title="确认放行？将忽略黑名单重新处理该消息。" confirm-button-text="放行"
                            cancel-button-text="取消" confirm-button-type="primary" width="240"
@@ -272,7 +278,7 @@
     </el-dialog>
 
     <!-- 文件名正则帮助 -->
-    <el-dialog v-model="regexHelpVisible" title="文件名正则说明" width="780px" top="4vh">
+    <el-dialog v-model="regexHelpVisible" title="文件名正则说明" :width="'min(780px, 94vw)'" top="4vh">
       <div class="help-body">
         <h4>一、作用机制</h4>
         <p>转存前会先读取分享内的<b>文件列表</b>：只要任意一个文件名命中你设置的正则，
@@ -370,6 +376,18 @@ const addRule = () => {
   dirtyRules.value = true
 }
 const saveRules = async () => {
+  for (let i = 0; i < rules.value.length; i++) {
+    const r = rules.value[i]
+    const p = Number(r.priority)
+    if (!Number.isInteger(p) || p < 1) {
+      ElMessage.warning(`第 ${i + 1} 条规则的优先级必须是大于等于 1 的整数`)
+      return
+    }
+    if (!r.pattern?.trim() || !r.category?.trim()) {
+      ElMessage.warning(`第 ${i + 1} 条规则的正则与分类不能为空`)
+      return
+    }
+  }
   try {
     await api.put('/api/rules', { rules: rules.value })
     dirtyRules.value = false
@@ -506,9 +524,6 @@ onMounted(() => { loadRules(); loadBlacklist() })
 
 <style scoped>
 .tip-text { color: #e6a23c; font-size: var(--fs-caption); }
-/* 命中记录操作列：详情 / 放行 左右排列，不换行 */
-.hit-actions { display: flex; align-items: center; gap: 2px; white-space: nowrap; }
-.hit-actions :deep(.el-button) { margin-left: 0; padding: 4px 8px; }
 .hit-summary { cursor: pointer; color: #3a4661; font-size: var(--fs-caption); }
 .hit-summary:hover { color: var(--el-color-primary); text-decoration: underline; }
 .detail-content {

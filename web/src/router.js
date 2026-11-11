@@ -9,7 +9,7 @@ const routes = [
       { path: '', redirect: '/dashboard' },
       { path: 'dashboard', component: () => import('./views/Dashboard.vue') },
       { path: 'files', component: () => import('./views/Files.vue') },
-      { path: 'channels', component: () => import('./views/Channels.vue') },
+      { path: 'channels', redirect: '/account' },
       { path: 'subscriptions', component: () => import('./views/Subscriptions.vue') },
       { path: 'dirs', component: () => import('./views/Dirs.vue') },
       { path: 'match', component: () => import('./views/MatchRules.vue') },

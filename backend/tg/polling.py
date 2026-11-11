@@ -134,8 +134,11 @@ async def _poll_one(client: httpx.AsyncClient, ch: dict):
     if preserve_gap:
         logstream.warn("polling", f"[{name}] 补漏未完成，本轮不推进 last_message_id（下一轮继续补）")
         return
-    db.execute("UPDATE channels SET last_message_id=?, last_fetch_at=? WHERE id=?",
-               (new[-1]["id"], time.time(), ch["id"]))
+    await asyncio.to_thread(
+        db.execute,
+        "UPDATE channels SET last_message_id=?, last_fetch_at=? WHERE id=?",
+        (new[-1]["id"], time.time(), ch["id"]),
+    )
     logstream.info("polling", f"[{name}] 新增 {len(new)} 条消息")
 
 
@@ -143,36 +146,46 @@ async def polling_loop():
     logstream.info("polling", "网页轮询已启动（等待「开始运行」）")
     waiting_logged = False
     while True:
-        if not db.get_setting("running", False):
+        if not await asyncio.to_thread(db.get_setting, "running", False):
             if not waiting_logged:
                 logstream.info("polling", "系统未启动，轮询待机中")
                 waiting_logged = True
             await asyncio.sleep(5)
             continue
         waiting_logged = False
-        chans = [dict(r) for r in db.query(
-            "SELECT * FROM channels WHERE type='polling' AND enabled=1")]
+        # TG 网页轮询仅解析消息并入库到 SQLite，不触达 115 接口，不受整理排空门闸阻塞
+
+        chans = [dict(r) for r in await asyncio.to_thread(
+            db.query, "SELECT * FROM channels WHERE type='polling' AND enabled=1")]
         if chans:
-            async with httpx.AsyncClient(proxy=_proxy(), follow_redirects=True) as client:
+            async with httpx.AsyncClient(proxy=await asyncio.to_thread(_proxy), follow_redirects=True) as client:
                 for ch in chans:
                     try:
                         await _poll_one(client, ch)
-                        db.set_setting(f"poll_fail_{ch['id']}", 0)  # 成功即清零失败计数
+                        await asyncio.to_thread(db.set_setting, f"poll_fail_{ch['id']}", 0)  # 成功即清零失败计数
                     except Exception as e:
                         # 连续失败计数：供运行健康监控判定 TG 通道失效（全频道超阈值 → 自动停止）
-                        fails = 0
-                        try:
-                            fails = int(db.get_setting(f"poll_fail_{ch['id']}", 0) or 0)
-                        except (TypeError, ValueError):
-                            fails = 0
-                        db.set_setting(f"poll_fail_{ch['id']}", fails + 1)
-                        logstream.error("polling", f"[{ch['name']}] 抓取失败（连续 {fails + 1} 次）: "
+                        def _bump_poll_fail(cid: int) -> int:
+                            try:
+                                fails = int(db.get_setting(f"poll_fail_{cid}", 0) or 0)
+                            except (TypeError, ValueError):
+                                fails = 0
+                            db.set_setting(f"poll_fail_{cid}", fails + 1)
+                            return fails + 1
+
+                        new_fails = await asyncio.to_thread(_bump_poll_fail, ch["id"])
+                        logstream.error("polling", f"[{ch['name']}] 抓取失败（连续 {new_fails} 次）: "
                                                    f"{logstream.exc(e)}")
-                    try:
-                        lo = max(1, int(db.get_setting("poll_interval_min", 30)))
-                        hi = max(1, int(db.get_setting("poll_interval_max", 120)))
-                    except (TypeError, ValueError):
-                        lo, hi = 30, 120
+
+                    def _read_poll_interval():
+                        try:
+                            lo = max(1, int(db.get_setting("poll_interval_min", 30)))
+                            hi = max(1, int(db.get_setting("poll_interval_max", 120)))
+                        except (TypeError, ValueError):
+                            lo, hi = 30, 120
+                        return lo, hi
+
+                    lo, hi = await asyncio.to_thread(_read_poll_interval)
                     # 按设置页承诺的「区间内随机」取值；旧实现把上限截到 lo+5，导致 max 基本不生效
                     await asyncio.sleep(random.uniform(lo, hi) if hi > lo else lo)
         else:

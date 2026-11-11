@@ -1,5 +1,5 @@
 <template>
-  <el-dialog :model-value="modelValue" title="手动导入 115 Cookie" width="600px" top="6vh"
+  <el-dialog :model-value="modelValue" title="手动导入 115 Cookie" :width="'min(600px, 94vw)'" top="6vh"
              :close-on-click-modal="false" @update:model-value="emitVisible" @open="cookie = ''">
     <el-alert type="info" :closable="false" show-icon class="ci-scene">
       <template #title>适用场景：服务器在海外/机房，扫码确认后被 115 风控拦截</template>
@@ -52,11 +52,11 @@ const submit = async () => {
 
 <style scoped>
 .ci-scene :deep(.el-alert__description) { margin: 0; }
-.ci-steps { font-size: var(--fs-body); color: #606266; line-height: 1.8; }
+.ci-steps { font-size: var(--fs-body); color: var(--saas-text-main); line-height: 1.8; }
 .ci-steps p { margin: 0; }
 .ci-steps code {
-  background: #f4f4f5; padding: 0 4px; border-radius: 4px;
-  font-family: Consolas, Monaco, monospace; font-size: var(--fs-caption);
+  background: var(--glass-bg-strong, #f4f4f5); border: 1px solid var(--saas-line); padding: 1px 5px; border-radius: 4px;
+  font-family: var(--font-family-mono); font-size: var(--fs-caption); color: var(--el-color-primary);
 }
 .ci-input { margin-top: 4px; }
 .ci-tip { font-size: var(--fs-caption); color: #b45309; font-weight: 600; margin: 8px 0 0; }

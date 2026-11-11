@@ -53,7 +53,7 @@ def process_message(channel: str, message_id: int, text: str,
                 "pipeline",
                 f"[{channel}] 该频道首条消息未发现可转存的资源链接（115 分享/磁力/电驴/迅雷），"
                 "此类消息仅记录不转存；若该频道应包含资源链接，"
-                "请到「频道管理」的「消息预览」核对消息原文")
+                "请到「账号管理」的「消息预览」核对消息原文")
     if not links:
         return result
 
@@ -96,7 +96,7 @@ def process_message(channel: str, message_id: int, text: str,
             _runtime_flags[key] = True
             logstream.info("pipeline",
                            f"[{channel}] 该频道已开启「仅订阅」模式：此消息未命中任何订阅关键词，"
-                           "仅记录不转存（在「频道管理」或「订阅追剧」页调整）")
+                           "仅记录不转存（在「账号管理」或「订阅追剧」页调整）")
         result["sub_skipped"] = True
         return result
 

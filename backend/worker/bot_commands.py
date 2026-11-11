@@ -31,34 +31,48 @@ def _backup_summary(data: dict) -> str:
     meta = data.get("_meta") or {}
     n = lambda t: len(data.get(t) or [])  # noqa: E731
     return (f"导出于 {meta.get('exported_at', '?')}｜设置 {len(data.get('settings') or {})} 项｜"
-            f"频道 {n('channels')}｜规则 {n('rules')}｜订阅 {n('subscriptions')}｜"
-            f"转存记录 {n('transfers')}")
+            f"频道 {n('channels')}｜规则 {n('rules')}｜黑名单 {n('blacklist')}｜"
+            f"订阅 {n('subscriptions')}｜转存记录 {n('transfers')}｜"
+            f"整理规则 {n('auto_move_rules')}")
 
 
 async def restore_upload_flow(client: "httpx.AsyncClient", token: str, chat_id: str,
                               doc: dict) -> str:
-    """用户转发备份 JSON 文件给 Bot：下载 → 校验 → 暂存待确认。"""
+    """用户转发备份 JSON/GZ/ZIP 文件给 Bot：下载 → 校验 → 暂存待确认。"""
     size = int(doc.get("file_size") or 0)
-    if size > 10 * 1024 * 1024:
-        return f"文件过大（{size // 1024} KB），备份文件不应超过 10 MB"
+    # Telegram Bot API getFile 硬上限为 20MB
+    if size > 20 * 1024 * 1024:
+        return f"文件过大（{size // 1024} KB），Telegram Bot 下载上限为 20 MB"
     # 下载文件：getFile 拿路径，再从 file 接口取内容（都走 TG 代理）
     r = await client.post(f"https://api.telegram.org/bot{token}/getFile",
                           json={"file_id": doc.get("file_id")},
-                          proxy=_tg_proxy(), timeout=30)
+                          timeout=30)
     fp = (r.json().get("result") or {}).get("file_path") if r.status_code == 200 else None
     if not fp:
         return "无法读取该文件（Telegram getFile 失败），请重新发送"
     f = await client.get(f"https://api.telegram.org/file/bot{token}/{fp}",
-                         proxy=_tg_proxy(), timeout=60)
+                         timeout=60)
+    file_name = str(doc.get("file_name") or "").lower()
+    raw_bytes = f.content
     try:
-        data = json.loads(f.content)
-    except Exception:
-        return "文件不是合法 JSON，已忽略（确认发送的是自动备份/网页导出的 .json 文件）"
+        if file_name.endswith((".gz", ".json.gz")) or raw_bytes[:2] == b"\x1f\x8b":
+            import gzip
+            raw_bytes = gzip.decompress(raw_bytes)
+        elif file_name.endswith(".zip") or raw_bytes[:2] == b"PK":
+            import io, zipfile
+            with zipfile.ZipFile(io.BytesIO(raw_bytes)) as z:
+                jnames = [n for n in z.namelist() if n.lower().endswith(".json")]
+                if not jnames:
+                    return "ZIP 压缩包内未找到 .json 备份文件"
+                raw_bytes = z.read(jnames[0])
+        data = json.loads(raw_bytes)
+    except Exception as e:
+        return f"文件解析失败（{e}），确认发送的是自动备份/网页导出的 .json 或 .json.gz 文件"
     if not isinstance(data, dict) or not isinstance(data.get("_meta"), dict) or "settings" not in data:
         return "不是本程序的备份文件（缺少备份标记），已忽略"
     _RESTORE_PENDING[chat_id] = (data, time.time())
     return ("⚠️ 检测到备份文件\n" + _backup_summary(data) +
-            "\n\n恢复将【整体覆盖】当前的设置/频道/规则/订阅/转存记录（登录密码不变）。\n"
+            "\n\n恢复将【整体覆盖】当前的设置/频道/规则/黑名单/订阅/转存记录/自动整理（登录密码不变）。\n"
             "确认恢复请回复：/restore confirm（10 分钟内有效，或直接忽略即取消）")
 
 
@@ -74,7 +88,7 @@ def _restore_guide() -> str:
 
 def _verify_restore(data: dict) -> str:
     """恢复写库后逐表核对：返回空串=校验通过，否则返回不一致说明。"""
-    tables = ("channels", "rules", "routes", "blacklist", "subscriptions", "transfers")
+    tables = ("channels", "rules", "routes", "blacklist", "subscriptions", "transfers", "auto_move_rules")
     for t in tables:
         want = len(data.get(t) or [])
         got = db.query(f"SELECT count(*) c FROM {t}", one=True)["c"]
@@ -178,7 +192,8 @@ HELP = (
     "/resume — 恢复转存\n"
     "/retry — 重试全部失败任务\n"
     "/backfill [剧名] — 向前补全早期分集（如从 E03 开始追，补全 E01/E02）\n"
-    "/restore — 发送备份 JSON 文件后确认恢复数据\n"
+    "/backup — 导出并发送当前完整数据备份文件（.json 或 .json.gz）\n"
+    "/restore — 发送备份文件后回复 /restore confirm 恢复数据\n"
     "/help — 显示本帮助"
 )
 
@@ -194,6 +209,7 @@ BOT_MENU_COMMANDS = [
     {"command": "resume", "description": "恢复转存"},
     {"command": "retry", "description": "重试全部失败任务"},
     {"command": "backfill", "description": "向前补全剧集（查找早期分集）"},
+    {"command": "backup", "description": "导出完整数据备份文件"},
     {"command": "restore", "description": "从备份文件恢复数据"},
     {"command": "help", "description": "显示帮助"},
 ]
@@ -320,13 +336,14 @@ def _menu_keyboard() -> dict:
           "callback_data": "c:toggle_pause"}],
         [{"text": "🎬 订阅列表", "callback_data": "c:sub"},
          {"text": "📺 频道订阅模式", "callback_data": "c:submode"}],
-        [{"text": "♻️ 从备份恢复", "callback_data": "c:restore"},
-         {"text": "❓ 全部指令帮助", "callback_data": "c:help"}],
+        [{"text": "🗄 立即导出备份", "callback_data": "c:backup"},
+         {"text": "♻️ 从备份恢复", "callback_data": "c:restore"}],
+        [{"text": "❓ 全部指令帮助", "callback_data": "c:help"}],
     ]}
 
 
 def _submode_text() -> str:
-    """各频道的订阅模式状态（只读展示，网页「频道管理」可调整）。"""
+    """各频道的订阅模式状态（只读展示，网页「账号管理」可调整）。"""
     rows = db.query("SELECT name, enabled, sub_only FROM channels ORDER BY id")
     if not rows:
         return "还没有监控频道，发送 /add <频道名或链接> on|off 添加"
@@ -337,7 +354,7 @@ def _submode_text() -> str:
             state += "（频道已停用）"
         lines.append(f"@{r['name']} — {state}")
     lines.append("")
-    lines.append("新增频道时必须选择订阅模式（/add 的 on|off 必填）；在网页「频道管理」可按频道调整")
+    lines.append("新增频道时必须选择订阅模式（/add 的 on|off 必填）；在网页「账号管理」可按频道调整")
     return "\n".join(lines)
 
 
@@ -380,7 +397,7 @@ async def add_channel_flow(raw: str) -> str:
         return "频道名仅支持字母、数字与下划线（1-64 位）"
     if db.query("SELECT 1 FROM channels WHERE name=?", (name,), one=True):
         # 不限制 type：同一频道若已有 userbot 记录，再加 polling 会导致消息被两条链路重复处理
-        return f"频道 @{name} 已存在。订阅模式可在网页「频道管理」按频道开关"
+        return f"频道 @{name} 已存在。订阅模式可在网页「账号管理」按频道开关"
     n = db.query("SELECT count(*) c FROM channels", one=True)["c"]
     if n >= 50:
         return "监控频道已达上限 50 个，请先清理不需要的频道"
@@ -397,7 +414,7 @@ async def add_channel_flow(raw: str) -> str:
                    f"已通过 TG 指令添加监控频道 @{name}（{title}，订阅模式：{'开' if sub_only else '关'}，已通过访问校验）")
     return (f"✅ 已添加频道 @{name}（{title}）\n"
             f"🛎 订阅模式：{mode_txt}\n"
-            "下一轮轮询开始抓取；之后可在网页「频道管理」调整该开关")
+            "下一轮轮询开始抓取；之后可在网页「账号管理」调整该开关")
 
 
 def _handle_sub(args: list[str]) -> str:
@@ -429,7 +446,7 @@ def _handle_sub(args: list[str]) -> str:
         mark = "" if r["enabled"] else "⏸ "
         lines.append(f"· {mark}{r['keyword']}{ep}")
     lines.append("")
-    lines.append("ℹ️ 仅订阅/全盘转存按频道独立设置：网页「频道管理」或菜单「📺 频道订阅模式」查看")
+    lines.append("ℹ️ 仅订阅/全盘转存按频道独立设置：网页「账号管理」或菜单「📺 频道订阅模式」查看")
     return "\n".join(lines)
 
 
@@ -469,7 +486,7 @@ def _sub_add(name: str, note: str, aliases: list | None = None,
     logstream.info("subscribe", f"已通过 TG Bot 搜索订阅: {name}（{note}，别名 {len(al)} 个）")
     return (f"✅ 已订阅「{name}」\n"
             "命中该剧的频道消息后会记录追更进度并推送通知；"
-            "是否仅转存命中内容由「频道管理」的仅订阅开关决定")
+            "是否仅转存命中内容由「账号管理」的仅订阅开关决定")
 
 
 async def sub_search_flow(client: "httpx.AsyncClient", token: str,
@@ -663,6 +680,51 @@ async def _handle_subpick(client: "httpx.AsyncClient", token: str,
     await _bot_send_text(client, token, chat_id, reply)
 
 
+async def send_backup_flow(client: "httpx.AsyncClient", token: str, chat_id: str):
+    """通过 TG Bot 发送当前完整数据备份（JSON / GZ）。"""
+    import gzip
+    payload = await asyncio.to_thread(db.backup_payload)
+    raw = json.dumps(payload, ensure_ascii=False, indent=1).encode("utf-8")
+    summary = _backup_summary(payload)
+    # 体积超过 8MB 时自动使用 gzip 压缩，彻底杜绝 Telegram 20MB 下载/50MB 发送限制
+    if len(raw) > 8 * 1024 * 1024:
+        content = gzip.compress(raw, compresslevel=9)
+        fname = f"autosave_backup_{time.strftime('%Y%m%d_%H%M%S')}.json.gz"
+        mime = "application/gzip"
+        size_str = f"{len(content) // 1024} KB (Gzip 压缩，原始 {len(raw) // 1024} KB)"
+    else:
+        content = raw
+        fname = f"autosave_backup_{time.strftime('%Y%m%d_%H%M%S')}.json"
+        mime = "application/json"
+        size_str = f"{len(content) // 1024} KB"
+
+    caption = (f"🗄 完整数据备份（{size_str}）\n{summary}\n\n"
+               "如需恢复，直接把此文件转发回本 Bot，并回复 /restore confirm")
+    try:
+        resp = await client.post(
+            f"https://api.telegram.org/bot{token}/sendDocument",
+            data={"chat_id": chat_id, "caption": caption},
+            files={"document": (fname, content, mime)},
+            timeout=60,
+        )
+        if resp.status_code == 200:
+            logstream.info("system", f"已通过 TG 指令发送数据备份（{fname}，{size_str}）")
+        else:
+            logstream.warn("system", f"TG 指令发送数据备份失败: HTTP {resp.status_code}")
+            await client.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json={"chat_id": chat_id, "text": f"❌ 备份文件发送失败: HTTP {resp.status_code}"},
+                timeout=15,
+            )
+    except Exception as e:
+        logstream.error("system", f"TG 发送备份异常: {logstream.exc(e)}")
+        await client.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat_id, "text": f"❌ 发送备份异常: {e}"},
+            timeout=15,
+        )
+
+
 async def bot_command_loop():
     """TG Bot long polling：处理远程指令。未配置 Token 时跳过。
 
@@ -678,10 +740,15 @@ async def bot_command_loop():
     """
     global _last_update_id
     announced = None  # 已提示「已启动」的配置指纹 (token, chat_id, proxy)
+    def _bot_cfg():
+        return (
+            str(db.get_setting("notify_token", "") or "").strip(),
+            str(db.get_setting("notify_chat_id", "") or "").strip(),
+            _tg_proxy(),
+        )
+
     while True:
-        token = str(db.get_setting("notify_token", "") or "").strip()
-        chat_id = str(db.get_setting("notify_chat_id", "") or "").strip()
-        proxy = _tg_proxy()
+        token, chat_id, proxy = await asyncio.to_thread(_bot_cfg)
         if not token or not chat_id:
             announced = None
             await asyncio.sleep(30)
@@ -698,9 +765,8 @@ async def bot_command_loop():
                     announced = fingerprint
                 while True:
                     # 配置变化 → 退出内层循环，用新配置重建客户端
-                    cur_token = str(db.get_setting("notify_token", "") or "").strip()
-                    cur_chat = str(db.get_setting("notify_chat_id", "") or "").strip()
-                    if cur_token != token or cur_chat != chat_id or _tg_proxy() != proxy:
+                    cur_token, cur_chat, cur_proxy = await asyncio.to_thread(_bot_cfg)
+                    if cur_token != token or cur_chat != chat_id or cur_proxy != proxy:
                         break
                     params = {"timeout": 25, "offset": _last_update_id + 1,
                               "allowed_updates": '["message","callback_query"]'}
@@ -766,6 +832,9 @@ async def bot_command_loop():
                                 except Exception:
                                     pass
                                 continue
+                            if (cq.get("data") or "") == "c:backup":
+                                await send_backup_flow(client, token, chat_id)
+                                continue
                             if (cq.get("data") or "").startswith("bfgo:"):
                                 parts = (cq.get("data") or "").split(":")
                                 try:
@@ -830,10 +899,10 @@ async def bot_command_loop():
                             except Exception:
                                 pass
                             continue  # 非绑定的管理员用户（群聊防成员滥用）
-                        # ---- 备份文件恢复：直接发送/转发备份 JSON 给 Bot ----
+                        # ---- 备份文件恢复：直接发送/转发备份 JSON/GZ/ZIP 给 Bot ----
                         doc = msg.get("document")
-                        if doc and (str(doc.get("mime_type") or "").endswith("json")
-                                    or str(doc.get("file_name") or "").lower().endswith(".json")):
+                        if doc and (str(doc.get("mime_type") or "").endswith(("json", "gzip", "zip", "octet-stream"))
+                                    or str(doc.get("file_name") or "").lower().endswith((".json", ".json.gz", ".gz", ".zip"))):
                             allowed, hint = _restore_allowed(msg)
                             if not allowed:
                                 reply = hint
@@ -853,7 +922,10 @@ async def bot_command_loop():
                         if not text.startswith("/"):
                             continue
                         try:
-                            if text.lower().startswith("/restore"):
+                            if text.lower().startswith("/backup"):
+                                await send_backup_flow(client, token, chat_id)
+                                continue
+                            elif text.lower().startswith("/restore"):
                                 allowed, hint = _restore_allowed(msg)
                                 arg = text.split(None, 1)[1].strip().lower() \
                                     if len(text.split(None, 1)) > 1 else ""

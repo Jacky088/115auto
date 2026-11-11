@@ -63,7 +63,9 @@ async def lifespan(app: FastAPI):
     _background.append(asyncio.create_task(episode_backfill.episode_backfill_loop()))
     _background.append(asyncio.create_task(jobs.digest_loop()))
     _background.append(asyncio.create_task(jobs.auto_backup_loop()))
+    _background.append(asyncio.create_task(jobs.tg_notify_worker()))
     _background.append(asyncio.create_task(bot_commands.bot_command_loop()))
+    _background.append(asyncio.create_task(jobs.auto_move_loop()))
     yield
     # 优雅停机：先取消后台任务并等待退出，再断开 Userbot —— 保证 Telethon session
     # 与 SQLite（WAL）完整落盘，避免强杀后 session 文件损坏需要重新登录

@@ -364,8 +364,10 @@ sent.clear()
 captured = jobs.notify_transfer
 import backend.worker.queue_worker as _qw  # noqa: E402
 _qw.jobs.notify_transfer = lambda *a, **k: (sent.append((a, k)), captured(*a, **k))
+db.set_setting("dedup_by_name", False)
 job = mkjob("notify001")
 queue_worker._process_one(job)
+db.set_setting("dedup_by_name", True)
 check("成功路径自动发通知", len(sent) == 1)
 args = sent[0][0]
 check("通知参数完整", args[0] == "测试资源合集" and args[1] == "电影"
