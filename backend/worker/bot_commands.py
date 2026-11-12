@@ -27,13 +27,13 @@ _RESTORE_TTL = 600  # 10 分钟内有效
 
 
 def _backup_summary(data: dict) -> str:
-    """备份 payload 的一行人量摘要（用于确认提示）。"""
-    meta = data.get("_meta") or {}
-    n = lambda t: len(data.get(t) or [])  # noqa: E731
-    return (f"导出于 {meta.get('exported_at', '?')}｜设置 {len(data.get('settings') or {})} 项｜"
-            f"频道 {n('channels')}｜规则 {n('rules')}｜黑名单 {n('blacklist')}｜"
-            f"订阅 {n('subscriptions')}｜转存记录 {n('transfers')}｜"
-            f"整理规则 {n('auto_move_rules')}")
+    """备份 payload 的一行摘要（用于确认提示与结果展示）。"""
+    c = db.backup_counts(data)
+    return (f"导出于 {c['exported_at']}｜设置 {c['settings']} 项｜"
+            f"频道 {c['channels']}｜规则 {c['rules']}｜路由 {c['routes']}｜黑名单 {c['blacklist']}｜"
+            f"订阅 {c['subscriptions']}｜转存记录 {c['transfers']}｜"
+            f"自动整理 {c['auto_move_rules']}｜整理刮削 {c['media_rules']}｜"
+            f"操作账本 {c['organized_records']}｜待刮削任务 {c['media_tasks']}")
 
 
 async def restore_upload_flow(client: "httpx.AsyncClient", token: str, chat_id: str,
@@ -53,51 +53,45 @@ async def restore_upload_flow(client: "httpx.AsyncClient", token: str, chat_id: 
     f = await client.get(f"https://api.telegram.org/file/bot{token}/{fp}",
                          timeout=60)
     file_name = str(doc.get("file_name") or "").lower()
-    raw_bytes = f.content
     try:
-        if file_name.endswith((".gz", ".json.gz")) or raw_bytes[:2] == b"\x1f\x8b":
-            import gzip
-            raw_bytes = gzip.decompress(raw_bytes)
-        elif file_name.endswith(".zip") or raw_bytes[:2] == b"PK":
-            import io, zipfile
-            with zipfile.ZipFile(io.BytesIO(raw_bytes)) as z:
-                jnames = [n for n in z.namelist() if n.lower().endswith(".json")]
-                if not jnames:
-                    return "ZIP 压缩包内未找到 .json 备份文件"
-                raw_bytes = z.read(jnames[0])
-        data = json.loads(raw_bytes)
+        data = db.parse_backup_bytes(f.content, filename=file_name)
+    except ValueError as e:
+        msg = str(e)
+        if "ZIP 压缩包内未找到" in msg:
+            return msg
+        if "缺少 _meta 或 settings 标记" in msg:
+            return "不是本程序的备份文件（缺少备份标记），已忽略"
+        return f"文件解析失败（{msg}），确认发送的是自动备份/网页导出的 .json、.json.gz 或 .zip 文件"
     except Exception as e:
-        return f"文件解析失败（{e}），确认发送的是自动备份/网页导出的 .json 或 .json.gz 文件"
-    if not isinstance(data, dict) or not isinstance(data.get("_meta"), dict) or "settings" not in data:
-        return "不是本程序的备份文件（缺少备份标记），已忽略"
+        return f"文件解析失败（{e}），确认发送的是自动备份/网页导出的 .json、.json.gz 或 .zip 文件"
     _RESTORE_PENDING[chat_id] = (data, time.time())
     return ("⚠️ 检测到备份文件\n" + _backup_summary(data) +
-            "\n\n恢复将【整体覆盖】当前的设置/频道/规则/黑名单/订阅/转存记录/自动整理（登录密码不变）。\n"
+            "\n\n恢复将【整体覆盖】当前的设置/频道/规则/路由/黑名单/订阅/转存记录/自动整理/整理刮削/操作账本/待处理刮削任务"
+            "（登录密码与通知密钥不变）。\n"
             "确认恢复请回复：/restore confirm（10 分钟内有效，或直接忽略即取消）")
 
 
 def _restore_guide() -> str:
     """恢复操作三步引导（/menu 按钮、/restore 指令共用）。"""
     return ("♻️ 从备份恢复（三步）：\n"
-            "① 直接把备份 JSON 文件发送给本 Bot（自动备份的文件或网页导出的文件均可）\n"
+            "① 直接把备份文件（.json / .json.gz / .zip）发送给本 Bot（自动备份或网页导出的文件均可）\n"
             "② 我会校验并回显备份摘要\n"
             "③ 回复 /restore confirm 确认恢复（10 分钟内有效）\n\n"
-            "恢复会整体覆盖当前的设置/频道/规则/订阅/转存记录（登录密码不变），"
-            "完成并校验一致后我会回复恢复结果")
+            "恢复会整体覆盖当前的设置/频道/规则/路由/黑名单/订阅/转存记录/自动整理/整理刮削/操作账本/待处理刮削任务"
+            "（登录密码与通知密钥不变），完成并校验一致后我会回复恢复结果")
 
 
 def _verify_restore(data: dict) -> str:
     """恢复写库后逐表核对：返回空串=校验通过，否则返回不一致说明。"""
-    tables = ("channels", "rules", "routes", "blacklist", "subscriptions", "transfers", "auto_move_rules")
-    for t in tables:
+    for t in db.BACKUP_TABLES:
         want = len(data.get(t) or [])
         got = db.query(f"SELECT count(*) c FROM {t}", one=True)["c"]
         if want != got:
             return f"{t} 数量不一致（备份 {want} 条，实际 {got} 条）"
-    # settings 逐键核对（排除恢复时保留当前值的凭据项；running 会被强制改写为停止态）
+    # settings 逐键核对（跳过恢复时保留本机值的凭据/状态项，以及恢复时清理/重置的运行态项）
     got_map = {r["key"]: r["value"] for r in db.query("SELECT key, value FROM settings")}
     for k, v in (data.get("settings") or {}).items():
-        if k in db.BACKUP_EXCLUDE_SETTINGS or k == "running":
+        if k in db.BACKUP_KEEP_SETTINGS or db.is_runtime_setting_key(k):
             continue
         if got_map.get(k) != str(v):
             return f"settings[{k}] 恢复后与备份不一致"
@@ -725,6 +719,35 @@ async def send_backup_flow(client: "httpx.AsyncClient", token: str, chat_id: str
         )
 
 
+async def _answer_scrape_cq(client, token: str, cq_id: str, text: str = "", show_alert: bool = False):
+    try:
+        payload = {"callback_query_id": cq_id}
+        if text:
+            payload["text"] = text[:190]
+        if show_alert:
+            payload["show_alert"] = True
+        await client.post(f"https://api.telegram.org/bot{token}/answerCallbackQuery", json=payload)
+    except Exception:
+        pass
+
+
+async def _handle_scrape_callback(client, token: str, chat_id: str, cq: dict) -> None:
+    """兼容拦截历史 TG 刮削交互按钮：不再从 TG 选片/提交，引导用户前往网页端「整理刮削」操作。"""
+    cq_id = str(cq.get("id") or "")
+    await _answer_scrape_cq(
+        client,
+        token,
+        cq_id,
+        "刮削确认与提交队列已调整为统一在网页「整理刮削 → 待确认列表」操作",
+        show_alert=True,
+    )
+
+
+def _handle_scid_command(text: str = "") -> str:
+    """`/scid` 指令已下线：提示用户前往网页端「整理刮削 → 待确认列表」选片并提交队列。"""
+    return "⚠️ TG Bot 已移除手动绑定与提交刮削功能，请前往网页端「整理刮削 → 待确认列表」点选或搜索 TMDB 后点击「提交队列」。"
+
+
 async def bot_command_loop():
     """TG Bot long polling：处理远程指令。未配置 Token 时跳过。
 
@@ -801,6 +824,10 @@ async def bot_command_loop():
                                         json={"chat_id": chat_id, "text": sender_hint})
                                 except Exception:
                                     pass
+                                continue
+                            cb_raw = str(cq.get("data") or "")
+                            if cb_raw.startswith("sc"):
+                                await _handle_scrape_callback(client, token, chat_id, cq)
                                 continue
                             try:  # 先应答回调，去掉按钮上的加载动画
                                 await client.post(
@@ -962,6 +989,8 @@ async def bot_command_loop():
                                 except Exception:
                                     pass
                                 continue
+                            elif text.lower().startswith("/scid"):
+                                reply = await asyncio.to_thread(_handle_scid_command, text)
                             elif text.lower().startswith("/sub"):
                                 # /sub <片名>（非 del）：搜索订阅流程（异步 + 海报上传）
                                 parts = text.split()

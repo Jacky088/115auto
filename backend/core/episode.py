@@ -11,7 +11,13 @@
 - Season01 / Season1 / Season 01 / Season 1 / Season.01（大小写不敏感）
 - 第一季 / 第1季 / 第01季 / 第 1 季 / 特别篇 / SP
 """
+import os
 import re
+
+_VIDEO_EXTS = frozenset({
+    ".mp4", ".mkv", ".ts", ".mov", ".avi", ".flv", ".wmv", ".m2ts", ".rmvb", ".iso",
+})
+_DUP_SUFFIX_RE = re.compile(r"[\s\._-]*[\(\[（【]\s*([1-9]\d{0,2})\s*[\)\]）】]$")
 
 _SEASON_EP = re.compile(r"[Ss]0*(\d{1,2})[\s\.\-_]*[Ee](\d{1,3})")
 # E12 / EP12：前面不能紧邻数字或字母（避免 S01E12 里的 E12、ED2K 之类误判）
@@ -19,6 +25,21 @@ _EP = re.compile(r"(?<![0-9A-Za-z])[Ee][Pp]?\s?(\d{1,3})(?![0-9])")
 _CN = re.compile(r"第\s*(\d{1,3})\s*([集话話期])")
 # 12集 / 12话 / 12期（无「第」字，频道常见写法）
 _BARE = re.compile(r"(?<![0-9])(\d{1,3})\s*([集话話期])")
+
+_RANGE_SEASON_EP = re.compile(
+    r"[Ss]0*(\d{1,2})[\s\.\-_]*[Ee]0*(\d{1,3})\s*[-~～]\s*[Ee]?0*(\d{1,3})(?![0-9A-Za-z])"
+)
+_RANGE_CN_EP = re.compile(r"第\s*0*(\d{1,3})\s*[-~～至到]\s*0*(\d{1,3})\s*([集话話期])")
+_RANGE_EP = re.compile(
+    r"(?<![0-9A-Za-z])[Ee][Pp]?\s?0*(\d{1,3})\s*[-~～]\s*(?:[Ee][Pp]?)?0*(\d{1,3})(?![0-9A-Za-z])"
+)
+_PART_MARKER_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?:part|pt|cd|disc|disk)[\s\._-]*0*(\d{1,2})(?![0-9A-Za-z])",
+    re.IGNORECASE,
+)
+_CN_PART_RE = re.compile(
+    r"(?:[\.\s_\-（(\[【]|(?:[Ss]\d{1,2}[Ee]\d{1,3}|第\d+[集话話期])[\.\s_\-]*)(上|中|下)(?=$|[\.\s_\-）)\]】])"
+)
 
 _EP_KINDS = {"集": "ep", "话": "ep", "話": "ep", "期": "period"}
 
@@ -102,3 +123,72 @@ def strip_markers(text: str) -> str:
     t = _CN.sub("", t)
     t = _BARE.sub("", t)
     return t
+
+
+def extract_episode_keys(
+    filename: str,
+    folder_hint: str = "",
+) -> list[tuple[int, int, str, str]]:
+    """提取视频文件的标准季集签名列表 `[(season, episode, kind, part_tag), ...]`。
+
+    仅对常见视频扩展名生效（字幕/图片等返回空列表，交由文件名查重处理）；
+    支持范围集（如 S01E01-E02）、集内分段（Part1 / 上 / 下）及父目录季号补全；
+    文件名与父目录均未标明季号时默认归为第 1 季，确保「S01E01」与「第1集」互相命中。
+    """
+    raw_root, ext = os.path.splitext(str(filename or "").strip())
+    if ext.lower() not in _VIDEO_EXTS:
+        return []
+    stem = _DUP_SUFFIX_RE.sub("", raw_root).rstrip()
+    if not stem:
+        return []
+
+    season = parse_season(stem)
+    ep_start: int | None = None
+    ep_end: int | None = None
+    kind = "ep"
+
+    m = _RANGE_SEASON_EP.search(stem)
+    if m:
+        s_val, st, ed = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if 0 <= (ed - st) <= 30:
+            season, ep_start, ep_end, kind = s_val, st, ed, "ep"
+
+    if ep_start is None:
+        m = _RANGE_CN_EP.search(stem)
+        if m:
+            st, ed, kch = int(m.group(1)), int(m.group(2)), m.group(3)
+            if 0 <= (ed - st) <= 30:
+                ep_start, ep_end, kind = st, ed, _EP_KINDS.get(kch, "ep")
+
+    if ep_start is None:
+        m = _RANGE_EP.search(stem)
+        if m:
+            st, ed = int(m.group(1)), int(m.group(2))
+            if 0 <= (ed - st) <= 30:
+                ep_start, ep_end, kind = st, ed, "ep"
+
+    if ep_start is None:
+        s_single, ep_single, kind = parse(stem)
+        if ep_single is not None:
+            if season is None:
+                season = s_single
+            ep_start = ep_end = ep_single
+
+    if ep_start is None or ep_end is None:
+        return []
+
+    if season is None and folder_hint:
+        season = parse_season(folder_hint)
+    if season is None:
+        season = 1
+
+    part_tag = ""
+    pm = _PART_MARKER_RE.search(stem)
+    if pm:
+        part_tag = f"part:{int(pm.group(1))}"
+    else:
+        cm = _CN_PART_RE.search(stem)
+        if cm:
+            part_tag = f"part:{cm.group(1)}"
+
+    return [(int(season), ep, kind, part_tag) for ep in range(ep_start, ep_end + 1)]

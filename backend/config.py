@@ -2,7 +2,7 @@
 import os
 from pathlib import Path
 
-APP_VERSION = "1.1.0"  # 展示于网页页脚与 /api/version，随发行包更新
+APP_VERSION = "1.2.0"  # 展示于网页页脚与 /api/version，随发行包更新
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 BACKEND_DIR = Path(__file__).resolve().parent
@@ -11,6 +11,7 @@ STATIC_DIR = BACKEND_DIR / "static"
 DB_PATH = DATA_DIR / "app.db"
 COOKIE_FILE = DATA_DIR / "115_cookie.txt"
 LOG_DIR = DATA_DIR / "logs"
+MEDIA_META_DIR = DATA_DIR / "media_meta"
 TG_SESSION_FILE = DATA_DIR / "tg_session"
 SECRET_FILE = DATA_DIR / "secret.key"
 
@@ -23,7 +24,7 @@ TRUSTED_PROXIES = tuple(
     p.strip() for p in os.environ.get("TRUSTED_PROXIES", "").split(",") if p.strip()
 )
 
-for d in (DATA_DIR, LOG_DIR):
+for d in (DATA_DIR, LOG_DIR, MEDIA_META_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
 

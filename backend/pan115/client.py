@@ -18,7 +18,7 @@ import qrcode.image.svg
 from .. import config, database as db
 from ..core import logstream
 from ..core.t2s import t2s
-from ..core.episode import parse as parse_episode
+from ..core.episode import extract_episode_keys, parse as parse_episode
 
 _lock = threading.Lock()
 _client = None  # P115Client 单例（懒加载）
@@ -450,6 +450,28 @@ def clear_dir_cache():
         _dir_cache.clear()
 
 
+def resolve_dir_cid(path: str) -> int:
+    """只读解析 115 目录路径返回 cid；任一级目录不存在时返回 0（不自动创建）。"""
+    if not path or not path.strip("/"):
+        return 0
+    norm = "/" + path.strip("/")
+    if (hit := _dir_cache_get(norm)):
+        return hit
+    pid = 0
+    walked = ""
+    for name in [p for p in norm.strip("/").split("/") if p]:
+        walked += "/" + name
+        if (hit := _dir_cache_get(walked)):
+            pid = hit
+            continue
+        dirs = _list_dir(pid)
+        if name not in dirs:
+            return 0
+        pid = dirs[name]
+        _dir_cache_put(walked, pid)
+    return pid
+
+
 def mkdirs(path: str) -> int:
     """逐级确保目录存在，返回最深层 cid。path 形如 /媒体库/电影。"""
     if not path or not path.strip("/"):
@@ -666,7 +688,13 @@ def list_entries(cid: int, limit: int = 2000) -> list[dict]:
             if not name:
                 continue
             f_size = _to_int(f.get("s") or f.get("fs") or f.get("file_size"), 0)
-            out.append({"id": _file_id(f), "name": name, "is_dir": _is_dir_item(f), "size": f_size})
+            out.append({
+                "id": _file_id(f),
+                "name": name,
+                "is_dir": _is_dir_item(f),
+                "size": f_size,
+                "sha1": str(f.get("sha") or f.get("sha1") or ""),
+            })
         if not data:
             break
         offset += len(data)
@@ -906,12 +934,30 @@ def extract_target_folder_name(target_dir: str) -> str:
     return cleaned or candidate
 
 
+_AUTO_MOVE_SKIP_SCAN_DIRS = frozenset({
+    "@eadir", ".ds_store", "__macosx", "_待清理旧版", "_待清理重复",
+    "sample", "samples", "subs", "subtitles", "extras", "extra",
+    "bdmv", "certificate", "video_ts",
+})
+_AUTO_MOVE_SCAN_MAX_DIRS = 50
+
+
+def _should_skip_auto_move_dir(dir_name: str) -> bool:
+    low = (dir_name or "").strip().lower()
+    if not low or low in _AUTO_MOVE_SKIP_SCAN_DIRS:
+        return True
+    return any(extra in low for extra in _EXTRA_KEYWORDS)
+
+
 def move_matched_files_for_rule(source_dir: str, target_dir: str,
                                 keyword: str | None = None,
                                 scan_subdirs: bool = True,
                                 mode: str = "library",
                                 season_folder: bool = True,
-                                fuzzy_t2s: bool = True) -> tuple[int, list[str]]:
+                                fuzzy_t2s: bool = True,
+                                dedup_by_episode: bool | None = None,
+                                max_depth: int = 2,
+                                scan_cache: dict | None = None) -> tuple[int, list[str]]:
     """按映射规则排队移动满足条件的文件（做好 115 严格风控）：
 
     模式支持：
@@ -921,18 +967,27 @@ def move_matched_files_for_rule(source_dir: str, target_dir: str,
     - exact（一对一精确匹配模式）：目标目录作为具体剧目目录（如 /电视剧/折月亮 (2026)），仅移动匹配此剧名的文件。
 
     防风控与安全原则：
-    1. 只移动文件，文件夹绝不移动（is_dir == False）
+    1. 只移动文件，文件夹绝不移动（is_dir == False），忽略 BDMV/花絮/字幕独立文件夹
     2. 文件名必须包含中文（_CHINESE_CHAR_RE.search(name)）
     3. 媒体扩展名白名单（_MEDIA_EXTENSIONS），过滤广告与非媒体文件
     4. 排除预告/花絮/sample 等非正片文件
-    5. 分批 fs_move（每批最多 30 个），批次间休眠 0.5s * pace_factor()
-    6. 目标目录若已存在同名文件，跳过移动，防止覆盖或报错
-    7. 捕获 115 异常并检测风控关键词，一旦命中记录风控状态并抛出
+    5. 源目录穿透默认最多 2 层（兼容 剧名/Season 目录），带总目录配额上限与周期缓存复用
+    6. 分批 fs_move（每批最多 30 个），批次间休眠 0.5s * pace_factor()
+    7. 支持按季集防重（同剧目标已存在同季同集视频时跳过）及同名/副本防撞
+    8. 捕获 115 异常并检测风控关键词，一旦命中记录风控状态并抛出
     """
     if mode == "exact":
         kw = (keyword or extract_target_folder_name(target_dir)).strip()
         if not kw:
             raise ValueError(f"目标目录「{target_dir}」未包含有效文件夹名称，无法提取匹配关键词，不予执行")
+
+    if dedup_by_episode is None:
+        try:
+            dedup_ep = bool(db.get_setting("auto_move_dedup_by_episode", True))
+        except Exception:
+            dedup_ep = True
+    else:
+        dedup_ep = bool(dedup_by_episode)
 
     target_cid = mkdirs(target_dir)
     if target_cid is None:
@@ -948,13 +1003,23 @@ def move_matched_files_for_rule(source_dir: str, target_dir: str,
 
     pace = pace_factor()
     client = _get_client()
+    entries_cache: dict[int, list[dict]] = scan_cache.setdefault("dir_entries", {}) if scan_cache is not None else {}
+
+    def cached_list_entries(cid: int, limit: int = 2000, sleep_sec: float = 0.0) -> list[dict]:
+        if cid in entries_cache:
+            return entries_cache[cid]
+        if sleep_sec > 0 and pace > 0:
+            time.sleep(sleep_sec * pace)
+        res = list_entries(cid, limit=limit)
+        if scan_cache is not None:
+            entries_cache[cid] = res
+        return res
 
     drama_targets: list[dict] = []
 
     if mode == "library":
         # 总库智能分流模式：列出目标总库下的一级子文件夹构建剧目映射
-        time.sleep(0.2 * pace)
-        root_targets = list_entries(target_cid, limit=2000)
+        root_targets = cached_list_entries(target_cid, limit=2000, sleep_sec=0.2)
         sub_dramas = [e for e in root_targets if e.get("is_dir")]
         for sd in sub_dramas:
             sd_name = sd.get("name", "").strip()
@@ -995,38 +1060,65 @@ def move_matched_files_for_rule(source_dir: str, target_dir: str,
             "norm_cn_kw": norm_cn_subj,
         }]
 
-    # 1. 扫描源目录直属项
-    time.sleep(0.2 * pace)
-    root_entries = list_entries(source_cid, limit=2000)
+    # 1. 受控 BFS 扫描源目录（默认最多穿透 2 层：源目录 -> 剧名目录 -> Season X，并设总目录请求配额防风控）
+    effective_depth = 0 if not scan_subdirs else max(1, min(int(max_depth or 2), 3))
     candidate_files: list[dict] = []
-    sub_dirs: list[dict] = []
+    scan_queue: list[tuple[int, int, str]] = [(source_cid, 0, "")]
+    visited_scan_cids: set[int] = set()
+    scanned_subdirs = 0
 
-    for e in root_entries:
-        if not e.get("is_dir"):
-            candidate_files.append({**e, "_parent_cid": source_cid})
-        else:
-            sub_dirs.append(e)
+    while scan_queue:
+        cur_cid, cur_depth, cur_folder_name = scan_queue.pop(0)
+        if cur_cid in visited_scan_cids:
+            continue
+        visited_scan_cids.add(cur_cid)
+        try:
+            cur_entries = cached_list_entries(
+                cur_cid,
+                limit=2000 if cur_depth == 0 else 1000,
+                sleep_sec=0.2 if cur_depth == 0 else 0.25,
+            )
+        except Exception:
+            continue
 
-    # 2. 如果开启穿透子文件夹，扫描子目录内的文件（子目录本身绝不移动）
-    if scan_subdirs and sub_dirs:
-        for sd in sub_dirs[:30]:
-            time.sleep(0.3 * pace)
-            try:
-                sub_cid = int(str(sd["id"]))
-                sub_entries = list_entries(sub_cid, limit=1000)
-                for se in sub_entries:
-                    if not se.get("is_dir"):
-                        candidate_files.append({**se, "_parent_cid": sub_cid})
-            except Exception:
-                pass
+        # BDMV / VIDEO_TS 原盘目录保护：不拆散枚举内部流文件
+        if cur_depth > 0:
+            dir_names_low = {
+                str(x.get("name") or "").strip().lower()
+                for x in cur_entries if x.get("is_dir")
+            }
+            if dir_names_low & {"bdmv", "certificate", "video_ts"}:
+                continue
+
+        for e in cur_entries:
+            if not e.get("is_dir"):
+                candidate_files.append({
+                    **e,
+                    "_parent_cid": cur_cid,
+                    "_parent_folder_name": cur_folder_name,
+                })
+            elif cur_depth < effective_depth and scanned_subdirs < _AUTO_MOVE_SCAN_MAX_DIRS:
+                dname = str(e.get("name") or "").strip()
+                if _should_skip_auto_move_dir(dname):
+                    continue
+                try:
+                    sub_cid = int(str(e["id"]))
+                except (TypeError, ValueError):
+                    continue
+                if sub_cid in visited_scan_cids:
+                    continue
+                scanned_subdirs += 1
+                scan_queue.append((sub_cid, cur_depth + 1, dname))
 
     if not candidate_files:
         return 0, []
 
-    # 季子目录与目标文件查重缓存（原始文件名 + 剥离副本后缀规范名）
+    # 季子目录与目标文件查重缓存（原始文件名 + 剥离副本后缀规范名 + 按季集防重集合）
     drama_season_cache: dict[int, dict[int, int]] = {}
+    drama_season_names: dict[int, dict[int, str]] = {}
     dest_file_cache: dict[int, set[str]] = {}
     dest_canon_cache: dict[int, set[str]] = {}
+    dir_ep_cache: dict[tuple[int, str], set[tuple[int, int, str, str]]] = {}
 
     def get_dest_file_names(cid: int) -> tuple[set[str], set[str]]:
         if cid not in dest_file_cache:
@@ -1040,25 +1132,43 @@ def move_matched_files_for_rule(source_dir: str, target_dir: str,
                 dest_canon_cache[cid] = set()
         return dest_file_cache[cid], dest_canon_cache[cid]
 
+    def get_dir_episode_keys(cid: int, folder_hint: str = "") -> set[tuple[int, int, str, str]]:
+        ckey = (cid, folder_hint)
+        if ckey not in dir_ep_cache:
+            raw_names, _ = get_dest_file_names(cid)
+            eps: set[tuple[int, int, str, str]] = set()
+            for rname in raw_names:
+                if any(extra in rname.lower() for extra in _EXTRA_KEYWORDS):
+                    continue
+                for k in extract_episode_keys(rname, folder_hint=folder_hint):
+                    eps.add(k)
+            dir_ep_cache[ckey] = eps
+        return dir_ep_cache[ckey]
+
     def get_season_subdirs(drama_cid: int) -> dict[int, int]:
         if drama_cid not in drama_season_cache:
             mapping: dict[int, int] = {}
+            names_map: dict[int, str] = {}
             try:
-                time.sleep(0.2 * pace)
-                entries = list_entries(drama_cid, limit=100)
+                entries = cached_list_entries(drama_cid, limit=100, sleep_sec=0.2)
                 for item in entries:
                     if item.get("is_dir"):
-                        s_idx = parse_season_number(item.get("name", ""))
+                        sname = item.get("name", "")
+                        s_idx = parse_season_number(sname)
                         if s_idx is not None:
                             mapping[s_idx] = int(str(item["id"]))
+                            names_map[s_idx] = sname
             except Exception:
                 pass
             drama_season_cache[drama_cid] = mapping
+            drama_season_names[drama_cid] = names_map
         return drama_season_cache[drama_cid]
 
     seen_ids: set[str] = set()
-    # 同一目标目录下同一规范基准名 (final_dest_cid, clean_name) 聚类去重
-    candidates_by_group: dict[tuple[int, str], list[dict]] = {}
+    # 聚类去重：开启按季集防重且为带集号的视频时按 (drama_cid, ep_keys) 聚类择优，否则按 (final_dest_cid, clean_name)
+    candidates_by_group: dict[tuple, list[dict]] = {}
+    ep_skipped_cnt = 0
+    ep_skipped_samples: list[str] = []
 
     for f in candidate_files:
         fid = str(f.get("id"))
@@ -1095,13 +1205,17 @@ def move_matched_files_for_rule(source_dir: str, target_dir: str,
             continue
 
         # 目标 cid 确定：若开启按季归档且剧目下有季子目录，按季落入季目录
-        final_dest_cid = matched_drama["cid"]
+        drama_cid = matched_drama["cid"]
+        final_dest_cid = drama_cid
+        seasons_map: dict[int, int] = {}
         if season_folder:
             s_num, ep_num, _ = parse_episode(fname)
             if s_num is None and ep_num is not None:
-                s_num = 1  # 电视剧单集默认第 1 季
+                s_num = parse_season_number(f.get("_parent_folder_name", ""))
+                if s_num is None:
+                    s_num = 1  # 电视剧单集默认第 1 季
             if s_num is not None:
-                seasons_map = get_season_subdirs(matched_drama["cid"])
+                seasons_map = get_season_subdirs(drama_cid)
                 if s_num in seasons_map:
                     final_dest_cid = seasons_map[s_num]
 
@@ -1112,36 +1226,86 @@ def move_matched_files_for_rule(source_dir: str, target_dir: str,
         # 剥离 (1)、(2)、（1）、（2）等重复转存后缀，提取基准规范名与副本编号
         clean_name, dup_idx = strip_duplicate_suffix(fname)
 
-        # 目标目录查重：目标库已有原始文件或任一历史副本时，源目录全部副本均跳过
+        # 目标目录文件名查重：目标库已有原始文件或任一历史副本时，源目录全部副本均跳过
         dest_raw_names, dest_canon_names = get_dest_file_names(final_dest_cid)
         if fname in dest_raw_names or clean_name in dest_raw_names or clean_name in dest_canon_names:
             continue
 
+        # 按季集防重：同剧目标（剧集根目录 + 对应季目录）已有相同季集视频时跳过不同命名版本
+        ep_keys = extract_episode_keys(fname, folder_hint=f.get("_parent_folder_name", "")) if dedup_ep else []
+        if dedup_ep and ep_keys:
+            existing_eps = set(get_dir_episode_keys(drama_cid, ""))
+            if final_dest_cid != drama_cid:
+                s_hint = drama_season_names.get(drama_cid, {}).get(ep_keys[0][0], f"Season {ep_keys[0][0]}")
+                existing_eps |= get_dir_episode_keys(final_dest_cid, s_hint)
+            elif season_folder:
+                for ek_s in {k[0] for k in ep_keys}:
+                    if ek_s in seasons_map:
+                        s_hint = drama_season_names.get(drama_cid, {}).get(ek_s, f"Season {ek_s}")
+                        existing_eps |= get_dir_episode_keys(seasons_map[ek_s], s_hint)
+            if all(k in existing_eps for k in ep_keys):
+                ep_skipped_cnt += 1
+                if len(ep_skipped_samples) < 5:
+                    ep_skipped_samples.append(fname)
+                continue
+
         seen_ids.add(fid)
-        group_key = (final_dest_cid, clean_name)
+        if dedup_ep and ep_keys:
+            group_key = ("ep", drama_cid, tuple(ep_keys))
+        else:
+            group_key = ("name", final_dest_cid, clean_name)
+
         candidates_by_group.setdefault(group_key, []).append({
             "id": fid,
             "name": fname,
             "clean_name": clean_name,
             "dup_idx": dup_idx,
-            "size": int(f.get("s", 0) or 0),
+            "size": int(f.get("size", f.get("s", 0)) or 0),
+            "parent_cid": f.get("_parent_cid"),
             "dest_cid": final_dest_cid,
-            "drama_name": matched_drama["name"]
+            "drama_cid": drama_cid,
+            "drama_name": matched_drama["name"],
+            "ep_keys": ep_keys,
         })
 
     if not candidates_by_group:
+        if ep_skipped_cnt > 0:
+            logstream.info(
+                "auto_move",
+                f"按季集防重跳过 {ep_skipped_cnt} 个同季同集视频（目标已存在）：{'、'.join(ep_skipped_samples[:3])}",
+            )
         return 0, []
 
     # 择优提取：每组仅移动一份文件！
-    # 优先级：dup_idx 升序（0 原版最优先，其次 (1)、(2)）；同编号时大文件优先
+    # 优先级：dup_idx 升序（0 原版最优先，其次 (1)、(2)）；同编号时大文件优先（如 2160p 优于 1080p）
     files_to_move: list[dict] = []
-    for (dest_cid, clean_name), items in candidates_by_group.items():
+    batch_eps_added: dict[int, set[tuple[int, int, str, str]]] = {}
+    for gkey, items in candidates_by_group.items():
         items.sort(key=lambda x: (x["dup_idx"], -x["size"]))
-        best = items[0]  # 仅取最优的一份
+        best = items[0]
+        if len(items) > 1 and gkey[0] == "ep":
+            ep_skipped_cnt += len(items) - 1
+            for extra_it in items[1:]:
+                if len(ep_skipped_samples) < 5:
+                    ep_skipped_samples.append(extra_it["name"])
+        if gkey[0] == "ep" and best["ep_keys"]:
+            d_added = batch_eps_added.setdefault(best["drama_cid"], set())
+            if all(k in d_added for k in best["ep_keys"]):
+                ep_skipped_cnt += 1
+                if len(ep_skipped_samples) < 5:
+                    ep_skipped_samples.append(best["name"])
+                continue
+            d_added.update(best["ep_keys"])
         files_to_move.append(best)
-        dest_raw_names, dest_canon_names = get_dest_file_names(dest_cid)
+        dest_raw_names, dest_canon_names = get_dest_file_names(best["dest_cid"])
         dest_raw_names.add(best["name"])
-        dest_canon_names.add(clean_name)
+        dest_canon_names.add(best["clean_name"])
+
+    if ep_skipped_cnt > 0:
+        logstream.info(
+            "auto_move",
+            f"按季集防重跳过 {ep_skipped_cnt} 个同季同集视频（目标或本批已存在）：{'、'.join(ep_skipped_samples[:3])}",
+        )
 
     # 按目标目录分组移动
     by_dest: dict[int, list[dict]] = {}
@@ -1167,8 +1331,181 @@ def move_matched_files_for_rule(source_dir: str, target_dir: str,
                 moved_count += len(ids)
                 sample_names.extend([x["name"] for x in batch][:2])
                 note_115_ok()
+                if scan_cache is not None:
+                    entries_cache.pop(dest_cid, None)
+                    for x in batch:
+                        if x.get("parent_cid") is not None:
+                            entries_cache.pop(int(x["parent_cid"]), None)
             except Exception as e:
                 note_115_error(str(e))
                 raise
 
     return moved_count, sample_names[:5]
+
+
+# ---------- 整理刮削专用 115 底层读写与树扫描封装 ----------
+
+def _unwrap_write_resp(resp: dict, action_name: str) -> dict:
+    """统一校验 115 写接口响应并在风控出错时记入退避。"""
+    if not isinstance(resp, dict) or not resp.get("state"):
+        msg = (resp.get("error") or resp.get("msg") or str(resp)[:200]) if isinstance(resp, dict) else str(resp)[:200]
+        note_115_error(msg)
+        raise Pan115Error(f"{action_name}被 115 拒绝: {msg}")
+    note_115_ok()
+    return resp
+
+
+def rename_entry(fid: str | int, new_name: str) -> None:
+    """重命名单个文件或文件夹（经 pan_call 串行并清目录缓存）。"""
+    client = _get_client()
+    name = (new_name or "").strip()
+    if not name or len(name.encode("utf-8")) > 255:
+        raise Pan115Error(f"目标文件名不合法或超长: {name[:60]}")
+    try:
+        resp = pan_call(client.fs_rename, (str(fid), name))
+        _unwrap_write_resp(resp, "重命名")
+        clear_dir_cache()
+    except Pan115Error:
+        raise
+    except Exception as e:
+        note_115_error(str(e))
+        raise
+
+
+def move_entries(fids: list[str], target_cid: int) -> None:
+    """批量移动文件/文件夹到目标目录 cid（每批最多 30 个，串行节流）。"""
+    ids = [str(i) for i in fids if i]
+    if not ids:
+        return
+    client = _get_client()
+    for i in range(0, len(ids), 30):
+        chunk = ids[i:i + 30]
+        if i > 0:
+            time.sleep(0.4 * pace_factor())
+        try:
+            resp = pan_call(client.fs_move, chunk, pid=int(target_cid))
+            _unwrap_write_resp(resp, "移动")
+        except Pan115Error:
+            raise
+        except Exception as e:
+            note_115_error(str(e))
+            raise
+    clear_dir_cache()
+
+
+def delete_entries(fids: list[str]) -> None:
+    """将指定文件/空目录移入 115 回收站（用于洗版清理旧版或清理空目录）。"""
+    ids = [str(i) for i in fids if i]
+    if not ids:
+        return
+    client = _get_client()
+    try:
+        resp = pan_call(client.fs_delete, ids)
+        _unwrap_write_resp(resp, "移入回收站")
+        clear_dir_cache()
+    except Pan115Error:
+        raise
+    except Exception as e:
+        note_115_error(str(e))
+        raise
+
+
+def ensure_subdir(base_cid: int, rel_dir: str) -> int:
+    """从已知目录 base_cid 出发逐级查找或创建相对子目录，返回末级 cid。"""
+    cur = int(base_cid)
+    segs = [s.strip() for s in (rel_dir or "").strip("/").split("/") if s.strip()]
+    if not segs:
+        return cur
+    client = _get_client()
+    for name in segs:
+        children = _list_dir(cur)
+        if name in children:
+            cur = children[name]
+            continue
+        resp = pan_call(client.fs_mkdir, {"cname": name, "pid": cur})
+        if not resp.get("state"):
+            # 并发或同名重试再查一次目录列表
+            children = _list_dir(cur)
+            if name in children:
+                cur = children[name]
+                continue
+            msg = resp.get("error") or resp.get("msg") or str(resp)[:200]
+            note_115_error(msg)
+            raise Pan115Error(f"创建子目录「{name}」失败: {msg}")
+        data = resp.get("data") or {}
+        new_cid = data.get("cid") or data.get("file_id") or data.get("id") or resp.get("cid")
+        if new_cid:
+            cur = int(str(new_cid))
+        else:
+            cur = _list_dir(cur).get(name, 0)
+            if not cur:
+                raise Pan115Error(f"创建子目录「{name}」后未能定位 cid")
+        clear_dir_cache()
+    return cur
+
+
+def walk_media_tree(root_cid: int, root_path: str, max_depth: int = 4) -> dict:
+    """礼貌遍历 115 指定目录下的文件树（自动将 BDMV 原盘视为整体目录不拆散内部流文件）。
+
+    返回 {"files": [...], "bdmv_dirs": [...], "dirs": [...]}
+    """
+    norm_root = "/" + root_path.strip("/")
+    queue_dirs: list[tuple[int, str, list[str], int]] = [(int(root_cid), norm_root, [], 0)]
+    files_out: list[dict] = []
+    bdmv_out: list[dict] = []
+    dirs_out: list[dict] = []
+
+    while queue_dirs:
+        cur_cid, cur_path, rel_parents, depth = queue_dirs.pop(0)
+        if depth > max_depth:
+            continue
+        entries = list_entries(cur_cid, limit=2000)
+        dir_names_lower = {e["name"].lower() for e in entries if e.get("is_dir")}
+        # BDMV / VIDEO_TS 原盘保护：父目录视作原子整体，不再深入枚举 Stream/*.m2ts
+        if depth > 0 and ("bdmv" in dir_names_lower or "certificate" in dir_names_lower or "video_ts" in dir_names_lower):
+            bdmv_out.append({
+                "id": str(cur_cid),
+                "name": rel_parents[-1],
+                "path": cur_path,
+                "parent_dirs": rel_parents[:-1],
+                "parent_cid": "",  # 由外层记录填充
+                "is_bdmv": True,
+            })
+            continue
+
+        sibling_names = [e["name"] for e in entries if not e.get("is_dir")]
+        for e in entries:
+            if e.get("is_dir"):
+                if e["name"].lower() in ("@eadir", ".ds_store", "__macosx", "_待清理旧版"):
+                    continue
+                sub_path = f"{cur_path.rstrip('/')}/{e['name']}"
+                dirs_out.append({
+                    "id": str(e["id"]),
+                    "name": e["name"],
+                    "path": sub_path,
+                    "parent_cid": str(cur_cid),
+                    "depth": depth + 1,
+                })
+                if depth + 1 <= max_depth:
+                    queue_dirs.append((int(str(e["id"])), sub_path, rel_parents + [e["name"]], depth + 1))
+            else:
+                files_out.append({
+                    "id": str(e["id"]),
+                    "name": e["name"],
+                    "size": int(e.get("size") or 0),
+                    "sha1": e.get("sha1") or "",
+                    "parent_cid": str(cur_cid),
+                    "dir_path": cur_path,
+                    "parent_dirs": list(rel_parents),
+                    "sibling_names": sibling_names,
+                    "sibling_entries": [x for x in entries if not x.get("is_dir")],
+                })
+        if queue_dirs:
+            time.sleep(0.25 * pace_factor())
+
+    # 补全 bdmv_dirs 的 parent_cid
+    dir_parent_map = {d["path"]: d["parent_cid"] for d in dirs_out}
+    for b in bdmv_out:
+        b["parent_cid"] = dir_parent_map.get(b["path"], "")
+
+    return {"files": files_out, "bdmv_dirs": bdmv_out, "dirs": dirs_out}

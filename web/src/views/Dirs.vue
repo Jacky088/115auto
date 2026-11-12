@@ -94,14 +94,14 @@
           </div>
           <div class="header-actions">
             <el-tooltip
-              :disabled="systemRunning && computedAutoMoveEnabled"
-              :content="!systemRunning ? '系统处于停止状态，请先在顶栏点击「运行」启动系统' : '定时整理功能当前为关闭状态，请先开启左侧总开关'"
+              :disabled="systemRunning && computedAutoMoveEnabled && !isMediaMutexActive"
+              :content="!systemRunning ? '系统处于停止状态，请先在顶栏点击「运行」启动系统' : (isMediaMutexActive ? `当前正在执行「${activeMode === 'organize' ? '目录整理' : '媒体刮削'}」，已开启写锁保护，请稍后再试` : '定时整理功能当前为关闭状态，请先开启左侧总开关')"
               placement="top"
             >
               <span>
                 <el-button
                   type="primary"
-                  :disabled="!systemRunning || !computedAutoMoveEnabled"
+                  :disabled="!systemRunning || !computedAutoMoveEnabled || isMediaMutexActive"
                   :loading="runningMove"
                   @click="runAutoMoveNow"
                 >
@@ -113,6 +113,16 @@
           </div>
         </div>
       </template>
+
+      <el-alert
+        v-if="isMediaMutexActive"
+        type="warning"
+        show-icon
+        :closable="false"
+        style="margin-bottom: 14px"
+        :title="`互斥锁定中：当前正在执行「${activeMode === 'organize' ? '目录整理' : '媒体刮削'}」`"
+        description="为防止多个 115 目录写任务并发冲突，定时分流归档暂不可同时运行；待整理/刮削任务完成或安全中断后将自动解除锁定。"
+      />
 
       <!-- 规则说明与风控隔离保护 -->
       <div class="organize-notice-banner">
@@ -190,9 +200,17 @@
             <div class="feature-switch-pill" :class="{ 'is-active': moveSettings.auto_move_scan_subdirs }">
               <div class="feature-meta">
                 <span class="feature-name">穿透子文件夹</span>
-                <span class="feature-hint">检索提取源目录下各级子文件夹文件</span>
+                <span class="feature-hint">检索源目录下最多 2 层子文件夹（兼容 剧名/Season 目录）</span>
               </div>
               <el-switch v-model="moveSettings.auto_move_scan_subdirs" @change="saveMoveSettings" />
+            </div>
+
+            <div class="feature-switch-pill" :class="{ 'is-active': moveSettings.auto_move_dedup_by_episode }">
+              <div class="feature-meta">
+                <span class="feature-name">按季集防重</span>
+                <span class="feature-hint">同剧目标已有同季同集视频时跳过，防多版本重复</span>
+              </div>
+              <el-switch v-model="moveSettings.auto_move_dedup_by_episode" @change="saveMoveSettings" />
             </div>
 
             <div class="feature-switch-pill" :class="{ 'is-active': moveSettings.auto_move_notify }">
@@ -524,6 +542,7 @@ const moveSettings = ref({
   auto_move_interval_hours: 6,
   auto_move_fixed_times: ['06:00', '12:00', '18:00'],
   auto_move_scan_subdirs: true,
+  auto_move_dedup_by_episode: true,
   auto_move_notify: true,
   auto_move_last_run: 0,
   auto_move_mode: 'library',
@@ -531,6 +550,9 @@ const moveSettings = ref({
   auto_move_fuzzy_t2s: true,
 })
 const gateState = ref('idle')
+const activeMode = ref('none')
+const exclusiveBusy = ref(false)
+const isMediaMutexActive = computed(() => exclusiveBusy.value && ['organize', 'scrape'].includes(activeMode.value))
 const drainStatus = ref({ unfinished: 0, queued: 0, retrying: 0, running: 0, submitted: 0 })
 const nextRuns = ref([])
 const newFixedTime = ref('')
@@ -657,11 +679,13 @@ const loadAutoMove = async () => {
       moveSettings.value = { ...moveSettings.value, ...data.settings }
     }
     gateState.value = data.gate_state || 'idle'
+    activeMode.value = data.active_mode || 'none'
+    exclusiveBusy.value = !!data.exclusive_busy
     drainStatus.value = data.drain_status || { unfinished: 0, queued: 0, retrying: 0, running: 0, submitted: 0 }
     nextRuns.value = data.next_runs || []
 
     if (gateState.value !== 'idle') {
-      runningMove.value = true
+      runningMove.value = !['organize', 'scrape'].includes(activeMode.value)
       startAutoMovePolling()
     } else if (!runningMove.value) {
       stopAutoMovePolling()
@@ -675,8 +699,11 @@ const startAutoMovePolling = () => {
   if (pollTimer) return
   pollTimer = setInterval(async () => {
     try {
+      const wasRunningMove = runningMove.value
       const { data } = await api.get('/api/auto-move/rules')
       gateState.value = data.gate_state || 'idle'
+      activeMode.value = data.active_mode || 'none'
+      exclusiveBusy.value = !!data.exclusive_busy
       drainStatus.value = data.drain_status || { unfinished: 0, queued: 0, retrying: 0, running: 0, submitted: 0 }
       nextRuns.value = data.next_runs || []
       if (gateState.value === 'idle') {
@@ -684,11 +711,15 @@ const startAutoMovePolling = () => {
         runningMove.value = false
         moveRules.value = data.rules || []
         if (data.settings) moveSettings.value = { ...moveSettings.value, ...data.settings }
-        if (data.last_result && data.last_result.total_moved !== undefined) {
-          ElMessage.success(`排队整理完成：共处理 ${data.last_result.total_rules} 条规则，移动 ${data.last_result.total_moved} 个文件（转存已恢复）`)
-        } else {
-          ElMessage.success('排队整理流程已全部完成（转存已恢复）')
+        if (wasRunningMove) {
+          if (data.last_result && data.last_result.total_moved !== undefined) {
+            ElMessage.success(`排队整理完成：共处理 ${data.last_result.total_rules} 条规则，移动 ${data.last_result.total_moved} 个文件（转存已恢复）`)
+          } else {
+            ElMessage.success('排队整理流程已全部完成（转存已恢复）')
+          }
         }
+      } else {
+        runningMove.value = !['organize', 'scrape'].includes(activeMode.value)
       }
     } catch (_) {}
   }, 2500)

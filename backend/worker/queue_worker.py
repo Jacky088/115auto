@@ -147,11 +147,9 @@ def _dedup_by_name(cid: int, title: str, snap: dict = None) -> str:
     if not cid:
         return ""
     try:
-        names = _get_dir_names_cached(cid)
+        names = _get_dir_names_cached(cid) or []
     except Exception:
-        return ""  # 检查失败不阻塞转存
-    if not names:
-        return ""
+        names = []  # 目录为空或检索失败时，仍继续核对 organized_records 账本防重
 
     names_raw = {_norm_filename(n): n for n in names}
     names_base = {_norm_entry_name(n): n for n in names if _norm_entry_name(n)}
@@ -193,6 +191,16 @@ def _dedup_by_name(cid: int, title: str, snap: dict = None) -> str:
                 if fn_base and fn_base in names_base:
                     if len(fn_base) > 3 or not fn_base.isdigit():
                         return f"目标目录已存在「{names_base[fn_base]}」（同名去重），如需强制转存请在「系统设置」关闭「同名去重」后重试"
+                if fn_base and len(fn_base) >= 5 and not re.fullmatch(r"(?:s?\d+)?(?:e|ep)?\d+", fn_base, re.I):
+                    try:
+                        rec_rows = db.query(
+                            "SELECT orig_name, dest_name FROM organized_records WHERE undone=0 ORDER BY id DESC LIMIT 800"
+                        )
+                        for rr in rec_rows:
+                            if _norm_entry_name(rr["orig_name"]) == fn_base:
+                                return f"曾转存并整理为「{rr['dest_name']}」（账本去重），如需强制转存请关闭「同名去重」后重试"
+                    except Exception:
+                        pass
 
     return ""
 
@@ -290,6 +298,17 @@ def _process_one(job: dict):
         except Exception as e:
             logstream.warn("transfer", f"追更预检目标目录失败（本次全量提交，宁多勿漏）: {e}")
         existing_n = {_norm_filename(n) for n in existing}
+        try:
+            org_recs = db.query("SELECT orig_name, dest_name FROM organized_records WHERE undone=0 ORDER BY id DESC LIMIT 800")
+            for rr in org_recs:
+                on_n = _norm_filename(rr["orig_name"])
+                dn_n = _norm_filename(rr["dest_name"])
+                if on_n and len(on_n) >= 5 and not re.fullmatch(r"(?:s?\d+)?(?:e|ep)?\d+(?:\.[a-z0-9]+)?", on_n, re.I):
+                    existing_n.add(on_n)
+                if dn_n and len(dn_n) >= 5:
+                    existing_n.add(dn_n)
+        except Exception:
+            pass
         new_files = [f for f in snap["files"]
                      if f.get("fn") and f.get("fid")
                      and _norm_filename(f["fn"]) not in existing_n]
@@ -449,14 +468,7 @@ def _process_one(job: dict):
     jobs.notify_transfer(title, job.get("category", ""), job.get("channel", ""),
                          target, size=snap["total_size"], kind="share",
                          file_count=file_total)
-    # 6. 转存后整理（可选）：把剧集文件按季归入 Season N 子目录
-    if db.get_setting("organize_enabled", False) and top_ids:
-        try:
-            moved = pan.organize_seasons(cid)
-            if moved:
-                logstream.info("transfer", f"已整理 {moved} 个文件到 Season 子目录（{target}）")
-        except Exception as e:
-            logstream.warn("transfer", f"转存后整理失败（不影响转存结果）: {e}")
+    # 说明：转存后统一通过「整理刮削」队列互斥执行整理重命名，此处不再直接并发调 organize_seasons。
 
 
 def _is_generic_name(name: str) -> bool:

@@ -88,3 +88,38 @@ def test_poster_proxy_fallback_to_direct():
             assert call_count["count"] == 2  # 第一次代理失败，第二次直连成功
             # 验证写入缓存
             assert "/fallback.jpg" in manage._POSTER_CACHE
+
+
+def test_login_sets_poster_cookie_for_tmdb_and_local_media_paths(tmp_path):
+    from backend import auth, database as db
+
+    meta_root = tmp_path / "poster_meta_root"
+    show_dir = meta_root / "TestShow (2024)"
+    show_dir.mkdir(parents=True)
+    (show_dir / "poster.jpg").write_bytes(b"\xff\xd8\xff\xe0POSTER_OK")
+    db.set_setting("media_local_meta_dir", str(meta_root))
+
+    tid = db.insert(
+        "INSERT INTO media_tasks(task_kind,orig_name,status,local_meta_dir,created_at,updated_at) VALUES('scrape','a.mkv','done',?,1,1)",
+        (str(show_dir),),
+    )
+
+    db.set_setting("web_username", "admin")
+    with patch("backend.auth.verify_password", return_value=True):
+        login_resp = client.post("/api/auth/login", json={"username": "admin", "password": "any"})
+    assert login_resp.status_code == 200
+
+    set_cookies = login_resp.headers.get_list("set-cookie")
+    assert any("path=/api/tmdb/poster" in c.lower() for c in set_cookies)
+    assert any("path=/api/media/poster" in c.lower() for c in set_cookies)
+
+    # 通过登录下发的 sa_poster Cookie 访问本地海报接口应直接放行
+    local_resp = client.get(f"/api/media/poster/local?task_id={tid}&file=poster.jpg")
+    assert local_resp.status_code == 200
+    assert local_resp.content.startswith(b"\xff\xd8\xff")
+
+    logout_resp = client.post("/api/auth/logout")
+    assert logout_resp.status_code == 200
+    del_cookies = logout_resp.headers.get_list("set-cookie")
+    assert any("path=/api/tmdb/poster" in c.lower() for c in del_cookies)
+    assert any("path=/api/media/poster" in c.lower() for c in del_cookies)

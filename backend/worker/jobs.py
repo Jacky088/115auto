@@ -21,22 +21,61 @@ LOG_RETENTION_SECONDS = 7 * 86400  # 日志保留 7 天，到期永久删除
 _tg_notify_queue: queue.Queue = queue.Queue(maxsize=1000)
 
 
-def enqueue_tg_message(text: str) -> bool:
-    """将一条文本通知加入 TG 发送队列。"""
+def enqueue_tg_message(
+    text: str,
+    reply_markup: dict | None = None,
+    on_sent=None,
+    gap_sec: float | None = None,
+) -> bool:
+    """将一条文本通知加入 TG 发送队列（可选内联键盘、发送后回调与自定义节流间隔）。"""
     token = str(db.get_setting("notify_token", "") or "").strip()
     chat_id = str(db.get_setting("notify_chat_id", "") or "").strip()
     if not token or not chat_id:
         return False
     try:
-        _tg_notify_queue.put_nowait({
+        item = {
             "type": "text",
             "token": token,
             "chat_id": chat_id,
             "text": text,
-        })
+        }
+        if reply_markup is not None:
+            item["reply_markup"] = reply_markup
+        if on_sent is not None:
+            item["on_sent"] = on_sent
+        if gap_sec is not None:
+            item["gap_sec"] = float(gap_sec)
+        _tg_notify_queue.put_nowait(item)
         return True
     except queue.Full:
         logstream.warn("system", "TG 推送队列已满（1000 条），放弃排队新消息")
+        return False
+
+
+def enqueue_tg_edit(
+    message_id: int,
+    text: str,
+    reply_markup: dict | None = None,
+    chat_id: str = "",
+    gap_sec: float = 0.6,
+) -> bool:
+    """将一次原位卡片编辑（editMessageText）纳入严格串行队列，避免与推卡竞态或触发 TG 限流。"""
+    token = str(db.get_setting("notify_token", "") or "").strip()
+    target_chat = str(chat_id or db.get_setting("notify_chat_id", "") or "").strip()
+    if not token or not target_chat or int(message_id or 0) <= 0:
+        return False
+    try:
+        _tg_notify_queue.put_nowait({
+            "type": "edit",
+            "token": token,
+            "chat_id": target_chat,
+            "message_id": int(message_id),
+            "text": text,
+            "reply_markup": reply_markup,
+            "gap_sec": float(gap_sec),
+        })
+        return True
+    except queue.Full:
         return False
 
 
@@ -85,15 +124,37 @@ async def tg_notify_worker():
             while retries < max_retries and not success:
                 try:
                     if item_type == "text":
+                        payload = {
+                            "chat_id": str(chat_id),
+                            "text": item["text"],
+                            "disable_web_page_preview": True,
+                        }
+                        if item.get("reply_markup") is not None:
+                            payload["reply_markup"] = item["reply_markup"]
                         async with httpx.AsyncClient(proxy=proxy, timeout=20.0) as client:
                             resp = await client.post(
                                 f"https://api.telegram.org/bot{token}/sendMessage",
-                                json={
-                                    "chat_id": str(chat_id),
-                                    "text": item["text"],
-                                    "disable_web_page_preview": True,
-                                },
+                                json=payload,
                             )
+                    elif item_type == "edit":
+                        payload = {
+                            "chat_id": str(chat_id),
+                            "message_id": int(item["message_id"]),
+                            "text": item["text"],
+                            "disable_web_page_preview": True,
+                            "reply_markup": item.get("reply_markup") or {"inline_keyboard": []},
+                        }
+                        async with httpx.AsyncClient(proxy=proxy, timeout=20.0) as client:
+                            resp = await client.post(
+                                f"https://api.telegram.org/bot{token}/editMessageText",
+                                json=payload,
+                            )
+                        if resp.status_code == 400 and (
+                            "message is not modified" in resp.text
+                            or "message to edit not found" in resp.text
+                        ):
+                            success = True
+                            break
                     else:
                         async with httpx.AsyncClient(proxy=proxy, timeout=60.0) as client:
                             resp = await client.post(
@@ -103,6 +164,14 @@ async def tg_notify_worker():
                             )
 
                     if resp.status_code == 200:
+                        cb = item.get("on_sent")
+                        if callable(cb):
+                            try:
+                                msg_id = int((resp.json().get("result") or {}).get("message_id") or 0)
+                                if msg_id > 0:
+                                    await asyncio.to_thread(cb, msg_id, str(chat_id))
+                            except Exception as cbe:
+                                logstream.warn("system", f"TG 发送后回调执行异常: {cbe}")
                         success = True
                         break
                     elif resp.status_code == 429:
@@ -130,7 +199,10 @@ async def tg_notify_worker():
 
             _tg_notify_queue.task_done()
             # 严格限速保护：TG 单聊限额为 1 条/秒，故每条消息发送完毕后至少等待 1.0 秒（文件 1.5 秒）
-            await asyncio.sleep(1.5 if item_type == "document" else 1.0)
+            delay = item.get("gap_sec")
+            if delay is None:
+                delay = 1.5 if item_type == "document" else 1.0
+            await asyncio.sleep(max(0.4, float(delay)))
         except asyncio.CancelledError:
             break
         except Exception as e:
@@ -402,6 +474,7 @@ def stop_system(reason: str):
     db.set_setting("running", False)
     db.set_setting("auto_stop_reason", reason)  # 供前端仪表盘展示，用户修正后清除
     db.set_setting("auto_move_enabled", False)  # 顶部停止时，自动归档功能联动关闭
+    transfer_gate.request_cancel()
     logstream.error("system", f"⛔ 系统已自动停止：{reason}（自动归档功能已联动关闭）")
     logstream.warn("system", "请按上述原因修正后，点击网页顶栏「开始运行」恢复"
                              "（队列与配置已保留，任务不会丢失）。")
@@ -540,6 +613,7 @@ async def health_check_loop():
 MSG_RETENTION_SECONDS = 30 * 86400   # 消息去重记录保留 30 天（防重复转存的依据，需长于日志）
 HITS_RETENTION_SECONDS = 90 * 86400  # 黑名单命中记录保留 90 天（低频数据，留足复核期）
 DUP_RETENTION_SECONDS = 7 * 86400    # 重复/跳过任务记录保留 7 天（失败的正片内容成功/失败台账长期保留）
+MEDIA_TASK_RETENTION_SECONDS = 30 * 86400  # 已完成/失败/忽略的整理刮削记录保留 30 天；待确认/已跳过保留供随时提交
 
 
 def _cleanup_once():
@@ -548,7 +622,7 @@ def _cleanup_once():
     分批删除（每批 2000 条）：单事务删几十万行会长时间持有 SQLite 写锁，
     把整个应用（页面接口、WS 心跳、日志写入）全部卡住；分批把每次持锁时间压到毫秒级。
     """
-    total = [0, 0, 0, 0, 0, 0]
+    total = [0, 0, 0, 0, 0, 0, 0]
     # messages 表是 (channel, message_id) 复合主键没有 id 列，统一用 SQLite 隐式 rowid
     from datetime import date, timedelta
     cutoff_day = (date.today() - timedelta(days=30)).isoformat()
@@ -569,6 +643,10 @@ def _cleanup_once():
         ("DELETE FROM transfers WHERE rowid IN (SELECT rowid FROM transfers WHERE status='skipped'"
          " AND created_at<? LIMIT 2000)",
          time.time() - DUP_RETENTION_SECONDS, 5),
+        ("DELETE FROM media_tasks WHERE rowid IN (SELECT rowid FROM media_tasks"
+         " WHERE status IN ('done','failed','ignored')"
+         " AND COALESCE(finished_at, updated_at, created_at) < ? LIMIT 2000)",
+         time.time() - MEDIA_TASK_RETENTION_SECONDS, 6),
     )
     for sql, cutoff, idx in jobs:
         while True:
@@ -586,12 +664,15 @@ async def log_cleanup_loop():
     - 黑名单命中记录：保留 90 天（低频写入，留足人工复核期）
     - 每日额度记录：保留 30 天
     - 重复/跳过任务：保留 7 天（success/failed 台账永久保留）
+    - 已结束的整理刮削记录（done/failed/ignored）：保留 30 天（待确认/已跳过永久保留）
     """
-    logstream.info("system", "数据自动清理任务启动（日志 7 天 / 消息 30 天 / 命中记录 90 天 / 重复与跳过 7 天）")
+    logstream.info("system", "数据自动清理任务启动（日志 7 天 / 消息 30 天 / 命中记录 90 天 / 重复与跳过 7 天 / 已结束刮削 30 天）")
+    # 延迟首轮清理，避免刚启动时与初始化/短生命周期请求争用写锁
+    await asyncio.sleep(60)
     while True:
         try:
             # 清理是批量 DB 写操作：放线程池执行，不阻塞事件循环
-            deleted, stale_msgs, stale_hits, stale_quota, stale_dup, stale_skip = \
+            deleted, stale_msgs, stale_hits, stale_quota, stale_dup, stale_skip, stale_media = \
                 await asyncio.to_thread(_cleanup_once)
             if deleted:
                 logstream.info("system", f"已清理 {deleted} 条过期日志（超过 7 天）")
@@ -603,6 +684,8 @@ async def log_cleanup_loop():
                 logstream.info("system", f"已清理 {stale_quota} 条过期每日额度记录（超过 30 天）")
             if stale_dup or stale_skip:
                 logstream.info("system", f"已清理 {stale_dup + stale_skip} 条过期重复/跳过任务记录（超过 7 天）")
+            if stale_media:
+                logstream.info("system", f"已清理 {stale_media} 条已结束的整理刮削历史（超过 30 天）")
         except Exception as e:
             logstream.error("system", f"数据清理失败: {logstream.exc(e)}")
         await asyncio.sleep(3600)
@@ -979,7 +1062,7 @@ async def auto_backup_loop():
                         content = raw
                         fname = f"autosave_backup_{time.strftime('%Y%m%d_%H%M%S')}.json"
                         mime = "application/json"
-                        caption = f"🗄 定时自动备份（设置/频道/规则/订阅/转存记录，{len(content) // 1024}KB）"
+                        caption = f"🗄 定时自动备份（核心设置/业务规则/转存与整理台账，{len(content) // 1024}KB）"
 
                     # 通过 TG 推送队列排队发送
                     ok = enqueue_tg_document(fname, content, mime, caption)
@@ -1129,9 +1212,14 @@ async def execute_auto_move(trigger: str = "scheduled") -> dict:
             _last_auto_move_result = res
             return res
 
-        # 整理准备：停止接收新转存任务，排队消化现有转存队列（包括云下载与重试）直到全部完成终态，再开启移动
-        await transfer_gate.prepare_and_drain_transfers()
+        # 整理准备：获取四方独占门禁 → 排空现有转存队列（包括云下载与重试）直到全部完成终态，再开启移动
+        ok_gate, busy_msg = transfer_gate.try_begin_exclusive("auto_move")
+        if not ok_gate:
+            return {"ok": False, "msg": busy_msg}
         try:
+            drained = await transfer_gate.prepare_and_drain_transfers(mode="auto_move")
+            if drained is False or transfer_gate.is_cancel_requested():
+                return {"ok": False, "cancelled": True, "msg": "排队等待期间已取消"}
             details = []
 
             def _load_move_opts():
@@ -1140,10 +1228,12 @@ async def execute_auto_move(trigger: str = "scheduled") -> dict:
                     db.get_setting("auto_move_mode", "library"),
                     bool(db.get_setting("auto_move_season_folder", True)),
                     bool(db.get_setting("auto_move_fuzzy_t2s", True)),
+                    bool(db.get_setting("auto_move_dedup_by_episode", True)),
                 )
 
-            scan_subdirs, global_mode, season_folder, fuzzy_t2s = await asyncio.to_thread(_load_move_opts)
+            scan_subdirs, global_mode, season_folder, fuzzy_t2s, dedup_by_episode = await asyncio.to_thread(_load_move_opts)
             risk_aborted = False
+            scan_cache: dict = {}
 
             for r in rules:
                 s_dir = r.get("source_dir", "").strip()
@@ -1167,6 +1257,9 @@ async def execute_auto_move(trigger: str = "scheduled") -> dict:
                         mode=effective_mode,
                         season_folder=season_folder,
                         fuzzy_t2s=fuzzy_t2s,
+                        dedup_by_episode=dedup_by_episode,
+                        max_depth=2,
+                        scan_cache=scan_cache,
                     )
                     await asyncio.to_thread(
                         db.execute,
@@ -1291,6 +1384,8 @@ async def auto_move_loop():
                     should_trigger = True
 
             if should_trigger:
+                if transfer_gate.is_exclusive_busy():
+                    continue
                 if not in_win:
                     logstream.info("auto_move", "⏰ 当前处于防风控时段外，自动文件整理暂停触发，将在进入允许时段后自动执行")
                     continue

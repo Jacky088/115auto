@@ -462,6 +462,19 @@ async def catch_up(c: TelegramClient):
         logstream.error("userbot", f"断线补漏异常: {logstream.exc(e)}")
 
 
+async def disconnect_for_restore():
+    """恢复备份/迁移包前先断开当前 Userbot 连接，确保 session 文件可安全替换。"""
+    global client
+    async with _lock:
+        old = client
+        client = None
+        if old is not None:
+            try:
+                await old.disconnect()
+            except Exception:
+                pass
+
+
 async def start_if_configured():
     """应用启动时：若已配置且 session 存在，自动连接。"""
     global client

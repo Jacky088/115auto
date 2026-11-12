@@ -12,6 +12,7 @@ const routes = [
       { path: 'channels', redirect: '/account' },
       { path: 'subscriptions', component: () => import('./views/Subscriptions.vue') },
       { path: 'dirs', component: () => import('./views/Dirs.vue') },
+      { path: 'media', component: () => import('./views/OrganizeScrape.vue') },
       { path: 'match', component: () => import('./views/MatchRules.vue') },
       { path: 'rules', redirect: '/dirs' },       // 旧地址兼容
       { path: 'blacklist', redirect: '/match' },  // 旧地址兼容

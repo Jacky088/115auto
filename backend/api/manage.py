@@ -54,12 +54,14 @@ def _client_ip(request: Request) -> str:
 
 
 def _set_poster_cookie(response: Response, request: Request, token: str) -> None:
-    """下发海报鉴权 Cookie（HttpOnly + SameSite=Lax，路径仅海报接口）。"""
-    response.set_cookie(
-        POSTER_COOKIE, token, max_age=auth.TOKEN_TTL,
-        httponly=True, samesite="lax", path="/api/tmdb/poster",
-        secure=request.url.scheme == "https",
-    )
+    """下发海报鉴权 Cookie（HttpOnly + SameSite=Lax，路径限定于 TMDB 与本地媒体海报接口）。"""
+    secure_flag = request.url.scheme == "https"
+    for p in ("/api/tmdb/poster", "/api/media/poster"):
+        response.set_cookie(
+            POSTER_COOKIE, token, max_age=auth.TOKEN_TTL,
+            httponly=True, samesite="lax", path=p,
+            secure=secure_flag,
+        )
 
 
 def _like_escape(s: str) -> str:
@@ -98,7 +100,8 @@ def login(body: dict, request: Request, response: Response):
 @router.post("/auth/logout")
 def logout(response: Response):
     """退出登录：清除海报 Cookie（前端同时丢弃 localStorage 中的 token）。"""
-    response.delete_cookie(POSTER_COOKIE, path="/api/tmdb/poster")
+    for p in ("/api/tmdb/poster", "/api/media/poster"):
+        response.delete_cookie(POSTER_COOKIE, path=p)
     return {"ok": True}
 
 
@@ -223,9 +226,11 @@ def system_start(_=Depends(require_user)):
 @router.post("/system/stop")
 def system_stop(_=Depends(require_user)):
     """停止运行：暂停监听与转存（队列与配置保留）。联动关闭自动整理功能。"""
+    from ..core import transfer_gate
     db.set_setting("running", False)
     db.set_setting("auto_stop_reason", "")  # 手动停止时清除自动停止标记
     db.set_setting("auto_move_enabled", False)  # 顶部停止时，自动归档功能联动关闭
+    transfer_gate.request_cancel()
     logstream.warn("system", "⏸ 系统已停止运行（自动归档功能已联动关闭，开关已重置为禁用状态）")
     return {"ok": True}
 
@@ -1444,7 +1449,8 @@ def _norm_setting(k: str, v):
             return 10
     if k == "auto_move_mode":
         return "exact" if str(v).strip().lower() == "exact" else "library"
-    if k in ("auto_move_season_folder", "auto_move_fuzzy_t2s", "auto_move_enabled", "auto_move_scan_subdirs", "auto_move_notify"):
+    if k in ("auto_move_season_folder", "auto_move_fuzzy_t2s", "auto_move_enabled",
+             "auto_move_scan_subdirs", "auto_move_notify", "auto_move_dedup_by_episode"):
         return bool(v)
     if k == "auto_move_interval_hours":
         try:
@@ -1480,7 +1486,8 @@ def get_settings(_=Depends(require_user)):
             "bark_url", "pushplus_token", "pushplus_topic", "ntfy_url", "ntfy_token",
             "digest_enabled", "digest_time",
             "auto_backup_enabled", "auto_backup_days", "auto_backup_time",
-            "api_token", "auto_move_mode", "auto_move_season_folder", "auto_move_fuzzy_t2s", "auto_move_enabled"]
+            "api_token", "auto_move_mode", "auto_move_season_folder", "auto_move_fuzzy_t2s",
+            "auto_move_dedup_by_episode", "auto_move_enabled"]
     # 未配置过的键必须回代码默认值而非 null：前端会把 null 当「关」显示，
     # 且保存时 bool(null)=false 落库，把默认开启的功能（如每日摘要）悄悄关掉
     defaults = {"enable_share_transfer": True, "enable_offline_download": True,
@@ -1493,7 +1500,7 @@ def get_settings(_=Depends(require_user)):
                 "organize_enabled": False, "share_update_enabled": True,
                 "digest_enabled": True, "digest_time": "21:00",
                 "auto_backup_enabled": False, "auto_backup_days": 7, "auto_backup_time": "04:00",
-                "auto_move_enabled": False,
+                "auto_move_enabled": False, "auto_move_dedup_by_episode": True,
                 "running_timeout_min": 60}
     return {k: db.get_setting(k, defaults.get(k)) for k in keys}
 
@@ -1517,7 +1524,8 @@ def put_settings(body: dict, _=Depends(require_user)):
                "bark_url", "pushplus_token", "pushplus_topic", "ntfy_url", "ntfy_token",
                "digest_enabled", "digest_time",
                "auto_backup_enabled", "auto_backup_days", "auto_backup_time",
-               "api_token", "auto_move_mode", "auto_move_season_folder", "auto_move_fuzzy_t2s", "auto_move_enabled"}
+               "api_token", "auto_move_mode", "auto_move_season_folder", "auto_move_fuzzy_t2s",
+               "auto_move_dedup_by_episode", "auto_move_enabled"}
     # 先整体校验再落库：任一字段非法时不写入，避免半新半旧配置。
     # null 表示「前端从未配置过该键」，跳过不写，防止 bool(null)=false 把默认开启的功能关掉
     updates = {k: _norm_setting(k, v) for k, v in body.items()
@@ -1743,27 +1751,57 @@ def export_logs(date: str = "", _=Depends(require_user)):
 
 
 # ---------- 备份 ----------
+def _format_backup_stats_text(stats: dict) -> str:
+    return (
+        f"设置 {stats.get('settings', 0)} 项、频道 {stats.get('channels', 0)} 个、"
+        f"规则 {stats.get('rules', 0)} 条、路由 {stats.get('routes', 0)} 条、"
+        f"黑名单 {stats.get('blacklist', 0)} 条、订阅 {stats.get('subscriptions', 0)} 条、"
+        f"转存记录 {stats.get('transfers', 0)} 条、自动整理 {stats.get('auto_move_rules', 0)} 条、"
+        f"整理刮削 {stats.get('media_rules', 0)} 条、操作账本 {stats.get('organized_records', 0)} 条、"
+        f"待刮削任务 {stats.get('media_tasks', 0)} 条"
+    )
+
+
+async def _read_backup_request(request: Request) -> dict:
+    """从请求体解析备份（同时兼容 JSON 与 .json.gz / .zip 原始字节上传）。"""
+    from urllib.parse import unquote
+
+    raw = await request.body()
+    fname = unquote(request.headers.get("x-backup-filename", "") or "")
+    try:
+        return db.parse_backup_bytes(raw, filename=fname)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@router.post("/backup/preview")
+@router.post("/settings/backup/preview")
+async def backup_preview(request: Request, _=Depends(require_user)):
+    """只读校验并预览备份文件（支持 .json / .json.gz / .zip），用于网页恢复确认弹窗。"""
+    data = await _read_backup_request(request)
+    return {"ok": True, "summary": db.backup_counts(data)}
+
+
 @router.post("/backup/restore")
 @router.post("/settings/backup/restore")
-def backup_restore(body: dict, _=Depends(require_user)):
-    """从备份 JSON 恢复数据（整体覆盖）。
+async def backup_restore(request: Request, _=Depends(require_user)):
+    """从备份数据恢复业务数据（整体覆盖）。
 
-    body 即备份文件内容（_meta/settings/channels/...）；恢复在事务内完成，
+    同时支持直接 POST 备份 JSON 以及原始 .json.gz / .zip 字节流；恢复在事务内完成，
     失败自动回滚；恢复后系统回到停止状态，需手动点「开始运行」。
     """
-    stats = db.restore_payload(body)
-    logstream.info("system", f"已从备份恢复数据：设置 {stats['settings']} 项、频道 {stats['channels']} 个、"
-                             f"规则 {stats['rules']} 条、订阅 {stats['subscriptions']} 条、"
-                             f"转存记录 {stats['transfers']} 条")
+    data = await _read_backup_request(request)
+    try:
+        stats = db.restore_payload(data)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    logstream.info("system", f"已从备份恢复数据：{_format_backup_stats_text(stats)}")
     return {"ok": True, "stats": stats}
 
 
 @router.get("/backup/export")
 def backup_export(_=Depends(require_user)):
-    """导出全部数据（设置/频道/规则/黑名单/订阅/转存记录）为 JSON 备份文件。
-
-    与 TG 定时自动备份共用 db.backup_payload，保证两者内容一致。
-    """
+    """导出全部业务数据为 JSON 备份文件，与 TG 定时自动备份共用 db.backup_payload。"""
     import json
     from fastapi.responses import Response
     payload = db.backup_payload()
@@ -1778,9 +1816,164 @@ def backup_export(_=Depends(require_user)):
 
 @router.post("/backup/import")
 async def backup_import(_=Depends(require_user)):
-    """备份导入为预留接口：网页与 TG Bot 均支持 JSON 恢复。"""
-    raise HTTPException(400, "网页「系统设置」与 TG Bot 均支持 JSON 恢复，"
-                             "请在网页上传备份文件，或直接把备份 JSON 发送给 Bot")
+    """备份导入为预留接口：网页与 TG Bot 均支持 JSON / GZ / ZIP 恢复。"""
+    raise HTTPException(400, "网页「系统设置」与 TG Bot 均支持 .json / .json.gz / .zip 恢复，"
+                             "请在网页上传备份文件，或直接把备份文件发送给 Bot")
+
+
+# ---------- 全量迁移包（网页端流式打包导出 / 恢复） ----------
+async def _stream_bundle_to_temp(request: Request):
+    """将大体积 ZIP 迁移包按块直接落盘到 DATA_DIR/.tmp_backup，避免整包读入内存。"""
+    import shutil
+    import tempfile
+    from pathlib import Path
+    from ..core import migration_bundle
+
+    work_dir = Path(tempfile.mkdtemp(dir=migration_bundle.tmp_backup_root(), prefix="bundle_imp_"))
+    zip_path = work_dir / "upload.zip"
+    total = 0
+    try:
+        with open(zip_path, "wb") as f:
+            async for chunk in request.stream():
+                if not chunk:
+                    continue
+                total += len(chunk)
+                if total > migration_bundle.MAX_BUNDLE_UPLOAD_BYTES:
+                    raise HTTPException(413, "迁移包体积超过 2 GB 上限")
+                f.write(chunk)
+        if total == 0:
+            raise HTTPException(400, "上传的迁移包文件为空")
+        return work_dir, zip_path
+    except Exception:
+        shutil.rmtree(work_dir, ignore_errors=True)
+        raise
+
+
+@router.get("/backup/bundle/estimate")
+@router.get("/settings/backup/bundle/estimate")
+async def backup_bundle_estimate(_=Depends(require_user)):
+    """统计数据库、凭据文件与本地元数据体积，用于导出迁移包前参考。"""
+    from ..core import migration_bundle
+    return await asyncio.to_thread(migration_bundle.estimate_bundle)
+
+
+@router.post("/backup/bundle/export")
+@router.post("/settings/backup/bundle/export")
+async def backup_bundle_export(body: dict, request: Request, _=Depends(require_user)):
+    """流式导出整机迁移 ZIP 包（可选是否含凭据、本地元数据范围及是否精简日志/缓存）。"""
+    import shutil
+    from fastapi.responses import StreamingResponse
+    from starlette.background import BackgroundTask
+    from ..core import migration_bundle
+
+    include_creds = bool(body.get("include_credentials", False))
+    meta_mode = str(body.get("meta_mode") or "nfo").strip().lower()
+    slim_db = bool(body.get("slim_db", True))
+
+    if include_creds:
+        ip = _client_ip(request)
+        if auth.login_throttled(ip):
+            raise HTTPException(429, "密码错误次数过多，请 1 分钟后再试", headers={"Retry-After": "60"})
+        pwd = str(body.get("password") or "")
+        stored_hash = str(db.get_setting("web_password_hash", "") or "")
+        if not pwd or not auth.verify_password(pwd, stored_hash):
+            auth.record_login_fail(ip)
+            raise HTTPException(400, "导出含凭据与会话的迁移包前，必须输入正确的当前登录密码")
+
+    try:
+        work_dir, zip_path, fname, manifest = await asyncio.to_thread(
+            migration_bundle.build_migration_bundle,
+            include_creds,
+            meta_mode,
+            slim_db,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+    def _iter_file():
+        with open(zip_path, "rb") as fh:
+            while True:
+                chunk = fh.read(64 * 1024)
+                if not chunk:
+                    break
+                yield chunk
+
+    logstream.info(
+        "system",
+        f"已导出全量迁移包（凭据={'是' if include_creds else '否'}，元数据={meta_mode}，瘦身={'是' if slim_db else '否'}，"
+        f".nfo={manifest['meta_nfo_count']}，图片/杂项={manifest['meta_asset_count']}）",
+    )
+    return StreamingResponse(
+        _iter_file(),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{fname}"',
+            "Content-Length": str(zip_path.stat().st_size),
+        },
+        background=BackgroundTask(shutil.rmtree, work_dir, ignore_errors=True),
+    )
+
+
+@router.post("/backup/bundle/preview")
+@router.post("/settings/backup/bundle/preview")
+async def backup_bundle_preview(request: Request, _=Depends(require_user)):
+    """流式接收并预览 ZIP 迁移包内容（只读，不修改系统数据）。"""
+    import shutil
+    from ..core import migration_bundle
+
+    work_dir, zip_path = await _stream_bundle_to_temp(request)
+    try:
+        info = await asyncio.to_thread(migration_bundle.inspect_migration_bundle, zip_path, work_dir / "stage")
+        info.pop("staged_db", None)
+        info.pop("manifest", None)
+        return {"ok": True, "preview": info}
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+
+@router.post("/backup/bundle/restore")
+@router.post("/settings/backup/bundle/restore")
+async def backup_bundle_restore(
+    request: Request,
+    response: Response,
+    restore_credentials: bool = True,
+    restore_meta: bool = True,
+    _=Depends(require_user),
+):
+    """流式接收并从 ZIP 迁移包恢复整机状态（系统需处于停止状态）。"""
+    import shutil
+    from ..core import migration_bundle
+
+    try:
+        db.ensure_restore_idle_guard()
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+    work_dir, zip_path = await _stream_bundle_to_temp(request)
+    try:
+        res = await migration_bundle.apply_migration_bundle(
+            zip_path,
+            restore_credentials=restore_credentials,
+            restore_meta=restore_meta,
+        )
+        out = {"ok": True, **res}
+        if res.get("restored_credentials"):
+            new_token = auth.make_token(_web_username())
+            _set_poster_cookie(response, request, new_token)
+            out["token"] = new_token
+        logstream.info(
+            "system",
+            f"已从全量迁移包恢复：{_format_backup_stats_text(res['counts'])}；"
+            f"恢复凭据={'是' if res['restored_credentials'] else '否'}，"
+            f"恢复本地元数据={res['meta_files_restored']} 个文件",
+        )
+        return out
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
 
 
 # ---------- auto_move (定时文件整理) ----------
@@ -1809,8 +2002,11 @@ def get_auto_move_rules(_=Depends(require_user)):
             "auto_move_mode": str(db.get_setting("auto_move_mode", "library") or "library"),
             "auto_move_season_folder": bool(db.get_setting("auto_move_season_folder", True)),
             "auto_move_fuzzy_t2s": bool(db.get_setting("auto_move_fuzzy_t2s", True)),
+            "auto_move_dedup_by_episode": bool(db.get_setting("auto_move_dedup_by_episode", True)),
         },
         "is_organizing": transfer_gate.is_auto_move_running(),
+        "active_mode": transfer_gate.get_exclusive_status().get("active_mode", "none"),
+        "exclusive_busy": transfer_gate.is_exclusive_busy(),
         "gate_state": transfer_gate.get_gate_state(),
         "drain_status": transfer_gate.get_drain_status(),
         "next_runs": jobs.compute_next_runs(),
@@ -1932,6 +2128,8 @@ def update_auto_move_settings(body: dict, _=Depends(require_user)):
         db.set_setting("auto_move_season_folder", bool(body["auto_move_season_folder"]))
     if "auto_move_fuzzy_t2s" in body:
         db.set_setting("auto_move_fuzzy_t2s", bool(body["auto_move_fuzzy_t2s"]))
+    if "auto_move_dedup_by_episode" in body:
+        db.set_setting("auto_move_dedup_by_episode", bool(body["auto_move_dedup_by_episode"]))
     return {"ok": True, "next_runs": jobs.compute_next_runs()}
 
 
@@ -1942,8 +2140,17 @@ async def run_auto_move_now(_=Depends(require_user)):
     if not bool(db.get_setting("auto_move_enabled", False)):
         raise HTTPException(400, "定时文件整理功能未开启，请先打开功能总开关后再执行！")
 
+    excl = transfer_gate.get_exclusive_status()
+    active_mode = excl.get("active_mode", "none")
+    if excl.get("exclusive_busy") and active_mode in ("organize", "scrape"):
+        mode_cn = "媒体整理" if active_mode == "organize" else "媒体刮削"
+        raise HTTPException(
+            409,
+            f"当前正在执行「{mode_cn}」，同一时刻仅允许运行一个独占任务，请等待其完成或安全中断后再执行分流归档！",
+        )
+
     lock = jobs._get_auto_move_lock()
-    if lock.locked() or transfer_gate.get_gate_state() != "idle":
+    if lock.locked() or excl.get("exclusive_busy") or transfer_gate.get_gate_state() != "idle":
         return {
             "ok": True,
             "already_running": True,

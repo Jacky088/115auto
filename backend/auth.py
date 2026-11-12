@@ -129,6 +129,13 @@ def change_password(new_password: str):
         pass
 
 
+def clear_secret_cache():
+    """清空内存缓存的 JWT 密钥，下次校验/签发时从 SECRET_FILE 重新读取。"""
+    global _jwt_secret
+    with _secret_lock:
+        _jwt_secret = ""
+
+
 def rotate_secret():
     """轮换 JWT 签名密钥：改密/改用户名后使所有已签发 token 立即失效。
 

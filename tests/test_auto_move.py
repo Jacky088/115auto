@@ -230,7 +230,8 @@ def test_mixed_cn_en_matching():
 
         with patch.object(pan, "list_entries", side_effect=fake_list_entries):
             moved_count, samples = pan.move_matched_files_for_rule(
-                "/自动转存", "/电视剧/Doctor X: 白色黑手党时代 (2026)", mode="exact", scan_subdirs=False
+                "/自动转存", "/电视剧/Doctor X: 白色黑手党时代 (2026)",
+                mode="exact", scan_subdirs=False, dedup_by_episode=False,
             )
             # m1, m2, m3 应该成功移动！
             assert moved_count == 3
@@ -681,6 +682,291 @@ def test_duplicate_suffix_deduplication():
     print("test_duplicate_suffix_deduplication passed.")
 
 
+def test_extract_episode_keys_unit():
+    # 1. 不同命名但同季同集的 剧集文件应生成一致的 key
+    k1 = episode.extract_episode_keys("走马上任.2026.S01E01.2160p.WEB-DL.H265.DDP.2.0.mkv")
+    k2 = episode.extract_episode_keys("走马上任.S01E01.第1集.2160p.WEB-DL.H265.DDP 2.0.mkv")
+    assert k1 == [(1, 1, "ep", "")]
+    assert k1 == k2
+
+    # 2. 中文“第1集”无季号时默认第1季；若文件夹提示 Season 2 则归第2季
+    assert episode.extract_episode_keys("第1集.mkv") == [(1, 1, "ep", "")]
+    assert episode.extract_episode_keys("第1集.mkv", folder_hint="Season 2") == [(2, 1, "ep", "")]
+
+    # 3. 字幕与非视频文件跳过防重提取
+    assert episode.extract_episode_keys("走马上任.S01E01.chs.ass") == []
+    assert episode.extract_episode_keys("走马上任.S01E01.srt") == []
+
+    # 4. 多集区间展开
+    assert episode.extract_episode_keys("庆余年.S01E01-E02.mkv") == [
+        (1, 1, "ep", ""),
+        (1, 2, "ep", ""),
+    ]
+
+    # 5. Part1/Part2 与 上/下 区分；剧名中的“上”（如 走马上任）绝不误判为 part:上
+    assert episode.extract_episode_keys("走马上任.S01E03.mkv") == [(1, 3, "ep", "")]
+    assert episode.extract_episode_keys("走马上任.S01E03.Part1.mkv") == [(1, 3, "ep", "part:1")]
+    assert episode.extract_episode_keys("走马上任.S01E03.Part2.mkv") == [(1, 3, "ep", "part:2")]
+    assert episode.extract_episode_keys("走马上任.S01E03上.mkv") == [(1, 3, "ep", "part:上")]
+    assert episode.extract_episode_keys("走马上任.S01E03(下).mkv") == [(1, 3, "ep", "part:下")]
+
+
+def test_two_layer_bfs_pruning_budget_and_cache():
+    # 目录树：
+    # 100 (/最近接收)
+    # ├── 110 (走马上任 (2026), depth=1)
+    # │   ├── 111 (Season 1, depth=2) -> 放走马上任文件（应到达）
+    # │   │   └── 1110 (DeepExtra, depth=3) -> 超出 2 层（不应穿透）
+    # │   ├── 112 (花絮, depth=2) -> 剪枝关键词跳过
+    # │   └── 114 (sample, depth=2) -> 剪枝跳过
+    # ├── 120 (纯享花絮, depth=1) -> 剪枝跳过
+    # └── 130 (走马上任 原盘, depth=1) -> 含 BDMV 子目录，整盘原子目录跳过
+    #     └── 113 (BDMV, depth=2)
+    tree = {
+        100: [
+            {"id": 110, "name": "走马上任 (2026)", "is_dir": True, "size": 0},
+            {"id": 120, "name": "纯享花絮", "is_dir": True, "size": 0},
+            {"id": 130, "name": "走马上任 原盘", "is_dir": True, "size": 0},
+        ],
+        110: [
+            {"id": 111, "name": "Season 1", "is_dir": True, "size": 0},
+            {"id": 112, "name": "花絮", "is_dir": True, "size": 0},
+            {"id": 114, "name": "sample", "is_dir": True, "size": 0},
+        ],
+        111: [
+            {"id": 1110, "name": "DeepExtra", "is_dir": True, "size": 0},
+            {"id": "f_s1e1", "name": "走马上任.S01E01.mkv", "is_dir": False, "size": 1000},
+        ],
+        1110: [
+            {"id": "f_deep", "name": "走马上任.S01E99.mkv", "is_dir": False, "size": 1000},
+        ],
+        112: [{"id": "f_extra", "name": "走马上任.S01E02.mkv", "is_dir": False, "size": 1000}],
+        113: [{"id": "f_bdmv", "name": "走马上任.S01E03.mkv", "is_dir": False, "size": 1000}],
+        114: [{"id": "f_sample", "name": "走马上任.S01E04.mkv", "is_dir": False, "size": 1000}],
+        120: [{"id": "f_dir_extra", "name": "走马上任.S01E05.mkv", "is_dir": False, "size": 1000}],
+        130: [
+            {"id": 113, "name": "BDMV", "is_dir": True, "size": 0},
+            {"id": "f_iso_sib", "name": "走马上任.S01E06.mkv", "is_dir": False, "size": 1000},
+        ],
+        200: [
+            {"id": 210, "name": "走马上任 (2026)", "is_dir": True, "size": 0},
+        ],
+        210: [
+            {"id": 211, "name": "Season 1", "is_dir": True, "size": 0},
+        ],
+        211: [],
+    }
+    list_calls = []
+
+    def fake_list_entries(cid, limit=2000):
+        list_calls.append(cid)
+        return list(tree.get(cid, []))
+
+    def fake_list_names(cid, limit=2000):
+        return {e["name"] for e in tree.get(cid, []) if not e["is_dir"]}
+
+    fake_client = MagicMock()
+    fake_client.fs_move.return_value = {"state": True}
+    scan_cache = {}
+
+    with patch("backend.pan115.client._get_client", return_value=fake_client), \
+         patch("backend.pan115.client.mkdirs", side_effect=lambda p: 100 if "最近接收" in p else 200), \
+         patch("backend.pan115.client.list_entries", side_effect=fake_list_entries), \
+         patch("backend.pan115.client.list_file_names", side_effect=fake_list_names), \
+         patch("backend.pan115.client.pace_factor", return_value=0.0), \
+         patch("time.sleep", return_value=None):
+        moved1, samples1 = pan.move_matched_files_for_rule(
+            source_dir="/最近接收",
+            target_dir="/电视剧",
+            mode="library",
+            scan_subdirs=True,
+            max_depth=2,
+            scan_cache=scan_cache,
+        )
+        assert moved1 == 1
+        assert samples1 == ["走马上任.S01E01.mkv"]
+        # 不得访问 depth=3 (1110) 以及被剪枝目录 (112, 113, 114, 120)
+        for forbidden_cid in (1110, 112, 113, 114, 120):
+            assert forbidden_cid not in list_calls
+
+        # 第二条规则（exact 精确匹配另一部不存在的剧）共享同一个 source_dir 与 scan_cache
+        # 由于 111 上轮发生过 fs_move 已失效，111 会重新拉取一次，而 100 与 110 应命中缓存不重查！
+        prev_len = len(list_calls)
+        moved2, _ = pan.move_matched_files_for_rule(
+            source_dir="/最近接收",
+            target_dir="/电视剧/不存在的剧",
+            keyword="不存在的剧",
+            mode="exact",
+            scan_subdirs=True,
+            max_depth=2,
+            scan_cache=scan_cache,
+        )
+        assert moved2 == 0
+        new_calls = list_calls[prev_len:]
+        assert 100 not in new_calls
+        assert 110 not in new_calls
+        assert 111 in new_calls  # 上轮移动过文件，失效重扫
+        # 第三条规则（无任何移动后）连 111 也缓存命中：0 次请求
+        prev_len2 = len(list_calls)
+        moved3, _ = pan.move_matched_files_for_rule(
+            source_dir="/最近接收",
+            target_dir="/电视剧/依然不存在的剧",
+            keyword="依然不存在的剧",
+            mode="exact",
+            scan_subdirs=True,
+            max_depth=2,
+            scan_cache=scan_cache,
+        )
+        assert moved3 == 0
+        assert list_calls[prev_len2:] == []
+
+    # 目录预算上限保护测试
+    many_tree = {
+        100: [{"id": 1000 + i, "name": f"剧集{i}", "is_dir": True, "size": 0} for i in range(10)],
+    }
+    for i in range(10):
+        many_tree[1000 + i] = []
+    budget_calls = []
+
+    with patch("backend.pan115.client._get_client", return_value=fake_client), \
+         patch("backend.pan115.client._AUTO_MOVE_SCAN_MAX_DIRS", 3), \
+         patch("backend.pan115.client.mkdirs", side_effect=lambda p: 100 if "最近接收" in p else 200), \
+         patch("backend.pan115.client.list_entries", side_effect=lambda c, limit=2000: (budget_calls.append(c) or many_tree.get(c, []))), \
+         patch("backend.pan115.client.list_file_names", return_value=set()), \
+         patch("backend.pan115.client.pace_factor", return_value=0.0), \
+         patch("time.sleep", return_value=None):
+        pan.move_matched_files_for_rule(
+            source_dir="/最近接收",
+            target_dir="/电视剧/剧集",
+            keyword="剧集",
+            mode="exact",
+            scan_subdirs=True,
+            max_depth=2,
+        )
+        # 仅 root(100) + 最多 3 个子目录 = 4 次 list_entries
+        assert len(budget_calls) == 4
+
+
+def test_episode_dedup_across_different_naming():
+    # 还原用户截图场景：
+    # 源目录: /最近接收/走马上任 (2026)/Season 1 与 /最近接收/走马上任 (2026)/Season 2
+    # 目标剧目录: /电视剧/走马上任 (2026) 已有 S01E01, S01E02 (命名不同), S01E03
+    tree = {
+        100: [{"id": 110, "name": "走马上任 (2026)", "is_dir": True, "size": 0}],
+        110: [
+            {"id": 111, "name": "Season 1", "is_dir": True, "size": 0},
+            {"id": 112, "name": "Season 2", "is_dir": True, "size": 0},
+        ],
+        111: [
+            # 已存在 S01E01（目标叫 走马上任.2026.S01E01...），应跳过
+            {"id": "f_dup_e01", "name": "走马上任.S01E01.第1集.2160p.WEB-DL.H265.DDP 2.0.mkv", "is_dir": False, "size": 2000},
+            # 多集连播 E01-E02 均已存在，应跳过
+            {"id": "f_range_12", "name": "走马上任.S01E01-E02.mkv", "is_dir": False, "size": 4000},
+            # 多集连播 E02-E04（E04 缺失），不应整条误杀，应允许移动
+            {"id": "f_range_24", "name": "走马上任.S01E02-E04.mkv", "is_dir": False, "size": 4500},
+            # 同批重复：两个 S01E05（不同命名），还有一个带 (1) 副本后缀但更大，优先非副本+大体积的 2160p.mkv
+            {"id": "f_e05_small", "name": "走马上任.S01E05.1080p.mkv", "is_dir": False, "size": 1000},
+            {"id": "f_e05_big", "name": "走马上任.S01E05.2160p.mkv", "is_dir": False, "size": 5000},
+            {"id": "f_e05_copy", "name": "走马上任.S01E05.2160p(1).mkv", "is_dir": False, "size": 6000},
+            # 全新集数 S01E22：应正常移动
+            {"id": "f_e22", "name": "走马上任.S01E22.第22集.2160p.WEB-DL.H265.DDP 2.0.mkv", "is_dir": False, "size": 2200},
+            # 字幕文件不参与剧集防重拦截：应正常移动
+            {"id": "f_sub", "name": "走马上任.S01E01.第1集.chs.ass", "is_dir": False, "size": 50},
+        ],
+        112: [
+            # Season 2/第1集 与 Season 1 E01 季号不同，不应碰撞跳过
+            {"id": "f_s2e1", "name": "走马上任.第1集.mkv", "is_dir": False, "size": 3000},
+        ],
+        200: [{"id": 210, "name": "走马上任 (2026)", "is_dir": True, "size": 0}],
+        210: [
+            {"id": 211, "name": "Season 1", "is_dir": True, "size": 0},
+            {"id": "t_e01", "name": "走马上任.2026.S01E01.2160p.WEB-DL.H265.DDP.2.0.mkv", "is_dir": False, "size": 1900},
+            {"id": "t_e02", "name": "走马上任.2026.S01E02.2160p.WEB-DL.H265.DDP.2.0.mkv", "is_dir": False, "size": 1900},
+        ],
+        211: [
+            {"id": "t_e03", "name": "走马上任.2026.S01E03.2160p.WEB-DL.H265.DDP.2.0.mkv", "is_dir": False, "size": 1900},
+        ],
+        212: [],
+    }
+
+    def fake_list_entries(cid, limit=2000):
+        return list(tree.get(cid, []))
+
+    def fake_list_names(cid, limit=2000):
+        return {e["name"] for e in tree.get(cid, []) if not e["is_dir"]}
+
+    moved_calls = []
+    fake_client = MagicMock()
+    fake_client.fs_move.side_effect = lambda fids, pid=None: (moved_calls.append((list(fids), pid)) or {"state": True})
+
+    with patch("backend.pan115.client._get_client", return_value=fake_client), \
+         patch("backend.pan115.client.mkdirs", side_effect=lambda p: 100 if "最近接收" in p else 200), \
+         patch("backend.pan115.client.list_entries", side_effect=fake_list_entries), \
+         patch("backend.pan115.client.list_file_names", side_effect=fake_list_names), \
+         patch("backend.pan115.client.pace_factor", return_value=0.0), \
+         patch("time.sleep", return_value=None):
+        moved, samples = pan.move_matched_files_for_rule(
+            source_dir="/最近接收",
+            target_dir="/电视剧",
+            mode="library",
+            scan_subdirs=True,
+            season_folder=True,
+            dedup_by_episode=True,
+            max_depth=2,
+        )
+
+    moved_fids = {str(fid) for fids, _pid in moved_calls for fid in fids}
+    assert moved == 5
+    assert moved_fids == {"f_range_24", "f_e05_big", "f_e22", "f_sub", "f_s2e1"}
+    assert "f_dup_e01" not in moved_fids
+    assert "f_range_12" not in moved_fids
+    assert "f_e05_small" not in moved_fids
+    assert "f_e05_copy" not in moved_fids
+
+    # 关闭开关（dedup_by_episode=False）时，不同命名的 S01E01 与小体积版 S01E05 都会按文件名策略移动
+    moved_calls_off = []
+    fake_client_off = MagicMock()
+    fake_client_off.fs_move.side_effect = lambda fids, pid=None: (moved_calls_off.append((list(fids), pid)) or {"state": True})
+
+    with patch("backend.pan115.client._get_client", return_value=fake_client_off), \
+         patch("backend.pan115.client.mkdirs", side_effect=lambda p: 100 if "最近接收" in p else 200), \
+         patch("backend.pan115.client.list_entries", side_effect=fake_list_entries), \
+         patch("backend.pan115.client.list_file_names", side_effect=fake_list_names), \
+         patch("backend.pan115.client.pace_factor", return_value=0.0), \
+         patch("time.sleep", return_value=None):
+        moved_off, _ = pan.move_matched_files_for_rule(
+            source_dir="/最近接收",
+            target_dir="/电视剧",
+            mode="library",
+            scan_subdirs=True,
+            season_folder=True,
+            dedup_by_episode=False,
+            max_depth=2,
+        )
+    moved_fids_off = {str(fid) for fids, _pid in moved_calls_off for fid in fids}
+    assert "f_dup_e01" in moved_fids_off
+    assert "f_e05_small" in moved_fids_off
+    assert "f_e05_big" in moved_fids_off
+    assert moved_off >= 7
+
+
+def test_auto_move_dedup_setting_api():
+    db.init()
+    db.set_setting("running", "true")
+
+    rules_resp = manage.get_auto_move_rules()
+    assert rules_resp["settings"]["auto_move_dedup_by_episode"] is True
+    assert manage.get_settings()["auto_move_dedup_by_episode"] is True
+
+    manage.update_auto_move_settings({"auto_move_dedup_by_episode": False})
+    assert manage.get_auto_move_rules()["settings"]["auto_move_dedup_by_episode"] is False
+    assert db.get_setting("auto_move_dedup_by_episode") is False
+
+    manage.put_settings({"auto_move_dedup_by_episode": True})
+    assert manage.get_settings()["auto_move_dedup_by_episode"] is True
+    assert manage.get_auto_move_rules()["settings"]["auto_move_dedup_by_episode"] is True
+
+
 if __name__ == "__main__":
     test_parse_season_number()
     test_filename_season_parsing()
@@ -696,4 +982,8 @@ if __name__ == "__main__":
     test_api_endpoints()
     test_security_audit_cases()
     test_duplicate_suffix_deduplication()
+    test_extract_episode_keys_unit()
+    test_two_layer_bfs_pruning_budget_and_cache()
+    test_episode_dedup_across_different_naming()
+    test_auto_move_dedup_setting_api()
     print("ALL TESTS IN test_auto_move.py PASSED SUCCESSFULLY!")

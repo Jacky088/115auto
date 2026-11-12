@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import auth, config, database as db
-from .api import account, ext, files, manage, ws
+from .api import account, ext, files, manage, media, ws
 from .core import logstream
 from .tg import episode_backfill, polling, userbot
 from .worker import bot_commands, jobs, queue_worker
@@ -16,10 +16,20 @@ db.init()
 _background: list[asyncio.Task] = []
 
 # 请求体上限：未认证端点（如登录）也可被超大 JSON 在小内存 NAS 上直接 OOM；
-# 恢复备份的 body 放宽到 20MB（与 Bot 端 10MB 检查对齐并留余量）
+# 轻量备份放宽到 20MB；流式全量迁移包端点按磁盘流写控制，放宽到 2GB。
 _MAX_BODY_BYTES = 1 * 1024 * 1024
-_MAX_BODY_EXEMPT_PREFIXES = ("/api/backup/",)
+_MAX_BODY_EXEMPT_PREFIXES = ("/api/backup/", "/api/settings/backup/")
 _MAX_BODY_EXEMPT = 20 * 1024 * 1024
+_MAX_BUNDLE_PREFIXES = ("/api/backup/bundle/", "/api/settings/backup/bundle/")
+_MAX_BUNDLE_BODY_BYTES = 2 * 1024 * 1024 * 1024
+
+
+def _body_limit_for_path(path: str) -> int:
+    if path.startswith(_MAX_BUNDLE_PREFIXES):
+        return _MAX_BUNDLE_BODY_BYTES
+    if path.startswith(_MAX_BODY_EXEMPT_PREFIXES):
+        return _MAX_BODY_EXEMPT
+    return _MAX_BODY_BYTES
 
 
 def _harden_credential_files():
@@ -40,9 +50,13 @@ def _harden_credential_files():
 async def lifespan(app: FastAPI):
     _harden_credential_files()
     auth.ensure_initial_password()
+    from .core import migration_bundle
+    migration_bundle.cleanup_stale_tmp_dirs()
     logstream.info("system", "115 自动转存助手启动")
     # 进程重启恢复：上一轮被中断的 running 任务重新排队，否则会永久卡在「转存中」
     recovered = db.execute("UPDATE transfers SET status='queued' WHERE status='running'")
+    db.execute("UPDATE media_tasks SET status='queued' WHERE task_kind='scrape' AND status='running' AND selected_tmdb_id IS NOT NULL")
+    db.execute("UPDATE media_tasks SET status='failed', error='进程重启中断，请重新扫描或重试' WHERE status='running'")
     queued = db.query("SELECT count(*) c FROM transfers WHERE status='queued'", one=True)["c"]
     if recovered or queued:
         logstream.info("transfer",
@@ -66,6 +80,8 @@ async def lifespan(app: FastAPI):
     _background.append(asyncio.create_task(jobs.tg_notify_worker()))
     _background.append(asyncio.create_task(bot_commands.bot_command_loop()))
     _background.append(asyncio.create_task(jobs.auto_move_loop()))
+    from .worker import media_worker
+    _background.append(asyncio.create_task(media_worker.media_organize_loop()))
     yield
     # 优雅停机：先取消后台任务并等待退出，再断开 Userbot —— 保证 Telethon session
     # 与 SQLite（WAL）完整落盘，避免强杀后 session 文件损坏需要重新登录
@@ -73,6 +89,7 @@ async def lifespan(app: FastAPI):
         t.cancel()
     if _background:
         await asyncio.gather(*_background, return_exceptions=True)
+        _background.clear()
     try:
         if userbot.client is not None:
             await userbot.client.disconnect()
@@ -108,7 +125,7 @@ class _BodyLimitMiddleware:
         if scope["type"] != "http":
             return await self.app(scope, receive, send)
         path = scope.get("path", "")
-        limit = self.exempt_limit if path.startswith(self.exempt_prefixes) else self.limit
+        limit = _body_limit_for_path(path)
         received = 0
 
         async def limited_receive():
@@ -138,8 +155,7 @@ async def security_headers(request, call_next):
     """基础安全响应头 + 请求体上限：防 MIME 嗅探 / 防 iframe 嵌套 / 限制 Referer 外泄 /
     防未认证端点被超大 JSON OOM。不加严格 CSP（Element Plus 依赖内联样式，SPA 场景收错会白屏）。
     """
-    limit = (_MAX_BODY_EXEMPT
-             if request.url.path.startswith(_MAX_BODY_EXEMPT_PREFIXES) else _MAX_BODY_BYTES)
+    limit = _body_limit_for_path(request.url.path)
     cl = request.headers.get("content-length")
     if cl and cl.isdigit() and int(cl) > limit:
         return JSONResponse({"detail": "请求体过大"}, status_code=413)
@@ -159,6 +175,8 @@ async def security_headers(request, call_next):
 
 
 app.include_router(manage.router)
+app.include_router(media.router)
+app.include_router(media.poster_router)
 app.include_router(ext.router)
 app.include_router(account.router)
 app.include_router(files.router)
