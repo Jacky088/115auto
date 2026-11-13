@@ -63,7 +63,7 @@ def pace_factor() -> int:
 _api_lock = threading.RLock()
 _last_api_at = -1000.0
 _MIN_API_GAP = 0.25  # 任意两次串行 115 请求间的最小间隔（秒）
-_MAX_API_GAP = 1.5   # 含风控退避倍数后的单步上限（兼顾交互响应速度）
+_MAX_API_GAP = 2.0   # 含风控退避倍数后的单步上限（须 ≥ _MIN_API_GAP × 8 档，否则最高退避档被截断失效）
 
 # 专用线程池：隔离阻塞型 115/网络后台任务，防止占满默认 asyncio 线程池
 # （小核容器上默认仅 5~6 个线程）而饿死 TG 频道轮询、Userbot 与本地 SQLite 读写。
@@ -344,9 +344,15 @@ def check_login(force: bool = False) -> dict:
                 result = {"ok": False, "err": str(resp)[:200]}
                 ttl = _LOGIN_BAD_TTL
         except Exception as e:
-            db.set_setting("cookie_ok", False)
-            result = {"ok": False, "err": str(e)[:200]}
-            ttl = _LOGIN_BAD_TTL
+            # 网络类异常（超时/断连/DNS）≠ Cookie 失效：不翻转 cookie_ok，
+            # 返回 ok=None 让健康监控只告警不熔断，避免出口网络抖动导致自动停机
+            if isinstance(e, (httpx.HTTPError, ConnectionError, TimeoutError, OSError)):
+                result = {"ok": None, "err": f"网络异常，无法确认 Cookie 状态: {e}", "network": True}
+                ttl = _LOGIN_BAD_TTL
+            else:
+                db.set_setting("cookie_ok", False)
+                result = {"ok": False, "err": str(e)[:200]}
+                ttl = _LOGIN_BAD_TTL
         with _cache_lock:
             _login_cache = (time.time() + ttl, result)
         return result
@@ -413,7 +419,11 @@ def _list_dir(pid: int = 0) -> dict[str, int]:
                 dirs[name] = cid
         total = _to_int(resp.get("count"), 0)
         offset += len(data)
-        if not data or offset >= total:
+        if not data:
+            break
+        if total and offset >= total:
+            break
+        if offset > 500_000:  # count 偶发缺失时防止失控翻页的兜底上限
             break
         time.sleep(0.4)  # 大目录多页翻页间隔，降低请求频率
     return dirs
@@ -587,9 +597,12 @@ def share_snap_all(share_code: str, receive_code: str, max_files: int = 5000) ->
                 files.append({"fid": str(fid), "fn": name, "fs": size})
                 total_size += size
             offset += len(items)  # 按实际返回条数翻页：固定 1150 在服务端少返回时会漏项
-            if offset >= int(total or 0) or not items or len(files) >= max_files:
+            if not items or len(files) >= max_files:
                 if len(files) >= max_files and (int(total or 0) > max_files or stack):
                     truncated = True  # 超大分享达到遍历上限，超出部分不会转存
+                break
+            if total and offset >= total:
+                # count 偶发缺失（total=0）时以空页作为唯一退出条件，避免大分享漏扫
                 break
             time.sleep(0.5)
         time.sleep(0.5)  # 目录之间也留间隔：多目录分享逐页轰炸易触发风控
@@ -606,25 +619,40 @@ def receive(share_code: str, receive_code: str, cid: int, file_ids: list[str]) -
     注意：不能传 ``is_check=1``——115 把它当作「只校验能否转存」的预检请求，
     接口照样返回 ``state: true``，但实际不会落文件到网盘（线上表现为反查目录
     永远没有文件、任务无限重试）。官方网页真正执行转存时不带该参数。
+    单次请求按 500 个 file_id 分批串行提交，避免超长分享整单被 115 拒收。
     """
     client = _get_client()
-    payload = {
-        "share_code": share_code,
-        "receive_code": receive_code,
-        "file_id": ",".join(file_ids),
-        "cid": cid,
-    }
+    ids = [str(i) for i in (file_ids or []) if i]
+    if not ids:
+        ids = ["0"]  # 整包转存语义：115 约定 file_id=0 表示全部
+    resp: dict = {}
+    batch_size = 500
+    total_batches = (len(ids) + batch_size - 1) // batch_size
     try:
-        payload["user_id"] = client.user_id  # 与 115 网页请求一致；取不到时省略
+        user_id = client.user_id  # 与 115 网页请求一致；取不到时省略
     except Exception:
-        pass
-    resp = pan_call(client.share_receive, payload)
-    if not resp.get("state"):
-        code = str(resp.get("error_code") or "").strip()
-        msg = resp.get("error", "") or str(resp)[:200]
-        if "目录" in msg or "cid" in msg.lower():
-            clear_dir_cache()  # 目标目录可能已被删除/重命名：缓存失效，下次重新逐级解析
-        raise Pan115Error(f"{msg}（error_code={code}）" if code else msg)
+        user_id = None
+    for bi in range(0, len(ids), batch_size):
+        chunk = ids[bi:bi + batch_size]
+        payload = {
+            "share_code": share_code,
+            "receive_code": receive_code,
+            "file_id": ",".join(chunk),
+            "cid": cid,
+        }
+        if user_id:
+            payload["user_id"] = user_id
+        if total_batches > 1:
+            logstream.info("115", f"分享 {share_code} 文件较多，分批转存 {bi // batch_size + 1}/{total_batches} 批")
+        resp = pan_call(client.share_receive, payload)
+        if not resp.get("state"):
+            code = str(resp.get("error_code") or "").strip()
+            msg = resp.get("error", "") or str(resp)[:200]
+            if "目录" in msg or "cid" in msg.lower():
+                clear_dir_cache()  # 目标目录可能已被删除/重命名：缓存失效，下次重新逐级解析
+            raise Pan115Error(f"{msg}（error_code={code}）" if code else msg)
+        if bi + batch_size < len(ids):
+            time.sleep(0.5 * pace_factor())  # 分批之间留间隔，防风控
     return resp
 
 
@@ -742,7 +770,9 @@ def organize_seasons(cid: int, min_files: int = 2) -> int:
             target = {"id": str(new_id), "name": sname, "is_dir": True}
             entries.append(target)
             time.sleep(0.5)
-        pan_call(client.fs_move, [str(i["id"]) for i in items], pid=int(str(target["id"])))
+        # 用 move_entries（分批 + 校验响应 + 失效缓存）替代裸 fs_move，
+        # 避免移动失败被静默忽略或单批数量超限
+        move_entries([str(i["id"]) for i in items], int(str(target["id"])))
         moved += len(items)
         time.sleep(0.5)
     return moved
@@ -1474,6 +1504,9 @@ def walk_media_tree(root_cid: int, root_path: str, max_depth: int = 4) -> dict:
             continue
 
         sibling_names = [e["name"] for e in entries if not e.get("is_dir")]
+        # 目录内文件条目只在目录级构建一次，同目录所有文件共享同一列表引用——
+        # 旧写法为每个文件各复制一份过滤列表，大目录下 O(N²) 内存放大
+        sibling_file_entries = [x for x in entries if not x.get("is_dir")]
         for e in entries:
             if e.get("is_dir"):
                 if e["name"].lower() in ("@eadir", ".ds_store", "__macosx", "_待清理旧版"):
@@ -1498,7 +1531,7 @@ def walk_media_tree(root_cid: int, root_path: str, max_depth: int = 4) -> dict:
                     "dir_path": cur_path,
                     "parent_dirs": list(rel_parents),
                     "sibling_names": sibling_names,
-                    "sibling_entries": [x for x in entries if not x.get("is_dir")],
+                    "sibling_entries": sibling_file_entries,
                 })
         if queue_dirs:
             time.sleep(0.25 * pace_factor())

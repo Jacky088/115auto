@@ -19,19 +19,22 @@ _VIDEO_EXTS = frozenset({
 })
 _DUP_SUFFIX_RE = re.compile(r"[\s\._-]*[\(\[（【]\s*([1-9]\d{0,2})\s*[\)\]）】]$")
 
-_SEASON_EP = re.compile(r"[Ss]0*(\d{1,2})[\s\.\-_]*[Ee](\d{1,3})")
-# E12 / EP12：前面不能紧邻数字或字母（避免 S01E12 里的 E12、ED2K 之类误判）
-_EP = re.compile(r"(?<![0-9A-Za-z])[Ee][Pp]?\s?(\d{1,3})(?![0-9])")
-_CN = re.compile(r"第\s*(\d{1,3})\s*([集话話期])")
-# 12集 / 12话 / 12期（无「第」字，频道常见写法）
-_BARE = re.compile(r"(?<![0-9])(\d{1,3})\s*([集话話期])")
+_SEASON_EP = re.compile(
+    r"[Ss]0*(\d{1,4})[\s\.\-_]*[Ee](\d{1,4})(?:E0*(\d{1,4}))?(?:[Pp]0*(\d{1,2}))?"
+)
+# E12 / EP12：前面不能紧邻数字或字母（避免 S01E12 里的 E12、ED2K 之类误判）；
+# E1P2 / E12P2（分 P 双集文件）P 段号随集号一并消耗
+_EP = re.compile(r"(?<![0-9A-Za-z])[Ee][Pp]?\s?(\d{1,4})(?:[Pp]0*(\d{1,2}))?(?![0-9])")
+_CN = re.compile(r"第\s*(\d{1,4}|[零一二三四五六七八九十百两]{1,6})\s*([集话話期])")
+# 12集 / 12话 / 12期（无「第」字，频道常见写法）；集号放宽到 4 位（千集长寿番 / 综艺年季期数）
+_BARE = re.compile(r"(?<![0-9])(\d{1,4})\s*([集话話期])")
 
 _RANGE_SEASON_EP = re.compile(
-    r"[Ss]0*(\d{1,2})[\s\.\-_]*[Ee]0*(\d{1,3})\s*[-~～]\s*[Ee]?0*(\d{1,3})(?![0-9A-Za-z])"
+    r"[Ss]0*(\d{1,4})[\s\.\-_]*[Ee]0*(\d{1,4})\s*[-~～]\s*[Ee]?0*(\d{1,4})(?![0-9A-Za-z])"
 )
-_RANGE_CN_EP = re.compile(r"第\s*0*(\d{1,3})\s*[-~～至到]\s*0*(\d{1,3})\s*([集话話期])")
+_RANGE_CN_EP = re.compile(r"第\s*0*(\d{1,4})\s*[-~～至到]\s*0*(\d{1,4})\s*([集话話期])")
 _RANGE_EP = re.compile(
-    r"(?<![0-9A-Za-z])[Ee][Pp]?\s?0*(\d{1,3})\s*[-~～]\s*(?:[Ee][Pp]?)?0*(\d{1,3})(?![0-9A-Za-z])"
+    r"(?<![0-9A-Za-z])[Ee][Pp]?\s?0*(\d{1,4})\s*[-~～]\s*(?:[Ee][Pp]?)?0*(\d{1,4})(?![0-9A-Za-z])"
 )
 _PART_MARKER_RE = re.compile(
     r"(?<![A-Za-z0-9])(?:part|pt|cd|disc|disk)[\s\._-]*0*(\d{1,2})(?![0-9A-Za-z])",
@@ -43,10 +46,38 @@ _CN_PART_RE = re.compile(
 
 _EP_KINDS = {"集": "ep", "话": "ep", "話": "ep", "期": "period"}
 
-_CN_NUM_MAP = {
-    "一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10,
-    "十一": 11, "十二": 12, "十三": 13, "十四": 14, "十五": 15, "十六": 16, "十七": 17, "十八": 18, "十九": 19, "二十": 20
-}
+# 「全39集」合集帖：整体发售不代表追更到 39 集，解析前剥离，防止订阅进度虚高
+TOTAL_EPS_RE = re.compile(r"全\s*\d+\s*[集话話]")
+
+_CN_DIGIT = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5,
+             "六": 6, "七": 7, "八": 8, "九": 9}
+
+
+def cn_to_int(raw: str) -> int | None:
+    """中文数字转 int（统一实现，media_parser 也复用本函数保证口径一致）。
+    支持阿拉伯数字、一~九十九（三十、二十一季等）以及带「百」的组合（一百零三）。"""
+    s = (raw or "").strip()
+    if not s:
+        return None
+    if s.isdigit():
+        return int(s)
+    if s in _CN_DIGIT:
+        return _CN_DIGIT[s]
+    if "百" in s:
+        head, _, rest = s.partition("百")
+        hundreds = 1 if head == "" else _CN_DIGIT.get(head)
+        if hundreds is None:
+            return None
+        if not rest:
+            return hundreds * 100
+        tail = cn_to_int(rest[1:] if rest.startswith("零") else rest)
+        return hundreds * 100 + tail if tail is not None else None
+    if "十" in s:
+        head, _, rest = s.partition("十")
+        tens = 1 if head == "" else _CN_DIGIT.get(head, 0)
+        ones = 0 if rest == "" else _CN_DIGIT.get(rest, 0)
+        return tens * 10 + ones
+    return None
 
 
 def parse_season(text: str) -> int | None:
@@ -65,13 +96,10 @@ def parse_season(text: str) -> int | None:
     m = re.search(r"(?<![0-9a-zA-Z])season[\s\.\-_]*0*(\d{1,2})", t, re.IGNORECASE)
     if m:
         return int(m.group(1))
-    # 3. 中文：第一季 / 第1季 / 第01季 / 第 1 季
-    m = re.search(r"第\s*([一二三四五六七八九十\d]+)\s*季", t)
+    # 3. 中文：第一季 / 第1季 / 第01季 / 第 1 季 / 第二十一季
+    m = re.search(r"第\s*([零一二三四五六七八九十百两\d]+)\s*季", t)
     if m:
-        val = m.group(1).strip()
-        if val.isdigit():
-            return int(val)
-        return _CN_NUM_MAP.get(val)
+        return cn_to_int(m.group(1))
     # 4. 独立 S01 / S1 / s01 / s1（前后边界非字母数字）
     m = re.search(r"(?<![0-9a-zA-Z])[sS]0*(\d{1,2})(?![0-9a-zA-Z])", t)
     if m:
@@ -84,7 +112,7 @@ def parse_season(text: str) -> int | None:
 
 def parse(text: str) -> tuple[int | None, int | None, str]:
     """解析 (季, 集/期号, 类型)。类型：ep=剧集，period=综艺期数。"""
-    t = str(text or "")
+    t = TOTAL_EPS_RE.sub(" ", str(text or ""))  # 剥离「全39集」合集标记，防止进度虚高
     season = parse_season(t)
     m = _SEASON_EP.search(t)
     if m:
@@ -94,7 +122,7 @@ def parse(text: str) -> tuple[int | None, int | None, str]:
         return season, int(m.group(1)), "ep"
     m = _CN.search(t)
     if m:
-        return season, int(m.group(1)), _EP_KINDS.get(m.group(2), "ep")
+        return season, cn_to_int(m.group(1)), _EP_KINDS.get(m.group(2), "ep")
     m = _BARE.search(t)
     if m:
         return season, int(m.group(1)), _EP_KINDS.get(m.group(2), "ep")
@@ -168,6 +196,14 @@ def extract_episode_keys(
                 ep_start, ep_end, kind = st, ed, "ep"
 
     if ep_start is None:
+        # S01E01E02 连写合集：第二段作为集范围终点（与 media_parser 口径一致）
+        m = _SEASON_EP.search(stem)
+        if m and m.group(3):
+            s_val, st, ed = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            if 0 <= (ed - st) <= 30:
+                season, ep_start, ep_end, kind = s_val, st, ed, "ep"
+
+    if ep_start is None:
         s_single, ep_single, kind = parse(stem)
         if ep_single is not None:
             if season is None:
@@ -187,8 +223,13 @@ def extract_episode_keys(
     if pm:
         part_tag = f"part:{int(pm.group(1))}"
     else:
-        cm = _CN_PART_RE.search(stem)
-        if cm:
-            part_tag = f"part:{cm.group(1)}"
+        se_m = _SEASON_EP.search(stem)
+        if se_m and se_m.group(4):
+            # S01E01P2 分 P 写法的段号（与 media_parser 的 part 口径一致）
+            part_tag = f"part:{int(se_m.group(4))}"
+        else:
+            cm = _CN_PART_RE.search(stem)
+            if cm:
+                part_tag = f"part:{cm.group(1)}"
 
     return [(int(season), ep, kind, part_tag) for ep in range(ep_start, ep_end + 1)]

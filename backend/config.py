@@ -2,7 +2,7 @@
 import os
 from pathlib import Path
 
-APP_VERSION = "1.2.0"  # 展示于网页页脚与 /api/version，随发行包更新
+APP_VERSION = "1.3.0"  # 展示于网页页脚与 /api/version，随发行包更新
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 BACKEND_DIR = Path(__file__).resolve().parent
@@ -59,7 +59,11 @@ _ensure_writable_home()
 
 
 def secure_file(p: "Path") -> None:
-    """收紧凭据文件权限（Linux 下 600）；Windows 文件权限模型不同，尽力而为不报错。"""
+    """收紧凭据文件权限（Linux 下 600）；Windows 文件权限模型不同，尽力而为不报错。
+
+    注意：不在 Windows 上自动跑 icacls 收紧 DACL——移除继承后若 grant 因用户名
+    本地化/编码问题失败，会把文件锁死到连属主都无法覆盖（实测 WinError 5）。
+    Windows 裸跑部署请手动收紧 data/ 目录的 ACL，或使用 Docker（Linux 权限模型）。"""
     try:
         os.chmod(p, 0o600)
     except OSError:

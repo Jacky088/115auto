@@ -307,7 +307,10 @@ DEFAULT_SETTINGS = {
     "media_op_delay_min": 0.8,                # 115 写操作之间最小随机间隔（秒）
     "media_op_delay_max": 2.0,                # 115 写操作之间最大随机间隔（秒）
     "media_organize_schedule_enabled": False, # 定时自动目录整理开关
+    "media_scrape_schedule_enabled": False,   # 定时自动媒体刮削开关
+    "media_organize_schedule_type": "interval", # 定时整理调度方式：interval(固定间隔) 或 fixed_times(每天固定时间点)
     "media_organize_schedule_hours": 12,      # 定时整理周期（小时）
+    "media_organize_fixed_times": '["06:00", "12:00", "18:00"]', # 每天固定整理时间点
     "media_organize_last_run": 0,             # 上次目录整理时间戳
     "media_scrape_last_run": 0,               # 上次媒体刮削时间戳
 }
@@ -370,9 +373,10 @@ def _init_db():
     if res and res[0] != "ok":
         raise sqlite3.DatabaseError(f"quick_check failed: {res[0]}")
     _conn.executescript(SCHEMA)
-    _migrate()
+    _migrate_warnings = _migrate()
     _seed()
     _conn.commit()
+    _emit_migrate_warnings(_migrate_warnings)
 
 
 def _handle_corrupt_db(err: Exception):
@@ -428,7 +432,9 @@ def init():
 
 
 def _migrate():
-    """轻量迁移：旧库补新列。"""
+    """轻量迁移：旧库补新列。返回迁移告警消息列表——调用方必须在释放 _lock 之后再写日志
+    （logstream→db.add_log→execute 会再次获取 _lock，锁内直写会同线程重入死锁）。"""
+    _warnings = []
     cols = {r["name"] for r in _conn.execute("PRAGMA table_info(transfers)")}
     if "bypass_filters" not in cols:
         _conn.execute("ALTER TABLE transfers ADD COLUMN bypass_filters INTEGER NOT NULL DEFAULT 0")
@@ -486,8 +492,6 @@ def _migrate():
         "SELECT share_code, count(*) c FROM transfers"
         " WHERE status IN ('queued','running','submitted') GROUP BY share_code HAVING c > 1"
     ).fetchall()
-    if dup:
-        from .core import logstream  # 延迟导入：core.logstream 反向依赖本模块
     for r in dup:
         keep = _conn.execute(
             "SELECT id FROM transfers WHERE share_code=? AND status IN ('queued','running','submitted')"
@@ -495,14 +499,27 @@ def _migrate():
         _conn.execute(
             "DELETE FROM transfers WHERE share_code=? AND status IN ('queued','running','submitted')"
             " AND id != ?", (r["share_code"], keep["id"]))
-        logstream.warn("database", f"清理同分享码的重复活动任务（share_code={r['share_code']}，"
-                                   f"保留 #{keep['id']}）")
+        _warnings.append(f"清理同分享码的重复活动任务（share_code={r['share_code']}，"
+                         f"保留 #{keep['id']}）")
     try:
         _conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_transfers_active_code ON transfers(share_code)"
             " WHERE status IN ('queued','running','submitted')")
     except sqlite3.Error:
         pass  # 极端情况下仍有冲突数据：跳过索引，竞态兜底由 pipeline 捕获冲突
+    return _warnings
+
+
+def _emit_migrate_warnings(messages):
+    """锁外补发 _migrate 的告警日志（延迟导入避免循环依赖；失败不影响主流程）。"""
+    if not messages:
+        return
+    try:
+        from .core import logstream
+        for w in messages:
+            logstream.warn("database", w)
+    except Exception:
+        pass
 
 
 def _seed():
@@ -612,6 +629,7 @@ BACKUP_LOCAL_STATE_SETTINGS = frozenset({
     "cookie_ok",
     "userbot_ok",
     "setup_completed",
+    "token_version",  # token 吊销版本号属本机安全状态：恢复外来值可能意外吊销/复活会话
 })
 BACKUP_KEEP_SETTINGS = frozenset(BACKUP_EXCLUDE_SETTINGS) | BACKUP_LOCAL_STATE_SETTINGS
 
@@ -744,19 +762,46 @@ def _normalize_restored_media_task(row: dict) -> dict:
     return r
 
 
+def _restore_idle_checks_locked():
+    """恢复空闲守卫的锁内复查。必须在 _lock 已持有的前提下调用（防 TOCTOU：
+    外层检查与真正恢复之间可能有任务被 worker 领走）。注意不能调 get_setting（会重入 _lock）。"""
+    row = _conn.execute("SELECT value FROM settings WHERE key='running'").fetchone()
+    if row is not None and row["value"] == "true":
+        raise ValueError("系统正在运行，请先点击顶栏「停止」再恢复备份")
+    running_rows = _conn.execute(
+        "SELECT count(*) c FROM transfers WHERE status='running'").fetchone()["c"]
+    if running_rows:
+        raise ValueError("有转存中的任务，请等待其完成（或重启程序）后再恢复备份")
+    media_running = _conn.execute(
+        "SELECT count(*) c FROM media_tasks WHERE status='running'").fetchone()["c"]
+    if media_running:
+        raise ValueError("有正在执行的整理或刮削任务，请等待其结束后再恢复备份")
+
+
 def ensure_restore_idle_guard():
     """恢复前状态检查：要求系统停止且无活动中的转存/整理刮削任务。"""
-    if get_setting("running", False):
-        raise ValueError("系统正在运行，请先点击顶栏「停止」再恢复备份")
-    if _conn is not None:
-        running_rows = _conn.execute(
-            "SELECT count(*) c FROM transfers WHERE status='running'").fetchone()["c"]
-        if running_rows:
-            raise ValueError("有转存中的任务，请等待其完成（或重启程序）后再恢复备份")
-        media_running = _conn.execute(
-            "SELECT count(*) c FROM media_tasks WHERE status='running'").fetchone()["c"]
-        if media_running:
-            raise ValueError("有正在执行的整理或刮削任务，请等待其结束后再恢复备份")
+    if _conn is None:
+        if get_setting("running", False):
+            raise ValueError("系统正在运行，请先点击顶栏「停止」再恢复备份")
+        return
+    with _lock:
+        _restore_idle_checks_locked()
+
+
+def _validate_restored_meta_dir(raw) -> str:
+    """恢复链路对 media_local_meta_dir 复用与网页设置一致的边界校验，
+    防止备份 JSON 直接携带任意目录绕过 api/media.py 的设置校验。"""
+    raw = str(raw or "").strip()
+    if "\x00" in raw:
+        raise ValueError("备份中的本地元数据目录包含非法空字符")
+    if not raw:
+        return ""
+    resolved = Path(raw).expanduser().resolve()
+    if (len(resolved.parts) <= 1
+            or resolved.is_relative_to(config.BACKEND_DIR)
+            or config.BACKEND_DIR.is_relative_to(resolved)):
+        raise ValueError("备份中的本地元数据目录不合法（不允许系统根目录或程序目录）")
+    return str(resolved)
 
 
 def restore_payload(data: dict) -> dict:
@@ -794,6 +839,7 @@ def restore_payload(data: dict) -> dict:
 
     with _lock:
         try:
+            _restore_idle_checks_locked()  # 锁内复查，缩小 TOCTOU 窗口
             cur = _conn.cursor()
             cur.execute("BEGIN")
             # 先记下需要保留的当前设置（凭据及本机登录/向导状态，恢复后原样带回来）
@@ -841,6 +887,8 @@ def restore_payload(data: dict) -> dict:
                 # 凭据/本机状态与内部运行态一律不采纳备份值，防止替换敏感凭据或误恢复运行态
                 if k in BACKUP_KEEP_SETTINGS or is_runtime_setting_key(k):
                     continue
+                if k == "media_local_meta_dir":
+                    v = _validate_restored_meta_dir(v)
                 cur.execute("INSERT INTO settings VALUES(?,?)", (k, str(v)))
             for k, v in keep.items():
                 cur.execute("INSERT OR REPLACE INTO settings VALUES(?,?)", (k, v))
@@ -935,7 +983,9 @@ def restore_db_snapshot(
     ensure_restore_idle_guard()
     src = sqlite3.connect(f"file:{src_db_path}?mode=ro", uri=True)
     try:
+        migrate_warnings = []
         with _lock:
+            _restore_idle_checks_locked()  # 锁内复查，缩小 TOCTOU 窗口
             keep = {}
             for k in BACKUP_KEEP_SETTINGS:
                 row = _conn.execute("SELECT value FROM settings WHERE key=?", (k,)).fetchone()
@@ -947,7 +997,7 @@ def restore_db_snapshot(
             cur_meta_val = cur_meta_row["value"] if cur_meta_row is not None else None
 
             src.backup(_conn)
-            _migrate()
+            migrate_warnings = _migrate()
             _seed()
 
             # 强制复位运行态
@@ -989,6 +1039,9 @@ def restore_db_snapshot(
                         _conn.execute("UPDATE media_tasks SET local_meta_dir=? WHERE id=?", (new_dir, mt["id"]))
 
             _conn.commit()
-            return _collect_conn_counts(_conn)
+            counts = _collect_conn_counts(_conn)
+        # 锁外补发迁移告警日志（锁内写日志经 db.execute 会重入 _lock 导致死锁）
+        _emit_migrate_warnings(migrate_warnings)
+        return counts
     finally:
         src.close()

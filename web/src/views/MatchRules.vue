@@ -60,7 +60,7 @@
       <div class="toolbar">
         <el-input v-model="testText" placeholder="输入一条资源标题，模拟完整处理结果" style="flex: 1"
                   @keyup.enter="runTest" />
-        <el-button type="primary" @click="runTest">测试</el-button>
+        <el-button type="primary" :loading="testing" @click="runTest">测试</el-button>
       </div>
       <el-descriptions v-if="testResult" :column="1" border size="small" style="margin-top: 10px">
         <el-descriptions-item label="判定分类">{{ testResult.category || '（未命中规则）' }}</el-descriptions-item>
@@ -362,7 +362,13 @@ watch(rules, () => {
 }, { deep: true })
 
 const loadRules = async () => {
-  const { data } = await api.get('/api/rules')
+  let data
+  try {
+    data = (await api.get('/api/rules')).data
+  } catch (e) {
+    ElMessage.error(errMsg(e))
+    return
+  }
   suppressWatch = true
   rules.value = data.rules
   routes.value = data.routes
@@ -402,9 +408,18 @@ const resetRules = async () => {
   } catch (e) { ElMessage.error(errMsg(e)) }
 }
 
+const testing = ref(false)
 const runTest = async () => {
   if (!testText.value.trim()) return
-  testResult.value = (await api.post('/api/rules/test', { text: testText.value })).data
+  testing.value = true
+  try {
+    testResult.value = (await api.post('/api/rules/test', { text: testText.value })).data
+  } catch (e) {
+    ElMessage.error(errMsg(e))
+    testResult.value = null
+  } finally {
+    testing.value = false
+  }
 }
 
 // ---------- 黑名单 ----------
@@ -454,13 +469,19 @@ const loadBlacklist = async () => {
     blHitsLoading.value = true
     try {
       blHits.value = (await api.get('/api/blacklist/hits')).data
+    } catch (e) {
+      ElMessage.error(errMsg(e))
     } finally {
       blHitsLoading.value = false
     }
   } else {
-    blItems.value = (await api.get(`/api/blacklist/${blTab.value}`)).data
-    blPlaceholder.value = blPlaceholderMap[blTab.value]
-    blHint.value = blHints[blTab.value]
+    try {
+      blItems.value = (await api.get(`/api/blacklist/${blTab.value}`)).data
+      blPlaceholder.value = blPlaceholderMap[blTab.value]
+      blHint.value = blHints[blTab.value]
+    } catch (e) {
+      ElMessage.error(errMsg(e))
+    }
   }
 }
 const addBlacklistItem = async () => {

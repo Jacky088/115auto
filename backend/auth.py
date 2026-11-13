@@ -21,6 +21,9 @@ _TOKEN_TTL = 7 * 86400          # JWT 有效期
 TOKEN_TTL = _TOKEN_TTL          # 对外公开（海报 Cookie 等需要对齐有效期）
 _RENEW_AFTER = _TOKEN_TTL // 2  # 剩余不足一半时滑动续期
 
+_PBKDF2_ITERATIONS = 600_000   # OWASP 2023 建议（PBKDF2-SHA256 ≥600k）
+_LEGACY_ITERATIONS = 120_000   # 旧格式哈希的迭代数（仅用于兼容校验，登录成功后透明升级）
+
 
 def _evict_oldest_ip():
     """IP 跟踪数超限时淘汰最旧条目（需持 _fail_lock 调用）。"""
@@ -66,17 +69,35 @@ def _load_secret() -> str:
     return _jwt_secret
 
 
-def hash_password(password: str, salt: str | None = None) -> str:
+def hash_password(password: str, salt: str | None = None,
+                  iterations: int = _PBKDF2_ITERATIONS) -> str:
+    """生成带算法/迭代数标注的密码哈希（旧版无标注格式在 verify_password 中兼容）。"""
     salt = salt or secrets.token_hex(16)
-    dk = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 120_000)
-    return f"{salt}${dk.hex()}"
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), iterations)
+    return f"pbkdf2_sha256${iterations}${salt}${dk.hex()}"
 
 
 def verify_password(password: str, stored: str) -> bool:
-    if not stored or "$" not in stored:
+    """兼容两种存储格式：新 pbkdf2_sha256$iter$salt$hash 与旧 salt$hex。"""
+    if not stored:
+        return False
+    if stored.startswith("pbkdf2_sha256$"):
+        try:
+            _, iters, salt, digest = stored.split("$", 3)
+            dk = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), int(iters))
+            return secrets.compare_digest(dk.hex(), digest)
+        except (ValueError, TypeError):
+            return False
+    if "$" not in stored:
         return False
     salt, _ = stored.split("$", 1)
-    return secrets.compare_digest(hash_password(password, salt), stored)
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), _LEGACY_ITERATIONS)
+    return secrets.compare_digest(f"{salt}${dk.hex()}", stored)
+
+
+def password_needs_rehash(stored: str) -> bool:
+    """旧格式/低迭代哈希：验证成功后应调用 hash_password 透明升级。"""
+    return bool(stored) and not stored.startswith("pbkdf2_sha256$")
 
 
 # 弱默认密码：首次初始化时检测到这些值会改为生成随机密码（防止 admin123 裸奔公网）
@@ -150,7 +171,7 @@ def rotate_secret():
 
 def make_token(username: str) -> str:
     payload = {"sub": username, "exp": int(time.time()) + _TOKEN_TTL,
-               "iat": int(time.time())}
+               "iat": int(time.time()), "ver": _token_version()}
     return jwt.encode(payload, _load_secret(), algorithm="HS256")
 
 
@@ -164,10 +185,28 @@ def token_renewable(token: str) -> bool:
     return exp - time.time() < _RENEW_AFTER
 
 
+def _token_version() -> int:
+    """token 版本号（存 settings）：登出时递增使全部已签发 token 立即失效。"""
+    try:
+        return int(db.get_setting("token_version", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def revoke_all_tokens():
+    """吊销全部已签发 token：递增版本号，check_token 校验 ver 不匹配即拒绝。
+
+    单管理员系统下「登出即全端下线」代价可控；改密仍走 rotate_secret（连签名密钥一起换）。
+    """
+    db.set_setting("token_version", _token_version() + 1)
+
+
 def check_token(token: str) -> str | None:
-    """返回 username，无效返回 None。"""
+    """返回 username，无效（过期/签名错/版本已吊销）返回 None。"""
     try:
         payload = jwt.decode(token, _load_secret(), algorithms=["HS256"])
+        if int(payload.get("ver", 0)) != _token_version():
+            return None
         return payload.get("sub")
     except Exception:
         return None

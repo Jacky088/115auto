@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import random
 import re
 import time
 import xml.etree.ElementTree as ET
@@ -29,6 +30,7 @@ _TMDB_API_BASE = "https://api.themoviedb.org/3"
 _TMDB_IMG_BASE = "https://image.tmdb.org/t/p"
 _CACHE_DETAIL_TTL = 7 * 86400
 _CACHE_SEARCH_TTL = 3 * 86400
+_CACHE_NEGATIVE_TTL = 6 * 3600  # 空结果/请求失败的负缓存：故障期避免每轮扫描重复打 API
 
 
 def _proxy() -> str | None:
@@ -93,6 +95,12 @@ def _cache_set(key: str, payload: dict | list, ttl: int) -> None:
         "INSERT OR REPLACE INTO tmdb_cache(cache_key, payload, expires_at, updated_at) VALUES(?,?,?,?)",
         (key, raw, now + ttl, now),
     )
+    # 概率性清理过期缓存：表只增不删会无限膨胀（此前仅导出快照时裁剪）
+    if random.random() < 0.02:
+        try:
+            db.execute("DELETE FROM tmdb_cache WHERE expires_at < ?", (now,))
+        except Exception:
+            pass
 
 
 def _search_tmdb(kind: str, query: str, year: str, api_key: str) -> list[dict]:
@@ -113,14 +121,19 @@ def _search_tmdb(kind: str, query: str, year: str, api_key: str) -> list[dict]:
         resp = tmdb_get(f"/search/{kind}", params)
         if resp.status_code != 200:
             logstream.warn("scrape", f"TMDB /search/{kind}({q}) 返回 {resp.status_code}")
+            # 空结果写短 TTL 负缓存：TMDB 故障/无结果时避免每轮扫描重复打 API
+            _cache_set(ck, [], _CACHE_NEGATIVE_TTL)
             return []
         results = resp.json().get("results") or []
     except Exception as e:
         logstream.warn("scrape", f"TMDB /search/{kind}({q}) 请求异常: {e}")
+        _cache_set(ck, [], _CACHE_NEGATIVE_TTL)
         return []
 
     if results:
         _cache_set(ck, results[:15], _CACHE_SEARCH_TTL)
+    else:
+        _cache_set(ck, [], _CACHE_NEGATIVE_TTL)
     return results[:15]
 
 

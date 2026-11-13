@@ -9,14 +9,14 @@
       </div>
     </template>
     <div class="toolbar">
-      <el-select v-model="filter.status" placeholder="状态" clearable style="width: 130px" @change="load">
+      <el-select v-model="filter.status" placeholder="状态" clearable style="width: 130px" @change="loadFromFirstPage">
         <el-option v-for="(v, k) in statusLabel" :key="k" :label="v" :value="k" />
       </el-select>
       <el-input v-model="filter.search" placeholder="搜索标题 / 分享码" clearable style="width: 260px"
-                @keyup.enter="load" @clear="load">
+                @keyup.enter="loadFromFirstPage" @clear="loadFromFirstPage">
         <template #prefix><el-icon><Search /></el-icon></template>
       </el-input>
-      <el-button @click="load">查询</el-button>
+      <el-button @click="loadFromFirstPage">查询</el-button>
       <el-button type="danger" plain :disabled="!selected.length" @click="delSelected">
         批量删除{{ selected.length ? `（${selected.length}）` : '' }}
       </el-button>
@@ -125,21 +125,27 @@ const statusTag = (s) => ({ success: 'success', failed: 'danger', blocked: 'warn
                             queued: 'info', running: 'primary', duplicate: 'info', skipped: 'info' }[s] || 'info')
 
 const loadError = ref('')
+let loadSeq = 0
 const load = async () => {
+  const seq = ++loadSeq
   loading.value = true
   loadError.value = ''
   try {
     const { data } = await api.get('/api/transfers', {
       params: { status: filter.status, search: filter.search, page: page.value, size: size.value },
     })
+    if (seq !== loadSeq) return  // 已有更新的请求：丢弃过期响应，防止快速筛选时旧页覆盖新页
     items.value = data.items
     total.value = data.total
   } catch (e) {
-    loadError.value = errMsg(e)
+    if (seq === loadSeq) loadError.value = errMsg(e)
   } finally {
-    loading.value = false
+    if (seq === loadSeq) loading.value = false
   }
 }
+
+// 筛选/搜索条件变化：重置回第 1 页，避免停在全空页
+const loadFromFirstPage = () => { page.value = 1; load() }
 
 // 切换每页条数：回到第 1 页并重新加载
 const onSizeChange = () => { page.value = 1; load() }

@@ -187,6 +187,17 @@ def is_transfer_active() -> bool:
     return _transfer_active
 
 
+def _norm_hhmm(raw: str, fallback: str) -> str:
+    """把用户输入的窗口时间规范为补零 HH:MM（「9:00」→「09:00」），
+    与 now 的 %H:%M 字符串比较口径一致；无法解析时回退默认值。"""
+    s = str(raw or "").strip()
+    try:
+        hh, mm = s.split(":")
+        return f"{int(hh):02d}:{int(mm):02d}"
+    except (ValueError, AttributeError):
+        return fallback
+
+
 def is_in_schedule_window() -> bool:
     """115 防风控定时计划判断：
     未开启时放行全天候运行；开启后判定当前时钟是否处于运行窗口（支持跨零点，如 22:00 ~ 08:00）。
@@ -196,8 +207,9 @@ def is_in_schedule_window() -> bool:
         return True
     from datetime import datetime
     now = datetime.now().strftime("%H:%M")
-    start = str(db.get_setting("schedule_start", "22:00") or "22:00").strip()
-    end = str(db.get_setting("schedule_end", "08:00") or "08:00").strip()
+    # 入口统一补零规范化，避免 "9:00" 与 "09:30" 的字符串比较错位（'9' > '0'）
+    start = _norm_hhmm(db.get_setting("schedule_start", "22:00") or "22:00", "22:00")
+    end = _norm_hhmm(db.get_setting("schedule_end", "08:00") or "08:00", "08:00")
     if not start or not end or start == end:
         return True
     if start <= end:
@@ -311,7 +323,8 @@ async def prepare_and_drain_transfers(max_wait_seconds: float = 3600.0, mode: st
 
     def _drain_snapshot():
         stat = get_drain_status()
-        limit = max(1, int(float(db.get_setting("daily_limit", 50) or 50)))
+        # 与 queue_worker 口径一致：daily_limit<=0 按 1 处理（旧的 `0 or 50` 写法会把 0 当成 50）
+        limit = max(1, int(float(db.get_setting("daily_limit", 50))))
         quota_exhausted = (limit > 0 and db.quota_today() >= limit)
         running_flag = (str(db.get_setting("running", False)).lower() == "true")
         return stat, limit, quota_exhausted, running_flag

@@ -160,16 +160,24 @@ async def security_headers(request, call_next):
     if cl and cl.isdigit() and int(cl) > limit:
         return JSONResponse({"detail": "请求体过大"}, status_code=413)
     resp = await call_next(request)
+    # 升级友好缓存策略：index.html 不缓存（发版后浏览器立即拿到新资产清单，避免旧清单
+    # 引用已不存在的哈希文件名导致白屏）；/assets/ 文件名带内容哈希，可安全永久缓存
+    if request.url.path in ("/", "/index.html"):
+        resp.headers.setdefault("Cache-Control", "no-cache")
+    elif request.url.path.startswith("/assets/"):
+        resp.headers.setdefault("Cache-Control", "public, max-age=31536000, immutable")
     resp.headers.setdefault("X-Content-Type-Options", "nosniff")
     resp.headers.setdefault("X-Frame-Options", "DENY")
     resp.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
     # CSP：脚本只允许同源打包产物；Element Plus 依赖内联样式，样式保留 unsafe-inline。
     # 不启用 unsafe-eval（Vue 为构建期编译），兼顾 XSS 缓解与页面正常渲染。
+    # connect-src 仅 'self'：WS 日志流为同源连接，不再放行任意 ws:/wss: 主机
+    #（万一出现 XSS，不给数据外传通道）
     resp.headers.setdefault(
         "Content-Security-Policy",
         "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
         "img-src 'self' data: blob:; font-src 'self' data:; "
-        "connect-src 'self' ws: wss:; object-src 'none'; base-uri 'self'; "
+        "connect-src 'self'; object-src 'none'; base-uri 'self'; "
         "frame-ancestors 'none'")
     return resp
 

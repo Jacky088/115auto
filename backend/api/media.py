@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from pathlib import Path
 
@@ -10,7 +11,7 @@ from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Response
 from pydantic import BaseModel, Field
 
 from .. import auth, config, database as db
-from ..core import tmdb_scraper, transfer_gate
+from ..core import logstream, tmdb_scraper, transfer_gate
 from ..core.media_parser import validate_organize_template
 from ..worker import media_worker
 from .manage import require_user
@@ -24,14 +25,17 @@ poster_router = APIRouter(prefix="/api/media")
 def _require_poster_or_user(
     authorization: str | None = Header(default=None),
     sa_poster: str | None = Cookie(default=None),
+    sa_auth: str | None = Cookie(default=None),
 ):
-    """兼容 `<img>` 标签仅附带 `sa_poster` Cookie 或常规 Bearer Token 的鉴权。"""
-    tok = ""
+    """兼容 `<img>` 标签鉴权：Bearer Token / 海报专用 Cookie / 登录态 Cookie 任一有效即可。"""
+    candidates = []
     if authorization and authorization.lower().startswith("bearer "):
-        tok = authorization.split(None, 1)[1].strip()
-    elif sa_poster:
-        tok = sa_poster.strip()
-    if not tok or not auth.check_token(tok):
+        candidates.append(authorization.split(None, 1)[1].strip())
+    if sa_poster:
+        candidates.append(sa_poster.strip())
+    if sa_auth:
+        candidates.append(sa_auth.strip())
+    if not any(auth.check_token(tok) for tok in candidates if tok):
         raise HTTPException(401, "未登录或海报访问凭证已过期")
 
 
@@ -69,7 +73,10 @@ class MediaSettingsIn(BaseModel):
     media_op_delay_min: float | None = None
     media_op_delay_max: float | None = None
     media_organize_schedule_enabled: bool | None = None
+    media_scrape_schedule_enabled: bool | None = None
+    media_organize_schedule_type: str | None = None
     media_organize_schedule_hours: int | None = None
+    media_organize_fixed_times: list[str] | str | None = None
 
 
 class SelectTaskIn(BaseModel):
@@ -192,6 +199,7 @@ def delete_rule(rule_id: int):
 def get_settings():
     s = media_worker.get_media_settings()
     s["tmdb_configured"] = bool(str(s.pop("tmdb_api_key", "") or "").strip())
+    s["next_runs"] = media_worker.compute_media_organize_next_runs()
     return s
 
 
@@ -214,8 +222,25 @@ def save_settings(body: MediaSettingsIn):
         data["media_scrape_margin_threshold"] = max(0, min(40, int(data["media_scrape_margin_threshold"])))
     if "media_scrape_wait_seconds" in data:
         data["media_scrape_wait_seconds"] = max(0, min(600, int(data["media_scrape_wait_seconds"])))
+    if "media_organize_schedule_type" in data:
+        st = str(data["media_organize_schedule_type"] or "").strip()
+        data["media_organize_schedule_type"] = st if st in ("interval", "fixed_times") else "interval"
     if "media_organize_schedule_hours" in data:
         data["media_organize_schedule_hours"] = max(1, min(168, int(data["media_organize_schedule_hours"])))
+    if "media_organize_fixed_times" in data:
+        ft = data["media_organize_fixed_times"]
+        if isinstance(ft, str):
+            try:
+                ft = json.loads(ft)
+            except Exception:
+                ft = []
+        if isinstance(ft, list):
+            clean = []
+            for item in ft:
+                m = re.match(r"^([01]?\d|2[0-3]):([0-5]\d)$", str(item).strip())
+                if m:
+                    clean.append(f"{int(m.group(1)):02d}:{int(m.group(2)):02d}")
+            data["media_organize_fixed_times"] = sorted(set(clean))
     if "media_op_delay_min" in data:
         data["media_op_delay_min"] = max(0.3, min(30.0, float(data["media_op_delay_min"])))
     if "media_op_delay_max" in data:
@@ -240,7 +265,7 @@ def save_settings(body: MediaSettingsIn):
 
     for k, v in data.items():
         db.set_setting(k, v)
-    return {"ok": True}
+    return {"ok": True, "next_runs": media_worker.compute_media_organize_next_runs()}
 
 
 # ---------- 模块 A：目录整理与 Dry-Run ----------
@@ -443,7 +468,9 @@ async def search_tmdb_manual(q: str, kind: str = "multi", year: str = ""):
     try:
         resp = await asyncio.to_thread(tmdb_scraper.tmdb_get, f"/search/{k}", params)
     except Exception as e:
-        raise HTTPException(502, f"TMDB 网络请求失败: {e}") from e
+        # 异常文本可能内嵌带 api_key 的完整 URL，不回显给前端；详情只进服务端日志
+        logstream.warn("scrape", f"TMDB 搜索网络异常（{kw[:40]}）: {logstream.exc(e)}")
+        raise HTTPException(502, "TMDB 网络请求失败，请稍后重试或检查网络/代理") from e
     if resp.status_code != 200:
         raise HTTPException(502, f"TMDB 查询失败: HTTP {resp.status_code}")
     results = resp.json().get("results") or []

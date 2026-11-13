@@ -270,16 +270,20 @@ const normalizePath = (raw, fallbackName = '') => {
   return list
 }
 
+let loadSeq = 0
 const load = async () => {
+  const seq = ++loadSeq
   loading.value = true
   loadError.value = ''
   try {
     const { data } = await api.get('/api/files/list', {
       params: { cid: cid.value, search: searchTerm.value, page: page.value, size: size.value },
     })
+    if (seq !== loadSeq) return  // 已有更新的请求发出：丢弃过期响应
     items.value = data.items || []
     total.value = data.total || 0
     selected.value = []
+    if (seq !== loadSeq) return
     if (!isSearching.value) {
       // 客户端路径已与当前目录一致（点击导航时自己维护、id 都是真实值）：
       // 不要用后端返回的 path 重建，否则 115 路径解析错位时会出现同名目录重复显示。
@@ -294,11 +298,12 @@ const load = async () => {
       }
     }
   } catch (e) {
+    if (seq !== loadSeq) return
     items.value = []
     total.value = 0
     loadError.value = errMsg(e)
   } finally {
-    loading.value = false
+    if (seq === loadSeq) loading.value = false
   }
 }
 

@@ -112,7 +112,13 @@ async def _fetch_page(client: httpx.AsyncClient, url: str) -> str:
             continue
         if resp.status_code != 200:
             return ""
-        return resp.text[:_MAX_BYTES]
+        # 流式读取并在上限处截断：恶意/异常页面返回超大响应体时不会整个读入内存打爆 NAS
+        buf = bytearray()
+        async for chunk in resp.aiter_bytes(16384):
+            buf.extend(chunk)
+            if len(buf) >= _MAX_BYTES:
+                break
+        return bytes(buf[:_MAX_BYTES]).decode("utf-8", errors="ignore")
     return ""
 
 

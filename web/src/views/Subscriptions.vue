@@ -315,10 +315,9 @@ const retryPoster = (path) => {
 
 const posterUrl = (path) => {
   if (!path) return ''
-  const token = localStorage.getItem('sa_token') || ''
+  // 海报鉴权走 HttpOnly Cookie（sa_poster / sa_auth），<img> 标签自动携带，无需任何 token
   const base = `/api/tmdb/poster?path=${encodeURIComponent(path)}`
-  const withToken = token ? `${base}&token=${encodeURIComponent(token)}` : base
-  return posterRetries[path] ? `${withToken}&_r=${posterRetries[path]}` : withToken
+  return posterRetries[path] ? `${base}&_r=${posterRetries[path]}` : base
 }
 
 // 已订阅判定：关键词或别名与片名/原始名一致（去空白、忽略大小写）

@@ -114,10 +114,21 @@ async def backfill_channel(client: httpx.AsyncClient, ch: dict, newest_min_id: i
     import sys
     page_log = getattr(sys.modules[__name__], "_page_log", None)
 
+    empty_pages = 0  # 连续空页计数：区分「已到频道最早消息」与「t.me 解析失效/风控空壳页」
     while True:
         msgs = await _fetch_before(client, name, before)
         if not msgs:
-            return await finish_complete()  # 已到频道最早消息，缺口范围内再没有可补的消息
+            # 真正翻到频道头时应连续拿到空页；单次空页可能是解析失效或风控返回空壳页，
+            # 此时推进接缝会把真实缺口永久标记为已补完。连续 2 次空页才判完成，
+            # 期间保留缺口，下一轮补漏会重试（fail-safe：宁可多翻一轮也不静默丢历史）
+            empty_pages += 1
+            if empty_pages >= 2:
+                return await finish_complete()  # 已到频道最早消息，缺口范围内再没有可补的消息
+            logstream.warn("backfill", f"[{name}] 翻页返回空（第 {empty_pages} 次），"
+                                       f"保留缺口下一轮复核（防止 t.me 解析失效被误判为已补完）")
+            remember(before)
+            return False
+        empty_pages = 0
         ids = [m["id"] for m in msgs]
         if max(ids) >= before:
             # 防御：服务端偶尔忽略 before 参数。不推进接缝，下一轮重试，避免死循环与漏消息

@@ -296,14 +296,18 @@ watch(step, (v) => { if (v === 3) loadReadiness() })
 const skipFinish = async () => {
   await loadReadiness()
   if (ready.data?.ready) return finish()
-  const reasons = (ready.data?.reasons || []).map((r) => `· ${r}`).join('<br/>')
+  const reasons = (ready.data?.reasons || []).map((r) => `· ${r}`).join('\n')
   try {
     await ElMessageBox.confirm(
-      `<b>当前部分配置尚未完成，系统暂未开启运行：</b><br/><br/>当前还缺：<br/>${reasons}` +
-      `<br/><br/>您可以先进入系统，稍后在「账号管理」完成配置后，在顶栏随时点击「运行」。`,
+      `当前部分配置尚未完成，系统暂未开启运行。
+
+当前还缺：
+${reasons}` +
+      `
+
+您可以先进入系统，稍后在「账号管理」完成配置后，在顶栏随时点击「运行」。`,
       '配置尚未完成',
       {
-        dangerouslyUseHTMLString: true,
         confirmButtonText: '知道了，直接进入系统',
         cancelButtonText: '留在向导中补全',
         type: 'warning',
@@ -360,9 +364,9 @@ const addChannels = async () => {
     }
     if (fails.length) {
       ElMessageBox.alert(
-        `以下频道未通过访问校验，请修正后重试：<br/><br/>${fails.join('<br/>')}`,
+        `以下频道未通过访问校验，请修正后重试：\n\n${fails.join('\n')}`,
         '频道添加失败',
-        { dangerouslyUseHTMLString: true, confirmButtonText: '知道了', type: 'error' },
+        { confirmButtonText: '知道了', type: 'error' },
       ).catch(() => {})
       return
     }

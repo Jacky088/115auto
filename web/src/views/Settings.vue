@@ -1,4 +1,11 @@
 <template>
+  <el-card v-if="loadError" shadow="never" class="page-card">
+    <el-result icon="warning" title="设置加载失败" :sub-title="loadError">
+      <template #extra>
+        <el-button type="primary" @click="load">重试</el-button>
+      </template>
+    </el-result>
+  </el-card>
   <el-card shadow="never" class="page-card" v-if="loaded">
     <template #header>
       <div class="toolbar" style="margin-bottom: 0">
@@ -61,7 +68,8 @@
 
           <el-form-item label="TG 代理">
             <div class="range-row input-btn-row" style="width: 100%">
-              <el-input v-model="f.proxy" placeholder="socks5://127.0.0.1:1080 或 http://127.0.0.1:7890（仅 TG 流量走代理，留空直连）" />
+              <el-input v-model="f.proxy" placeholder="socks5://127.0.0.1:1080 或 http://127.0.0.1:7890（仅 TG 流量走代理，留空直连）"
+                        :title="f.proxy === SECRET_MASK ? '已配置代理（显示为掩码）：清空后输入新地址可更换' : ''" />
               <el-button :loading="proxyTesting" @click="testProxy">测试代理</el-button>
             </div>
             <div class="tip" style="width: 100%">
@@ -389,7 +397,7 @@
             <div class="bundle-opts">
               <div class="range-row">
                 <span class="bundle-label">本地元数据：</span>
-                <el-radio-group v-model="bundleOpt.meta_mode" size="small">
+                <el-radio-group v-model="bundleOpt.meta_mode" class="bundle-capsule-radios">
                   <el-radio-button value="nfo">仅 .nfo（推荐）</el-radio-button>
                   <el-radio-button value="all">完整（含海报/背景图）</el-radio-button>
                   <el-radio-button value="none">不含元数据</el-radio-button>
@@ -453,7 +461,7 @@
           <el-form-item label="API Token">
             <div class="range-row input-btn-row" style="width: 100%">
               <el-input v-model="f.api_token" type="password" show-password
-                        placeholder="未设置时对外 API 关闭" clearable />
+                        :placeholder="f.api_token === SECRET_MASK ? '已配置（保持不变即继续生效；清空并保存则关闭对外 API）' : '未设置时对外 API 关闭'" clearable />
               <el-button @click="genToken">生成随机 Token</el-button>
             </div>
             <div class="tip" style="width: 100%">
@@ -473,11 +481,12 @@
 <script setup>
 import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { api, errMsg, fmtSize, saveOk } from '../api'
+import { api, errMsg, fmtSize, saveOk, SECRET_MASK } from '../api'
 import { useUnsavedGuard } from '../composables/unsavedGuard'
 
 const f = ref({})
 const loaded = ref(false)
+const loadError = ref('')
 // 失败重试只提供预设档位（不开放自定义秒数，避免误配过密触发风控）
 const RETRY_PRESETS = [
   { label: '快速（30秒/2分/10分）', sec: [30, 120, 600] },
@@ -535,7 +544,7 @@ const saveNotify = async () => {
   if (!nf.token.trim() || !nf.chat_id.trim()) { ElMessage.error('请完整填写 Bot Token 和 Chat ID'); throw new Error('invalid') }
   try {
     await api.put('/api/settings', { notify_token: nf.token.trim(), notify_chat_id: nf.chat_id.trim() })
-    syncF({ notify_token: nf.token.trim(), notify_chat_id: nf.chat_id.trim() })
+    syncF({ notify_token: SECRET_MASK, notify_chat_id: nf.chat_id.trim() })
     saveOk('TG 通知配置已保存', '已即时生效')
   } catch (e) { ElMessage.error(errMsg(e)); throw e }
 }
@@ -546,7 +555,7 @@ const saveBark = async () => {
   if (!bf.url.trim()) { ElMessage.error('请填写 Bark 推送 URL'); throw new Error('invalid') }
   try {
     await api.put('/api/settings', { bark_url: bf.url.trim() })
-    syncF({ bark_url: bf.url.trim() })
+    syncF({ bark_url: SECRET_MASK })
     saveOk('Bark 配置已保存', '已即时生效')
   } catch (e) { ElMessage.error(errMsg(e)); throw e }
 }
@@ -557,7 +566,7 @@ const savePushPlus = async () => {
   if (!pf.token.trim()) { ElMessage.error('请填写 PushPlus Token'); throw new Error('invalid') }
   try {
     await api.put('/api/settings', { pushplus_token: pf.token.trim(), pushplus_topic: pf.topic.trim() })
-    syncF({ pushplus_token: pf.token.trim(), pushplus_topic: pf.topic.trim() })
+    syncF({ pushplus_token: SECRET_MASK, pushplus_topic: pf.topic.trim() })
     saveOk('PushPlus 配置已保存', '已即时生效')
   } catch (e) { ElMessage.error(errMsg(e)); throw e }
 }
@@ -568,7 +577,7 @@ const saveNtfy = async () => {
   if (!tf.url.trim()) { ElMessage.error('请填写 ntfy 主题 URL'); throw new Error('invalid') }
   try {
     await api.put('/api/settings', { ntfy_url: tf.url.trim(), ntfy_token: tf.token.trim() })
-    syncF({ ntfy_url: tf.url.trim(), ntfy_token: tf.token.trim() })
+    syncF({ ntfy_url: tf.url.trim(), ntfy_token: SECRET_MASK })
     saveOk('ntfy 配置已保存', '已即时生效')
   } catch (e) { ElMessage.error(errMsg(e)); throw e }
 }
@@ -824,7 +833,7 @@ const doBundleRestore = async () => {
       },
     })
     bundleProgress.value = 100
-    if (res.token) localStorage.setItem('token', res.token)
+    // 恢复凭据后服务端已换发新会话并经 Set-Cookie 下发，前端不再保存 token
     const rc = res.counts || {}
     await ElMessageBox.alert(
       `迁移包恢复完成：设置 ${rc.settings || 0} 项、${fmtBackupCounts(rc)}；` +
@@ -871,7 +880,15 @@ watch([f, retryPreset, pollPreset, transferPreset], () => {
 
 const load = async () => {
   suppressWatch = true
-  f.value = (await api.get('/api/settings')).data
+  loadError.value = ''
+  try {
+    f.value = (await api.get('/api/settings')).data
+  } catch (e) {
+    loadError.value = errMsg(e) || '设置加载失败'
+    ElMessage.error(loadError.value)
+    suppressWatch = false
+    return
+  }
   if (f.value.schedule_jitter_min === undefined) f.value.schedule_jitter_min = 5
   if (f.value.batch_rest_enabled === undefined) f.value.batch_rest_enabled = true
   if (f.value.batch_rest_count === undefined) f.value.batch_rest_count = 3
@@ -1023,7 +1040,8 @@ const testNotify = async (token, chatId) => {
   testing.value = true
   try {
     await api.post('/api/settings/notify/test', {
-      token: token ?? f.value.notify_token,
+      // 掩码/空串均回落已保存配置（?? 会把空字符串当有效值，属误用）
+      token: (token && token !== SECRET_MASK) ? token : '',
       chat_id: chatId ?? f.value.notify_chat_id,
     })
     saveOk('测试消息已发送', '请到 Telegram 查看')
@@ -1106,14 +1124,27 @@ onMounted(load)
   border-bottom: none;
 }
 .settings-form :deep(.el-form-item__label) {
-  font-weight: 500;
-  font-size: 13px;
-  color: var(--label-secondary);
+  font-weight: 600;
+  font-size: 13.5px;
+  color: var(--saas-text-main);
   line-height: 1.4;
   height: auto;
-  margin-bottom: 5px;
+  margin-bottom: 7px;
   padding-right: 0;
+  display: inline-flex;
+  align-items: center;
   justify-content: flex-start;
+}
+.settings-form :deep(.el-form-item__label)::before {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--el-color-primary, #4f6bff);
+  margin-right: 7px;
+  flex-shrink: 0;
+  box-shadow: 0 0 0 2px rgba(79, 107, 255, 0.20);
 }
 .settings-form :deep(.el-form-item__content) {
   min-width: 0;
@@ -1155,7 +1186,49 @@ onMounted(load)
 .bundle-est-box { width: 100%; background: #f8f9fb; border: 1px solid #ebeef5; border-radius: 6px; padding: 8px 12px; }
 .bundle-est-metrics { font-size: 13px; color: #303133; line-height: 1.6; }
 .bundle-opts { width: 100%; display: flex; flex-direction: column; gap: 8px; }
-.bundle-label { font-size: 13px; color: #606266; }
+.bundle-label { font-size: 13px; color: var(--label-secondary, #606266); }
+.bundle-capsule-radios {
+  display: inline-flex;
+  align-items: center;
+}
+.bundle-capsule-radios :deep(.el-radio-button) {
+  display: inline-flex;
+}
+.bundle-capsule-radios :deep(.el-radio-button__inner) {
+  height: 32px;
+  line-height: 30px;
+  padding: 0 14px;
+  font-size: 12.5px;
+  font-weight: 500;
+  border-color: rgba(126, 146, 196, 0.40);
+  background: rgba(255, 255, 255, 0.70);
+  color: var(--saas-text-main);
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.bundle-capsule-radios :deep(.el-radio-button:first-child .el-radio-button__inner) {
+  border-top-left-radius: 8px;
+  border-bottom-left-radius: 8px;
+}
+.bundle-capsule-radios :deep(.el-radio-button:last-child .el-radio-button__inner) {
+  border-top-right-radius: 8px;
+  border-bottom-right-radius: 8px;
+}
+.bundle-capsule-radios :deep(.el-radio-button__original-radio:checked + .el-radio-button__inner) {
+  background: var(--grad-brand, linear-gradient(135deg, #4f6bff 0%, #704fff 100%)) !important;
+  border-color: var(--el-color-primary) !important;
+  color: #ffffff !important;
+  font-weight: 600;
+  box-shadow: -1px 0 0 0 var(--el-color-primary);
+}
+html.dark .bundle-capsule-radios :deep(.el-radio-button__inner) {
+  background: rgba(20, 28, 48, 0.75);
+  border-color: rgba(255, 255, 255, 0.18);
+  color: #b7c4de;
+}
+html.dark .bundle-capsule-radios :deep(.el-radio-button__original-radio:checked + .el-radio-button__inner) {
+  background: var(--grad-brand) !important;
+  color: #ffffff !important;
+}
 .bundle-switch-group { display: flex; flex-direction: column; gap: 6px; }
 .bundle-check { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: #606266; cursor: pointer; }
 .bundle-progress-wrap { width: 100%; max-width: 460px; display: flex; flex-direction: column; gap: 4px; }

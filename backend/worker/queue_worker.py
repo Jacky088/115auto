@@ -122,6 +122,12 @@ def _get_dir_names_cached(cid: int) -> set[str]:
             return cached
     names = pan.list_file_names(cid, limit=5000)
     if ttl > 0:
+        # 防长期运行内存缓慢增长：超限时先清过期项，仍超限则整体重建
+        if len(_dir_cache) > 512:
+            for k in [k for k, (ts, _) in _dir_cache.items() if now - ts >= ttl]:
+                _dir_cache.pop(k, None)
+            if len(_dir_cache) > 512:
+                _dir_cache.clear()
         _dir_cache[cid] = (now, names)
     return names
 
@@ -134,6 +140,18 @@ def _add_to_dir_cache(cid: int, name: str):
 def _invalidate_dir_cache(cid: int):
     """转存落盘后主动失效该目录缓存，防并发或连续转存时的假阴性脏读。"""
     _dir_cache.pop(cid, None)
+
+
+def _assert_still_running(job: dict):
+    """看门狗重排守卫：任务已被重新排队/终止时抛错中止旧线程。
+
+    DB 层的 `WHERE status='running'` 守卫只能防止旧线程重复回写与重复计额，
+    防不了旧线程从挂死请求中恢复后继续执行真实 115 写操作（重复 receive 会生成
+    "(1)" 副本）。在每次真实写操作前用本检查提前退出。
+    """
+    row = db.query("SELECT status FROM transfers WHERE id=?", (job["id"],), one=True)
+    if row is None or row["status"] != "running":
+        raise RuntimeError(f"任务 #{job['id']} 已被重新调度（看门狗重排或人工操作），旧线程中止执行")
 
 
 def _dedup_by_name(cid: int, title: str, snap: dict = None) -> str:
@@ -236,8 +254,12 @@ def _process_one(job: dict):
                     jobs.notify_transfer(display, job.get("category", ""), job.get("channel", ""),
                                          target, kind="offline")
                     return
-            except Exception:
-                pass  # 查询失败按原流程重新提交
+            except Exception as e:
+                # 查询失败时继续重新提交会生成双任务——这正是该防重检查要保护的窗口，
+                # 与分享转存分支口径一致：抛重试异常进入退避，等查询恢复后再安全提交
+                logstream.warn("transfer", f"云下载重试预检异常（稍后重试，避免重复提交双任务）: {e}")
+                raise RuntimeError(f"云下载重试预检异常（防重复提交拦截）: {e}")
+        _assert_still_running(job)  # 看门狗可能已重排：旧线程不得继续提交真实云下载任务
         resp = pan.offline_download(job["share_url"], cid)
         # 提交成功 ≠ 下载完成：标记 submitted，由 offline_check_loop 跟踪真实结果
         changed = db.execute("UPDATE transfers SET status='submitted', finished_at=NULL"
@@ -413,6 +435,7 @@ def _process_one(job: dict):
     confirmed = skip_receive  # 预检命中 = 已确认文件就在目标目录
     received_before = False
     if not skip_receive:
+        _assert_still_running(job)  # 看门狗可能已重排：旧线程不得继续执行真实 115 写操作
         try:
             pan.receive(code, rc, cid, file_ids)
         except pan.Pan115Error as e:
@@ -426,8 +449,10 @@ def _process_one(job: dict):
                 received_before = True
                 confirmed = True
                 logstream.info("transfer", f"分享 {code} 115 提示此前已接收，文件已在网盘中，按成功处理")
-            elif "存在" in msg:
-                # "文件已存在"：目标目录已有同名文件 → 走反查确认
+            elif "已存在" in msg and "不存在" not in msg:
+                # "文件已存在"：目标目录已有同名文件 → 走反查确认。
+                # 注意不能宽泛匹配「存在」：「目录不存在」「分享文件不存在」会被误判，
+                # 触发无意义的全盘找回，甚至把网盘其他目录的同名文件错误复制进来
                 logstream.info("transfer", f"分享 {code} 文件已存在于目标目录，视为已转存")
             elif top_ids and flat_ids and set(flat_ids) != set(top_ids):
                 # 极少数接口形态不接受目录 id：退回逐文件提交
@@ -443,6 +468,7 @@ def _process_one(job: dict):
         # 「必须要存进去」兜底：文件可能被接收到了网盘其他位置（如早前用其他方式
         # 转存过同一分享、或分类调整过）。全盘搜索后用「复制」找回到目标目录——
         # 不动原文件，多一份也无妨。
+        _assert_still_running(job)
         _recover_misplaced(cid, snap)
         if not _verify_receive(cid, snap):
             raise RuntimeError("转存接口已返回成功，但反查目标目录未查到文件（多为 115 落库延迟，"

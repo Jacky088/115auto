@@ -164,7 +164,34 @@ def build_zip():
         if b"\r\n" in zf.read("docker-entrypoint.sh"):
             raise RuntimeError("zip 内 docker-entrypoint.sh 含 CRLF！")
 
+        # 所有 shell 脚本必须 LF（Linux 容器执行 CRLF 脚本会报 no such file or directory）
+        crlf_sh = [n for n in names if n.endswith(".sh") and b"\r\n" in zf.read(n)]
+        if crlf_sh:
+            raise RuntimeError(f"zip 内以下 shell 脚本含 CRLF: {crlf_sh}")
+
+        # index.html 引用的静态资产必须全部在包内（防止打包出残缺前端导致白屏）
+        index_html = zf.read("backend/static/index.html").decode("utf-8")
+        refs = re.findall(r'(?:src|href)="/?(assets/[^"\']+\.(?:js|css|png|svg|ico|woff2?))"',
+                          index_html)
+        missing_assets = [r for r in refs
+                          if f"backend/static/{r.lstrip('/')}" not in name_set]
+        if missing_assets:
+            raise RuntimeError(f"index.html 引用的资产缺失（构建产物不完整）: {missing_assets}")
+
+        # 包内所有 Python 文件必须能通过语法编译（发版包里不能有半成品代码）
+        syntax_errors = []
+        for n in names:
+            if n.startswith("backend/") and n.endswith(".py"):
+                try:
+                    compile(zf.read(n).decode("utf-8"), n, "exec")
+                except SyntaxError as e:
+                    syntax_errors.append(f"{n}: {e}")
+        if syntax_errors:
+            raise RuntimeError(f"包内 Python 文件语法错误: {syntax_errors}")
+
         print("校验通过：无任何 data/ 凭据与垃圾文件，容器运行文件与预构建前端完整！")
+        print(f"校验通过：全部 {len(crlf_sh)}+1 个 .sh 为 LF；index.html 引用的 {len(refs)} 个资产齐全；"
+              "包内 Python 全部可编译")
 
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
 import { createRouter, createWebHashHistory } from 'vue-router'
-import { api } from './api'
+import { api, isLoggedInFlag } from './api'
 
 const routes = [
   { path: '/login', component: () => import('./views/Login.vue'), meta: { public: true } },
@@ -34,7 +34,9 @@ export function resetWizardCache() { wizardDone = null }
 
 router.beforeEach(async (to) => {
   if (to.meta.public) return true
-  if (!localStorage.getItem('token')) return '/login'
+  // 登录态凭证在 HttpOnly Cookie 中（JS 不可读）：本地只存非敏感的「已登录」标记用于快速拦截；
+  // 标记存在但 Cookie 已过期时，由 api.js 的 401 拦截器兜底跳转登录页
+  if (!isLoggedInFlag()) return '/login'
   // 首次使用 → 引导向导（未完成时每次导航都复查，完成后走缓存不再请求）
   if (to.path !== '/setup' && wizardDone !== true) {
     try {

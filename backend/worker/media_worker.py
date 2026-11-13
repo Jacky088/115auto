@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime
 import json
 import os
 import posixpath
@@ -114,11 +115,22 @@ def get_media_settings() -> dict:
         "media_op_delay_min",
         "media_op_delay_max",
         "media_organize_schedule_enabled",
+        "media_scrape_schedule_enabled",
+        "media_organize_schedule_type",
         "media_organize_schedule_hours",
+        "media_organize_fixed_times",
     )
     out = {}
     for k in keys:
         out[k] = db.get_setting(k, db.DEFAULT_SETTINGS.get(k))
+    ft_raw = out.get("media_organize_fixed_times")
+    if isinstance(ft_raw, str):
+        try:
+            out["media_organize_fixed_times"] = json.loads(ft_raw)
+        except Exception:
+            out["media_organize_fixed_times"] = ["06:00", "12:00", "18:00"]
+    elif not isinstance(ft_raw, list):
+        out["media_organize_fixed_times"] = ["06:00", "12:00", "18:00"]
     return out
 
 
@@ -288,10 +300,12 @@ def _scan_rules_sync(
 
     hints_by_title, _ = _load_db_transfer_hints()
     items: list[dict] = []
+    seen_file_ids: set[str] = set()
 
     for rule in rules:
         src_dir = "/" + str(rule["source_dir"] or "").strip("/")
         dest_root = "/" + str(rule.get("target_dir") or src_dir).strip("/")
+        rmt = str(rule.get("media_type") or "auto").strip().lower()
         try:
             src_cid = client.resolve_dir_cid(src_dir)
             if not src_cid:
@@ -310,15 +324,23 @@ def _scan_rules_sync(
 
         # 1) BDMV / VIDEO_TS 原盘目录
         for b in tree.get("bdmv_dirs") or []:
+            bid = str(b["id"])
+            if bid in seen_file_ids:
+                continue
             pm = parse_media_context(b["name"], parent_dirs=b.get("parent_dirs") or [], is_dir=True)
             pm.is_bdmv = True
-            pm.media_type = rule.get("media_type") if rule.get("media_type") in ("movie", "tv") else pm.media_type
             hint = _match_hint_for_parsed(pm, b.get("parent_dirs") or [], hints_by_title)
             if hint:
                 pm = parse_media_context(b["name"], parent_dirs=b.get("parent_dirs") or [], db_hint=hint, is_dir=True)
                 pm.is_bdmv = True
-                if rule.get("media_type") in ("movie", "tv"):
-                    pm.media_type = rule["media_type"]
+
+            # 规则类型精准互斥过滤：剧集规则严格跳过电影原盘，电影规则严格跳过剧集原盘
+            if rmt == "tv" and pm.media_type != "tv":
+                continue
+            if rmt == "movie" and pm.media_type != "movie":
+                continue
+
+            seen_file_ids.add(bid)
             raw_entries.append({
                 "rule_id": int(rule["id"]),
                 "rule_name": rule.get("name") or src_dir,
@@ -342,22 +364,29 @@ def _scan_rules_sync(
 
         # 2) 普通视频文件 + 同目录外挂字幕配对
         for f in tree.get("files") or []:
+            fid = str(f["id"])
+            if fid in seen_file_ids:
+                continue
             fname = f["name"]
             _, ext = os.path.splitext(strip_duplicate_suffix(fname)[0])
             if ext.lower() not in VIDEO_EXTENSIONS:
                 continue
             pdirs = f.get("parent_dirs") or []
             pm = parse_media_context(fname, parent_dirs=pdirs, is_dir=False)
-            if rule.get("media_type") in ("movie", "tv") and pm.episode is None and pm.season is None:
-                pm.media_type = rule["media_type"]
             hint = _match_hint_for_parsed(pm, pdirs, hints_by_title)
             if hint:
                 pm = parse_media_context(fname, parent_dirs=pdirs, db_hint=hint, is_dir=False)
-                if rule.get("media_type") in ("movie", "tv") and pm.episode is None and pm.season is None:
-                    pm.media_type = rule["media_type"]
+
+            # 规则类型精准互斥过滤：剧集规则严格跳过电影（留给电影规则），电影规则严格跳过剧集（留给剧集规则）
+            if rmt == "tv" and pm.media_type != "tv":
+                continue
+            if rmt == "movie" and pm.media_type != "movie":
+                continue
 
             if _should_skip_extra(fname, int(f.get("size") or 0), pm, settings):
                 continue
+
+            seen_file_ids.add(fid)
 
             siblings = f.get("sibling_entries") or []
             sub_names = [s["name"] for s in siblings if os.path.splitext(strip_duplicate_suffix(s["name"])[0])[1].lower() in SUBTITLE_EXTENSIONS]
@@ -367,6 +396,7 @@ def _scan_rules_sync(
                 for sub_fn, lang_tag in match_subtitle_for_video(fname, sub_names):
                     s_entry = sub_by_name.get(sub_fn)
                     if s_entry:
+                        seen_file_ids.add(str(s_entry["id"]))
                         matched_subs.append({
                             "id": str(s_entry["id"]),
                             "name": sub_fn,
@@ -1450,7 +1480,12 @@ def stage_task_selection(
                 return {"ok": False, "code": "bad_index", "msg": "候选项序号无效", "task": r}
             chosen = cands[cand_idx]
 
-        new_tmdb_id = int(chosen["tmdb_id"])
+        try:
+            new_tmdb_id = int(chosen.get("tmdb_id") or 0)
+        except (TypeError, ValueError):
+            new_tmdb_id = 0
+        if not new_tmdb_id:
+            return {"ok": False, "code": "bad_candidate", "msg": "候选项缺少有效的 TMDB ID", "task": r}
         conn.execute(
             "UPDATE media_tasks SET status='staged', selected_tmdb_id=?, selected_kind=?, selected_title=?, "
             "selected_year=?, selected_poster=?, select_source=?, updated_at=? WHERE id=?",
@@ -1777,25 +1812,47 @@ async def execute_scrape_queue(mode: str = "scan_and_run", rule_ids: list[int] |
                         )
 
                         # 同剧集同标题缓存一次 TMDB 候选打分，减少网络请求同时全剧保持同一识别基准
-                        cache_key = None
-                        if pm.media_type == "tv" and pm.title and not pm.tmdb_id:
-                            cache_key = (normalize_title(pm.title, fuzzy_t2s=True), pm.year, it["rule_media_type"])
+                        try:
+                            cache_key = None
+                            if pm.media_type == "tv" and pm.title and not pm.tmdb_id:
+                                cache_key = (normalize_title(pm.title, fuzzy_t2s=True), pm.year, it["rule_media_type"])
 
-                        if cache_key and cache_key in show_decision_cache:
-                            decision, scored = show_decision_cache[cache_key]
-                        else:
-                            scored = await asyncio.to_thread(recall_and_score, pm, api_key, it["rule_media_type"], it.get("ep_stats"))
-                            decision, scored = decide_match(scored, conf_th, margin_th)
-                            if cache_key and scored:
-                                show_decision_cache[cache_key] = (decision, scored)
+                            if cache_key and cache_key in show_decision_cache:
+                                decision, scored = show_decision_cache[cache_key]
+                            else:
+                                scored = await asyncio.to_thread(recall_and_score, pm, api_key, it["rule_media_type"], it.get("ep_stats"))
+                                decision, scored = decide_match(scored, conf_th, margin_th)
+                                if cache_key and scored:
+                                    show_decision_cache[cache_key] = (decision, scored)
+                        except Exception as te:
+                            # TMDB 网络异常不能逃逸逐项保护：否则条目永久卡 running、
+                            # 下一轮扫描还会为同一文件重复建任务
+                            fail_cnt += 1
+                            fail_items.append((it["orig_name"], str(te)))
+                            await asyncio.to_thread(
+                                db.execute,
+                                "UPDATE media_tasks SET status='failed', error=?, updated_at=?, finished_at=? WHERE id=?",
+                                (str(te)[:400], time.time(), time.time(), tid),
+                            )
+                            continue
 
                         compact = compact_candidates(scored)
                         top1 = compact[0] if compact else None
 
                         if decision == "auto" and top1:
-                            detail = (scored[0].get("detail") if scored else None) or await asyncio.to_thread(
-                                get_tmdb_detail, top1["kind"], int(top1["tmdb_id"]), api_key
-                            )
+                            try:
+                                detail = (scored[0].get("detail") if scored else None) or await asyncio.to_thread(
+                                    get_tmdb_detail, top1["kind"], int(top1["tmdb_id"]), api_key
+                                )
+                            except Exception as te:
+                                fail_cnt += 1
+                                fail_items.append((it["orig_name"], str(te)))
+                                await asyncio.to_thread(
+                                    db.execute,
+                                    "UPDATE media_tasks SET status='failed', error=?, updated_at=?, finished_at=? WHERE id=?",
+                                    (str(te)[:400], time.time(), time.time(), tid),
+                                )
+                                continue
                             if detail:
                                 task_row = await asyncio.to_thread(db.query, "SELECT * FROM media_tasks WHERE id=?", (tid,), one=True)
                                 try:
@@ -2077,26 +2134,169 @@ async def undo_organized(batch_id: str = "", record_id: int = 0) -> dict:
     return {"ok": undone > 0, "undone": undone, "failed": failed, "msg": f"已撤销 {undone} 条，失败 {failed} 条"}
 
 
-# ---------- 定时目录整理后台协程 ----------
+# ---------- 定时目录整理后台协程与时间预测 ----------
+
+def compute_media_organize_next_runs() -> list[str]:
+    """计算未来 48 小时（2 天）内预计的目录整理触发时间点列表。"""
+    sched_type = str(db.get_setting("media_organize_schedule_type", "interval") or "interval")
+    now = time.time()
+    next_times = []
+
+    if sched_type == "fixed_times":
+        fixed_times_raw = db.get_setting("media_organize_fixed_times", '["06:00", "12:00", "18:00"]')
+        try:
+            if isinstance(fixed_times_raw, str):
+                fixed_times = json.loads(fixed_times_raw)
+            elif isinstance(fixed_times_raw, list):
+                fixed_times = fixed_times_raw
+            else:
+                fixed_times = []
+        except Exception:
+            fixed_times = []
+
+        valid_times = []
+        for item in fixed_times:
+            m = re.match(r"^([01]?\d|2[0-3]):([0-5]\d)$", str(item).strip())
+            if m:
+                valid_times.append(f"{int(m.group(1)):02d}:{int(m.group(2)):02d}")
+        valid_times = sorted(set(valid_times))
+        if not valid_times:
+            return []
+
+        today = datetime.date.today()
+        for day_offset in range(4):
+            d = today + datetime.timedelta(days=day_offset)
+            d_str = d.strftime("%Y-%m-%d")
+            for t_str in valid_times:
+                dt_str = f"{d_str} {t_str}"
+                try:
+                    t_struct = time.strptime(dt_str, "%Y-%m-%d %H:%M")
+                    ts = time.mktime(t_struct)
+                    if now < ts <= now + 48 * 3600:
+                        next_times.append(ts)
+                except Exception:
+                    pass
+    else:
+        interval_hours = max(float(db.get_setting("media_organize_schedule_hours", 12) or 12), 1.0)
+        interval_sec = interval_hours * 3600
+        last_run = float(db.get_setting("media_organize_last_run", 0) or 0)
+
+        if last_run <= 0:
+            base_t = now
+        else:
+            base_t = last_run
+            while base_t + interval_sec <= now:
+                base_t += interval_sec
+
+        cur_t = base_t + interval_sec if base_t <= now else base_t
+        while cur_t <= now + 48 * 3600:
+            next_times.append(cur_t)
+            cur_t += interval_sec
+
+    next_times.sort()
+
+    results = []
+    today_str = time.strftime("%Y-%m-%d")
+    tomorrow_str = (datetime.date.today() + datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+    day_after_str = (datetime.date.today() + datetime.timedelta(days=2)).strftime("%Y-%m-%d")
+
+    for ts in next_times:
+        d_part = time.strftime("%Y-%m-%d", time.localtime(ts))
+        hm_part = time.strftime("%H:%M", time.localtime(ts))
+        if d_part == today_str:
+            prefix = "今天"
+        elif d_part == tomorrow_str:
+            prefix = "明天"
+        elif d_part == day_after_str:
+            prefix = "后天"
+        else:
+            prefix = time.strftime("%m月%d日", time.localtime(ts))
+        results.append(f"{prefix} {hm_part}")
+    return results
+
+
+_last_media_fixed_trigger_minute = ""
+_pending_scheduled_organize = False
+_pending_scheduled_scrape = False
 
 async def media_organize_loop():
-    """后台定时自动目录整理循环（仅在系统 running 且启用定时整理、且四方门禁空闲时触发）。"""
-    logstream.info("organize", "定时目录整理协程已启动")
+    """后台定时自动整理与刮削调度循环：
+    1. 支持分别开启「定时整理」与「定时刮削」；
+    2. 到达触发时间时，记录排队意图（pending）；
+    3. 严格按顺序排队：整理优先执行，刮削在整理完全结束且四方门禁空闲后才执行；
+    4. 若遇到转存队列或其它独占任务在运行，持续等待其到达终点，绝不并发、绝不丢弃计划。
+    """
+    global _last_media_fixed_trigger_minute, _pending_scheduled_organize, _pending_scheduled_scrape
+    logstream.info("organize", "定时整理与刮削调度协程已启动")
     while True:
         try:
-            await asyncio.sleep(60)
+            await asyncio.sleep(15)
             if not is_system_running():
                 continue
-            if not bool(db.get_setting("media_organize_schedule_enabled", False)):
+
+            org_enabled = bool(db.get_setting("media_organize_schedule_enabled", False))
+            scr_enabled = bool(db.get_setting("media_scrape_schedule_enabled", False))
+            if not org_enabled and not scr_enabled:
+                _pending_scheduled_organize = False
+                _pending_scheduled_scrape = False
                 continue
-            if transfer_gate.is_exclusive_busy():
+
+            if not transfer_gate.is_in_schedule_window():
                 continue
-            hours = max(1, min(168, int(db.get_setting("media_organize_schedule_hours", 12) or 12)))
-            last = float(db.get_setting("media_organize_last_run", 0) or 0)
-            if time.time() - last >= hours * 3600:
+
+            sched_type = str(db.get_setting("media_organize_schedule_type", "interval") or "interval")
+            now = time.time()
+
+            if sched_type == "fixed_times":
+                fixed_times_raw = db.get_setting("media_organize_fixed_times", '["06:00", "12:00", "18:00"]')
+                try:
+                    if isinstance(fixed_times_raw, str):
+                        fixed_times = json.loads(fixed_times_raw)
+                    elif isinstance(fixed_times_raw, list):
+                        fixed_times = fixed_times_raw
+                    else:
+                        fixed_times = []
+                except Exception:
+                    fixed_times = []
+
+                cur_hm = time.strftime("%H:%M")
+                cur_min_key = time.strftime("%Y-%m-%d %H:%M")
+                if cur_hm in fixed_times and cur_min_key != _last_media_fixed_trigger_minute:
+                    _last_media_fixed_trigger_minute = cur_min_key
+                    if org_enabled:
+                        _pending_scheduled_organize = True
+                    if scr_enabled:
+                        _pending_scheduled_scrape = True
+            else:
+                hours = max(1, min(168, int(db.get_setting("media_organize_schedule_hours", 12) or 12)))
+                last_org = float(db.get_setting("media_organize_last_run", 0) or 0)
+                if org_enabled and (now - last_org >= hours * 3600):
+                    _pending_scheduled_organize = True
+                last_scr = float(db.get_setting("media_scrape_last_run", 0) or 0)
+                if scr_enabled and (now - last_scr >= hours * 3600):
+                    _pending_scheduled_scrape = True
+
+            # 严格排队与互斥执行：
+            # 1. 优先执行「定时整理」
+            if _pending_scheduled_organize:
+                if transfer_gate.is_exclusive_busy():
+                    # 门禁正忙（转存中、其它排空或独占中），保持排队等待
+                    continue
+                _pending_scheduled_organize = False
+                logstream.info("organize", "⏰ 定时整理排队到达开启条件，开始执行...")
                 await execute_organize_queue(trigger="schedule")
+                continue
+
+            # 2. 整理未排队或已完成，执行「定时刮削」
+            if _pending_scheduled_scrape:
+                if transfer_gate.is_exclusive_busy():
+                    # 门禁正忙（整理中、转存中等），排队等待
+                    continue
+                _pending_scheduled_scrape = False
+                logstream.info("scrape", "⏰ 定时刮削排队到达开启条件，开始执行...")
+                await execute_scrape_queue(mode="scan_and_run")
         except asyncio.CancelledError:
             break
         except Exception as e:
-            logstream.warn("organize", f"定时目录整理检查异常: {e}")
-            await asyncio.sleep(30)
+            logstream.warn("organize", f"定时整理与刮削调度检查异常: {e}")
+            await asyncio.sleep(20)

@@ -2,6 +2,7 @@
 import asyncio
 import datetime
 import json
+import os
 import queue
 import re
 import threading
@@ -553,13 +554,14 @@ async def health_check_loop():
             timeout_secs = await asyncio.to_thread(_running_timeout_secs)
             requeued = await asyncio.to_thread(
                 db.execute,
-                "UPDATE transfers SET status='queued', running_at=NULL,"
+                "UPDATE transfers SET status='queued', attempts=attempts+1, running_at=NULL,"
                 " error='转存超时：115 请求长时间无响应，已自动重新排队'"
                 " WHERE status='running' AND running_at IS NOT NULL AND running_at < ?",
                 (time.time() - timeout_secs,))
             if requeued:
                 logstream.warn("transfer", f"看门狗：{requeued} 个任务转存超时"
-                                           f"（>{timeout_secs // 60} 分钟无心跳），已重新排队")
+                                           f"（>{timeout_secs // 60} 分钟无心跳），已重新排队"
+                                           "（重排计入重试次数，新线程将先做防重预检）")
 
             # --- 115 Cookie ---
             # 正在执行转存或文件整理时优先复用缓存，避免向繁忙中的 115 并发强刷校验请求
@@ -568,7 +570,11 @@ async def health_check_loop():
                 or transfer_gate.is_transfer_active()
             )
             st = await pan.run_pan_thread(pan.check_login, not in_heavy_115)
-            if st.get("ok"):
+            if st.get("ok") is None:
+                # 网络抖动等未知状态：只告警，不计入 Cookie 失效熔断（避免误停机）
+                logstream.warn("115", f"115 Cookie 检查结果未知（网络异常，Cookie 状态保持不变）: "
+                                      f"{st.get('err', '')[:200]}")
+            elif st.get("ok"):
                 if fail_streak["115"]:
                     logstream.info("115", "115 Cookie 已恢复有效")
                 fail_streak["115"] = 0
@@ -855,8 +861,8 @@ async def offline_check_loop():
                                         "file_id": found_file.get("id"),
                                         "size": int(found_file.get("size", 0) or 0)
                                     }
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logstream.warn("offline", f"云下载落盘反查兜底异常（任务 {job.get('share_url', '')}）: {e}")
 
                 if t is None:
                     # 仍未找到：超过 3 天确认为失效任务，否则保持 submitted 继续等待
@@ -1034,7 +1040,9 @@ async def auto_backup_loop():
                 now_hm = now.strftime("%H:%M")
 
                 if not last_sent_date and last_ts > 0:
-                    last_sent_date = datetime.datetime.fromtimestamp(last_ts).strftime("%Y-%m-%d")
+                    # 与 _bj_now() 统一为北京时区：本地时区 fromtimestamp 在跨时区部署会错算天数
+                    last_sent_date = datetime.datetime.fromtimestamp(
+                        last_ts, tz=_bj_now().tzinfo).strftime("%Y-%m-%d")
 
                 should_send = False
                 if not last_sent_date:

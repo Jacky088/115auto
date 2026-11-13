@@ -22,6 +22,7 @@ from ..pan115.client import (
     parse_season_number,
     strip_duplicate_suffix,
 )
+from .episode import cn_to_int
 
 VIDEO_EXTENSIONS = {
     ".mp4", ".mkv", ".ts", ".mov", ".avi", ".flv", ".wmv",
@@ -49,18 +50,22 @@ _SPECIAL_RE = re.compile(
 )
 
 # 分段电影标识（CD1/CD2, Part1/Part2, Disc1/Disc2, pt1；保护 `下载`、`上海` 等正常片名）
+# 注意「第N集」是集数不是分段：分段只认「第N部」，避免狂飙 第1集～第3集 被误判为 part 导致同名碰撞
 _PART_RE = re.compile(
     r"(?:^|[\s\.\-_])("
     r"(?:cd|disc|disk|dvd|part|pt)[\s\._-]?0*(\d{1,2})(?=$|[\s\.\-_\]）)])|"
     r"[上下](?:[部集]|(?=$|[\s\.\-_\]）)]))|"
-    r"第[一二三123][部集]?(?=$|[\s\.\-_\]）)])"
+    r"第[一二三123]部?(?=$|[\s\.\-_\]）)])"
     r")",
     re.IGNORECASE,
 )
 
-# 显式 ID 标签
+# 显式 ID 标签（IMDB 要求前后边界，防止 BestTt123456 之类子串误提取）
 _TMDB_TAG_RE = re.compile(r"[\[\{（(]\s*tmdb(?:id)?[\s:=\-]+(\d+)\s*[\]\}）)]", re.IGNORECASE)
-_IMDB_TAG_RE = re.compile(r"[\[\{（(]?\s*(tt\d{6,9})\s*[\]\}）)]?", re.IGNORECASE)
+_IMDB_TAG_RE = re.compile(
+    r"(?:[\[\{（(]\s*|(?<![A-Za-z0-9]))(tt\d{6,9})(?:\s*[\]\}）)]|(?![0-9A-Za-z]))",
+    re.IGNORECASE,
+)
 
 # 技术标签：在年份与集数识别前先抽出并清除，避免 1920/2160/264/265/10/60 误识别
 _RES_PATTERNS = [
@@ -105,12 +110,13 @@ _TRAILING_NON_GROUP_RE = re.compile(r"^(?:e|ep|sp|cd|pt|part|disc|disk|dvd|s)\d+
 _URL_AD_RE = re.compile(r"(?:https?://|www\.)[^\s\]）】]+|[A-Za-z0-9\-]+\.(?:com|net|org|tv|cc|vip|xyz)\b", re.I)
 
 # 集数与范围（按精度降序尝试）
+# 季号放宽到 4 位以兼容综艺「S2024E15」年季格式；集数放宽到 4 位兼容千集长寿番
 _RANGE_SE_EP_RE = re.compile(
-    r"(?:^|[^A-Za-z0-9])S0*(\d{1,2})\s*[\._\- ]?\s*E0*(\d{1,4})\s*[-~～]\s*E?0*(\d{1,4})(?=$|[^A-Za-z0-9])",
+    r"(?:^|[^A-Za-z0-9])S0*(\d{1,4})\s*[\._\- ]?\s*E0*(\d{1,4})\s*[-~～]\s*E?0*(\d{1,4})(?=$|[^A-Za-z0-9])",
     re.IGNORECASE,
 )
 _SINGLE_SE_EP_RE = re.compile(
-    r"(?:^|[^A-Za-z0-9])S0*(\d{1,2})\s*[\._\- ]?\s*E0*(\d{1,4})(?:v\d)?(?=$|[^A-Za-z0-9])",
+    r"(?:^|[^A-Za-z0-9])S0*(\d{1,4})\s*[\._\- ]?\s*E0*(\d{1,4})(?:v\d)?(?:E0*(\d{1,4}))?(?=$|[^A-Za-z0-9])",
     re.IGNORECASE,
 )
 _X_SE_EP_RE = re.compile(
@@ -118,8 +124,13 @@ _X_SE_EP_RE = re.compile(
     re.IGNORECASE,
 )
 _CN_EP_RANGE_RE = re.compile(r"第\s*0*(\d{1,4})\s*[-~～]\s*0*(\d{1,4})\s*[集话話]")
-_CN_EP_RE = re.compile(r"第\s*0*(\d{1,4})\s*[集话話期]")
-_EP_PREFIX_RE = re.compile(r"(?:^|[^A-Za-z0-9])(?:EP?|SP)0*(\d{1,4})(?:v\d)?(?=$|[^A-Za-z0-9])", re.IGNORECASE)
+# 中文数字集数（第十二集 / 一百零三话）与阿拉伯数字统一解析
+_CN_EP_RE = re.compile(r"第\s*(\d{1,4}|[零一二三四五六七八九十百两]{1,6})\s*[集话話期]")
+# E1P2 / E01P2（分 P 双集文件）：集号后允许跟 P 段号
+_EP_PREFIX_RE = re.compile(
+    r"(?:^|[^A-Za-z0-9])(?:EP?|SP)0*(\d{1,4})(?:v\d)?(?:P0*(\d{1,2}))?(?=$|[^A-Za-z0-9])",
+    re.IGNORECASE,
+)
 _ANIME_DASH_EP_RE = re.compile(r"[\s_\.\]][\-–—]\s*0*(\d{1,4})(?:v\d)?(?=$|[\s\.\[_（(])")
 _ANIME_BRACKET_EP_RE = re.compile(r"[\[【]\s*0*(\d{1,4})(?:v\d)?\s*[\]】]")
 _BARE_NUM_RE = re.compile(r"^0*(\d{1,4})(?:v\d)?$")
@@ -137,25 +148,7 @@ _GENERIC_PARENT_DIRS = _GENERIC_LIBRARY_SKIP_FOLDERS | {
     "花絮", "预告", "全集", "正片", "中字", "国语", "粤语",
 }
 
-_CN_DIGIT = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5,
-             "六": 6, "七": 7, "八": 8, "九": 9}
-
-
-def cn_to_int(raw: str) -> int | None:
-    """支持一~九十九及阿拉伯数字的季数解析。"""
-    s = (raw or "").strip()
-    if not s:
-        return None
-    if s.isdigit():
-        return int(s)
-    if s in _CN_DIGIT:
-        return _CN_DIGIT[s]
-    if "十" in s:
-        parts = s.split("十", 1)
-        tens = 1 if parts[0] == "" else _CN_DIGIT.get(parts[0], 0)
-        ones = 0 if parts[1] == "" else _CN_DIGIT.get(parts[1], 0)
-        return tens * 10 + ones
-    return None
+# 中文数字转 int 的统一实现见 episode.cn_to_int（本模块按旧导出位置兼容复用）
 
 
 _SUB_LANG_TOKENS = {
@@ -226,6 +219,10 @@ def sanitize_filename(name: str, max_bytes: int = 220) -> str:
     s = s.replace(":", "：")
     s = re.sub(r'[\\/*?"<>|]', " ", s)
     s = re.sub(r"\s{2,}", " ", s).strip(" .")
+    # Windows 保留设备名（CON/NUL/COM1 等，含带扩展名形式）会导致目录创建失败，追加下划线规避
+    root, ext = os.path.splitext(s)
+    if re.fullmatch(r"(?i)(con|prn|aux|nul|com[1-9]|lpt[1-9])", root):
+        s = f"{root}_{ext}"
     # 按 UTF-8 字节安全截断（115 单级名 255 字节上限，预留余量防止带后缀超限）
     encoded = s.encode("utf-8")
     if len(encoded) > max_bytes:
@@ -394,7 +391,16 @@ def parse_media_filename(filename: str, is_dir: bool = False) -> ParsedMedia:
             pm.part = f"part{int(pt_num)}"
         else:
             raw_pt = m_part.group(1)
-            pm.part = "part1" if ("上" in raw_pt or "一" in raw_pt) else ("part2" if ("下" in raw_pt or "二" in raw_pt) else "part3")
+            # 「第3部 / 第2」等阿拉伯数字分段：直接取数字；「上/一」part1、「下/二」part2、其余 part3
+            digit = re.search(r"\d+", raw_pt)
+            if digit:
+                pm.part = f"part{int(digit.group(0))}"
+            elif ("上" in raw_pt or "一" in raw_pt):
+                pm.part = "part1"
+            elif ("下" in raw_pt or "二" in raw_pt):
+                pm.part = "part2"
+            else:
+                pm.part = "part3"
         work = _PART_RE.sub(" ", work)
 
     # 3. 技术标签保护性剥离（此时方括号里的 [05] 等集数尚未剥离）
@@ -419,6 +425,9 @@ def parse_media_filename(filename: str, is_dir: bool = False) -> ParsedMedia:
         if m:
             pm.season = int(m.group(1))
             pm.episode = int(m.group(2))
+            if m.group(3) and pm.episode <= int(m.group(3)) <= pm.episode + 30:
+                # S01E01E02 连写合集：第二段作为集范围终点（命名渲染为 E01-E02）
+                pm.episode_end = int(m.group(3))
             ep_cut_idx = m.start()
         else:
             m = _X_SE_EP_RE.search(work)
@@ -431,7 +440,10 @@ def parse_media_filename(filename: str, is_dir: bool = False) -> ParsedMedia:
         for pat in (_CN_EP_RANGE_RE, _CN_EP_RE):
             m = pat.search(work)
             if m:
-                pm.episode = int(m.group(1))
+                ep_val = cn_to_int(m.group(1))
+                if ep_val is None:
+                    continue
+                pm.episode = ep_val
                 if pat is _CN_EP_RANGE_RE:
                     pm.episode_end = int(m.group(2))
                 ep_cut_idx = m.start()
@@ -441,6 +453,9 @@ def parse_media_filename(filename: str, is_dir: bool = False) -> ParsedMedia:
         m = _EP_PREFIX_RE.search(work)
         if m:
             pm.episode = int(m.group(1))
+            if m.group(2) and not pm.part:
+                # E1P2 / E01P2：P 段号按分集分段处理
+                pm.part = f"part{int(m.group(2))}"
             ep_cut_idx = m.start()
 
     if pm.episode is None:
@@ -625,11 +640,21 @@ def match_subtitle_for_video(video_name: str, sub_names: list[str]) -> list[tupl
             if lang_parts:
                 lang_tag = "." + ".".join(lang_parts[:2])
         else:
-            # 方式 2：归一化比对（忽略点号/下划线/空格差异）
+            # 方式 2：归一化比对（忽略点号/下划线/空格差异）。
+            # 前缀命中时若尾部紧跟数字，必须与视频集数一致（含零填充差异）才放行，
+            # 防止 E2 的视频误配 E21 的字幕（如「番名 2」vs「番名 21」）
             s_norm = normalize_title(s_root, fuzzy_t2s=True)
-            if v_norm and (s_norm == v_norm or s_norm.startswith(v_norm)):
-                is_hit = True
-            elif v_parsed.media_type == "tv" and v_parsed.episode is not None:
+            is_hit = s_norm == v_norm and bool(v_norm)
+            if not is_hit and v_norm and s_norm.startswith(v_norm):
+                tail = s_norm[len(v_norm):]
+                if not tail[:1].isdigit():
+                    is_hit = True
+                else:
+                    tail_num = re.match(r"\d+", tail)
+                    if (v_parsed.episode is not None and tail_num
+                            and int(tail_num.group(0)) == int(v_parsed.episode)):
+                        is_hit = True
+            if not is_hit and v_parsed.media_type == "tv" and v_parsed.episode is not None:
                 # 方式 3：同目录按季/集号兜底配对（解决 `狂飙.S01E01.2160p.mkv` 与 `狂飙.S01E01.chs.ass`）
                 s_parsed = parse_media_filename(s_clean)
                 if (

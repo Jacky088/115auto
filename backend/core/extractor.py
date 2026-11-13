@@ -72,7 +72,10 @@ def extract(text: str) -> list[dict]:
 
     # 带域名的链接（含或不含 password）
     spans = [(m, m.group("code")) for m in URL_RE.finditer(text)]
-    consumed_spans = {m.start() for m in PROTO_RE.finditer(text)}
+    proto_matches = list(PROTO_RE.finditer(text))
+    consumed_spans = {m.start() for m in proto_matches}
+    # 全部分享链接的起点：用于判定「就近提取码」是否其实属于后一个链接
+    link_starts = sorted([m.start() for m, _ in spans] + [m.start() for m in proto_matches])
     for m, code in spans:
         if m.start() in consumed_spans:
             continue
@@ -85,6 +88,11 @@ def extract(text: str) -> list[dict]:
             # 再回看链接之前的 60 字符（「提取码：xxxx https://…」前置写法同样常见）
             tail = text[m.end(): m.end() + 60]
             pw_match = PW_RE.search(tail)
+            if pw_match:
+                # 命中位置与本链接之间若还隔着另一个分享链接，说明该提取码属于后者
+                seg_end_abs = m.end() + pw_match.start()
+                if any(s > m.end() and s < seg_end_abs for s in link_starts):
+                    pw_match = None
             if not pw_match:
                 head_matches = list(PW_RE.finditer(text[max(0, m.start() - 60): m.start()]))
                 if head_matches:

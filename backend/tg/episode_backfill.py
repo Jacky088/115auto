@@ -89,13 +89,21 @@ def should_backfill(title: str):
 def _match_post(text: str, base: str, cur_season: int | None, cur_ep: int) -> int | None:
     """帖子是否属于同一剧集且集数早于当前集。返回其集数；不匹配返回 None。
 
-    base 为剧名关键词（已归一化，按包含匹配）：自动解析时是完整剧名，
-    手动发起时允许用户填写简短关键词。
+    base 为剧名关键词（已归一化）：自动解析时是完整剧名，手动发起时允许用户填写
+    简短关键词。匹配要求 base 之后不能紧跟数字/字母/汉字（边界校验），
+    防止《斗罗大陆》误配《斗罗大陆2》《斗罗大陆剧场版》——错剧分集帖会带着
+    原剧的目标目录入队转存。手动关键词为兼容模糊搜索保留后缀宽松匹配
+    （如「斗罗大陆 4K」仍可命中）。
     季号必须双方都能识别且相等，任一方缺失即保守跳过——防跨季误补
     （存错季不可接受，宁可漏配后在汇总中透明列出）。
     """
     head = classifier.headline(text or "")
-    if not head or base not in base_title(head):
+    if not head:
+        return None
+    head_norm = base_title(head)
+    if not head_norm:
+        return None
+    if head_norm != base and not re.search(re.escape(base) + r"(?![0-9A-Za-z\u4e00-\u9fff])", head_norm):
         return None
     season, ep = parse_episode(text or "")
     if ep is None or ep >= cur_ep:
@@ -199,6 +207,7 @@ async def _process_request(req: dict) -> None:
     before = message_id
     pages = 0
     aborted = False  # 翻页异常中断：本轮不推进已搜索范围（下次可重搜这段历史）
+    lowest_visited = message_id  # 本轮实际翻到的最早位置（含空页与找齐提前停止的场景）
     async with httpx.AsyncClient(proxy=polling._proxy(), follow_redirects=True) as client:
         while pages < _MAX_PAGES:
             if before <= searched_floor:
@@ -216,6 +225,7 @@ async def _process_request(req: dict) -> None:
                 break
             posts = await asyncio.to_thread(polling.parse_page, resp.text)
             if not posts:
+                lowest_visited = min(lowest_visited, before)  # 空页也算翻到该位置（已到频道最早消息）
                 break  # 已到频道最早消息
             ids = [m["id"] for m in posts]
             if min(ids) >= before:
@@ -224,6 +234,7 @@ async def _process_request(req: dict) -> None:
                 aborted = True
                 break
             pages += 1
+            lowest_visited = min(lowest_visited, min(ids))
             for p in posts:
                 if p["id"] >= message_id or p["id"] <= searched_floor:
                     continue
@@ -237,11 +248,11 @@ async def _process_request(req: dict) -> None:
             await asyncio.sleep(_PAGE_SLEEP)
 
     # 只有自然结束（预算用尽/翻到频道头部/集数找齐）才推进已搜索范围：
-    # 异常中断的历史段保持"未搜索"，之后再次发起补全时会重搜，不留下永久盲区
+    # 异常中断的历史段保持"未搜索"，之后再次发起补全时会重搜，不留下永久盲区。
+    # 记录本轮实际翻到的最早位置而非"最早命中的帖 id"——否则早期因集数不匹配被
+    # 跳过的分集帖会落在已搜索范围之外，再次发起补全时永久漏补
     if not aborted:
-        _searched_min[key] = min(_searched_min.get(key, message_id),
-                                 min((p["id"] for ps in found.values() for p in ps),
-                                     default=message_id))
+        _searched_min[key] = min(_searched_min.get(key, message_id), lowest_visited)
 
     if not found:
         logstream.info("backfill",

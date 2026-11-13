@@ -139,20 +139,35 @@ def record_progress(sub: dict, title: str, season: int | None = None,
 
     同一集的不同写法（S01E05 / s1e5 / 第5集 / 5集）视为同一集，不重复通知；
     无集数标识的内容只在首次命中时通知。
+    进度只前进不回退：旧集重发（S01E03 晚于 S02E05 到达）不推送、不倒退进度；
+    进度取自数据库最新值（而非调用方传入的快照），并发命中同一订阅时以后到者
+    与库中值单调比较，后写的旧集不会覆盖已推进的进度。
     """
     old_season, old_ep = _legacy_numbers(sub)
     old_display = str(sub.get("last_ep") or "")
+    # 重新读取库中最新进度：调用方持有的 sub 可能是并发处理前的旧快照
+    row = db.query(
+        "SELECT last_ep, last_season, last_episode FROM subscriptions WHERE id=?",
+        (sub["id"],), one=True)
+    if row is not None:
+        old_display = str(row["last_ep"] or "") or old_display
+        if row["last_season"] is not None:
+            old_season = int(row["last_season"])
+        if row["last_episode"] is not None:
+            old_ep = int(row["last_episode"])
+
     if ep is None:
         is_new = old_ep is None and not old_display
     elif old_ep is None:
         is_new = True
     elif season is not None and old_season is not None:
-        is_new = (int(season), int(ep)) != (int(old_season), int(old_ep))
+        # 只判「更新」不判「不同」：旧集重发不算新内容（同时防进度倒退）
+        is_new = (int(season), int(ep)) > (int(old_season), int(old_ep))
     elif season is not None:
         # 旧记录没有季信息：按新集处理（最多重复一次通知，避免漏报）
         is_new = True
     else:
-        is_new = int(ep) != int(old_ep)
+        is_new = int(ep) > int(old_ep)
 
     display = episode.canonical(season, ep, kind) if ep is not None else old_display
     db.execute(

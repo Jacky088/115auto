@@ -9,7 +9,7 @@ import secrets
 import threading
 import time
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 
 from .. import database as db
 from ..core import logstream
@@ -17,28 +17,45 @@ from ..worker.queue_worker import validate_link
 
 router = APIRouter(prefix="/api/ext/v1")
 
-# 对外 API 限速：60 秒窗口内最多 120 次（HA 数秒级轮询绰绰有余，失控脚本则被拦下）
+# 对外 API 限速（双层）：全局 60 秒窗口 120 次 + 单来源 60 秒窗口 30 次。
+# 只用全局桶时，未认证的垃圾请求可以占满预算，把合法 HA 集成饿成 429；
+# 单来源小桶保证任何单一 IP 都无法独占全局预算，全局桶仍兜底防多源失控。
 _rl_lock = threading.Lock()
 _rl_records: list[float] = []
+_rl_per_ip: dict[str, list[float]] = {}
 _RATE_LIMIT = 120
 _RATE_WINDOW = 60.0
+_IP_RATE_LIMIT = 30
+_rl_ip_max = 1000  # 跟踪的来源数上限，防内存膨胀
 
 
-def _rate_limited() -> bool:
+def _rate_limited(ip: str = "") -> bool:
     now = time.time()
     with _rl_lock:
         while _rl_records and now - _rl_records[0] > _RATE_WINDOW:
             _rl_records.pop(0)
         if len(_rl_records) >= _RATE_LIMIT:
             return True
+        if ip:
+            recs = [t for t in _rl_per_ip.get(ip, []) if now - t < _RATE_WINDOW]
+            if len(recs) >= _IP_RATE_LIMIT:
+                _rl_per_ip[ip] = recs
+                return True
+            recs.append(now)
+            if len(_rl_per_ip) > _rl_ip_max:
+                oldest = min(_rl_per_ip, key=lambda k: _rl_per_ip[k][-1] if _rl_per_ip[k] else 0)
+                _rl_per_ip.pop(oldest, None)
+            _rl_per_ip[ip] = recs
         _rl_records.append(now)
         return False
 
 
-def require_token(x_api_token: str = Header(default="")):
+def require_token(x_api_token: str = Header(default=""), request: Request = None):
     # 限速在鉴权前计数：失败尝试同样受限，防爆破
-    if _rate_limited():
-        raise HTTPException(429, f"请求过于频繁（{_RATE_LIMIT} 次/分钟），请降低调用频率")
+    ip = request.client.host if (request is not None and request.client) else ""
+    if _rate_limited(ip):
+        raise HTTPException(429, f"请求过于频繁（单来源 {_IP_RATE_LIMIT} 次/分钟、"
+                                 f"全局 {_RATE_LIMIT} 次/分钟），请降低调用频率")
     token = str(db.get_setting("api_token", "") or "").strip()
     if not token:
         raise HTTPException(403, "对外 API 未启用（请在设置页生成 API Token 后开启）")

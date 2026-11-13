@@ -33,21 +33,21 @@
     <!-- 筛选 -->
     <div class="toolbar filter-toolbar" style="margin-top: 14px">
       <div class="filter-selects">
-        <el-select v-model="filter.level" clearable placeholder="级别" class="filter-level" @change="load">
+        <el-select v-model="filter.level" clearable placeholder="级别" class="filter-level" @change="loadFromFirstPage">
           <el-option label="info" value="info" />
           <el-option label="warn" value="warn" />
           <el-option label="error" value="error" />
         </el-select>
-        <el-select v-model="filter.module" clearable filterable placeholder="模块" class="filter-module" @change="load">
+        <el-select v-model="filter.module" clearable filterable placeholder="模块" class="filter-module" @change="loadFromFirstPage">
           <el-option v-for="m in modules" :key="m" :label="m" :value="m" />
         </el-select>
       </div>
       <div class="filter-search-row">
         <el-input v-model="filter.search" placeholder="搜索日志内容" clearable class="filter-search"
-                  @keyup.enter="load" @clear="load">
+                  @keyup.enter="loadFromFirstPage" @clear="loadFromFirstPage">
           <template #prefix><el-icon><Search /></el-icon></template>
         </el-input>
-        <el-button type="primary" @click="load">查询</el-button>
+        <el-button type="primary" @click="loadFromFirstPage">查询</el-button>
         <span class="tip filter-count">共 {{ total }} 条</span>
       </div>
     </div>
@@ -135,21 +135,27 @@ const pickDay = (d) => {
   load()
 }
 
+let loadSeq = 0
 const load = async () => {
+  const seq = ++loadSeq
   loading.value = true
   try {
     const { data } = await api.get('/api/logs', {
       params: { date: selDate.value, level: filter.level, module: filter.module,
                 search: filter.search, page: page.value, size: size.value },
     })
+    if (seq !== loadSeq) return  // 丢弃过期响应，防止快速筛选时旧页覆盖新页
     items.value = data.items
     total.value = data.total
   } catch (e) {
-    ElMessage.error(errMsg(e))
+    if (seq === loadSeq) ElMessage.error(errMsg(e))
   } finally {
-    loading.value = false
+    if (seq === loadSeq) loading.value = false
   }
 }
+
+// 筛选/搜索条件变化：重置回第 1 页，避免停在全空页
+const loadFromFirstPage = () => { page.value = 1; load() }
 
 const exportTxt = async () => {
   try {
@@ -174,7 +180,9 @@ const exportTxt = async () => {
 
 onMounted(async () => {
   await loadDays()
-  modules.value = (await api.get('/api/logs/modules')).data
+  try {
+    modules.value = (await api.get('/api/logs/modules')).data
+  } catch { /* 模块列表加载失败不阻塞日志主表，筛选下拉降级为空 */ }
   load()
 })
 </script>

@@ -1,26 +1,35 @@
 import axios from 'axios'
 import { ElMessage } from 'element-plus'
 
-export const api = axios.create({ timeout: 30000 })
+export const api = axios.create({ timeout: 30000, withCredentials: true })
 
-api.interceptors.request.use((cfg) => {
-  const t = localStorage.getItem('token')
-  if (t) cfg.headers.Authorization = 'Bearer ' + t
-  return cfg
-})
+// 登录态走 HttpOnly Cookie（sa_auth），token 不落 localStorage（脚本不可读）。
+// withCredentials 保证同源请求携带 Cookie；401 时清理本地残留并跳登录页。
+api.interceptors.request.use((cfg) => cfg)
 
 api.interceptors.response.use(
   (r) => r,
   (err) => {
     if (err.response?.status === 401 && !location.hash.startsWith('#/login')) {
-      localStorage.removeItem('token')
       location.hash = '#/login'
     }
     return Promise.reject(err)
   },
 )
 
-export const errMsg = (e) => e?.response?.data?.detail || e?.message || '请求失败'
+/** 设置接口的密钥掩码值：GET 返回此哨兵表示「已配置」，PUT 收到即保持原值不变 */
+export const SECRET_MASK = '__SAVED__'
+
+/**
+ * 登录会话标记：仅记录「已登录过」的非敏感布尔，用于路由守卫快速拦截；
+ * 真正的凭证是 HttpOnly Cookie（JS 读不到）。标记过期时由 401 拦截器兜底跳登录页。
+ */
+export const markLoggedIn = () => localStorage.setItem('logged_in', '1')
+export const clearLoggedIn = () => localStorage.removeItem('logged_in')
+export const isLoggedInFlag = () => !!localStorage.getItem('logged_in')
+
+export const errMsg = (e, fallback = '请求失败') =>
+  e?.response?.data?.detail || e?.message || fallback
 
 export const fmtSize = (b) => {
   if (!b && b !== 0) return '-'

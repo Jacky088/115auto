@@ -1143,10 +1143,23 @@ onUnmounted(() => {
 }
 .config-label {
   font-size: 13px;
-  font-weight: 500;
-  color: var(--label-secondary);
-  min-width: 72px;
+  font-weight: 600;
+  color: var(--saas-text-main);
+  min-width: 78px;
   flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+}
+.config-label::before {
+  content: "";
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--el-color-primary, #4f6bff);
+  margin-right: 6px;
+  flex-shrink: 0;
+  box-shadow: 0 0 0 1.5px rgba(79, 107, 255, 0.18);
 }
 .config-control {
   display: flex;

@@ -99,7 +99,9 @@ const onOpen = () => {
 
 const _isLoginErr = (msg) => msg.includes('未登录') || msg.includes('Cookie')
 const listEl = ref(null)
+let loadSeq = 0
 const load = async (cid = 0) => {
+  const seq = ++loadSeq
   loading.value = true
   loadErr.value = ''
   // 立即清空旧列表：v-loading 遮罩只覆盖滚动容器顶部区域，
@@ -107,16 +109,20 @@ const load = async (cid = 0) => {
   dirs.value = []
   try {
     const { data } = await api.get('/api/files/list', { params: { cid, size: 500 } })
+    if (seq !== loadSeq) return  // 快速进入子目录时丢弃过期响应，防止列表与面包屑错位
     dirs.value = (data.items || []).filter((i) => i.is_dir)
     // 加载成功即清除登录错误：瞬时故障（如 30s 负缓存窗口）不应永久禁用「新建文件夹/确定」
     loginErr.value = ''
     nextTick(() => { if (listEl.value) listEl.value.scrollTop = 0 })  // 新列表从顶部开始展示
   } catch (e) {
+    if (seq !== loadSeq) return
     dirs.value = []
     const msg = errMsg(e)
     if (_isLoginErr(msg)) loginErr.value = msg
     else loadErr.value = msg
-  } finally { loading.value = false }
+  } finally {
+    if (seq === loadSeq) loading.value = false
+  }
 }
 
 const _resetPick = () => { selectedPath.value = '' }

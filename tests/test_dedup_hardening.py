@@ -3,6 +3,9 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
+import os
+import tempfile
+os.environ.setdefault("DATA_DIR", tempfile.mkdtemp(prefix="autosave_test_"))
 from backend.worker import queue_worker
 from backend.pan115 import client as pan
 from backend import database as db

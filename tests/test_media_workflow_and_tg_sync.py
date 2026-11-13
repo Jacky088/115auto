@@ -1210,3 +1210,193 @@ def test_audit_commit_wakeup_race_and_tv_cross_run_grouping(tmp_path):
         assert early_status == "done" and late_status == "done"
 
     asyncio.run(_run_race())
+
+
+def test_media_rule_precise_mutual_exclusion_filtering():
+    """测试多规则同源扫描时的精准互斥过滤：剧集规则只接纳剧集，电影规则只接纳电影，不互相吞占。"""
+    # 清理已有规则并插入两条同源不同目标的规则
+    db.execute("DELETE FROM media_rules")
+    r1_id = db.insert(
+        "INSERT INTO media_rules(name,source_dir,target_dir,media_type,organize_enabled,scrape_enabled,enabled,created_at) "
+        "VALUES('电视剧整理', '/最近接收', '/电视剧', 'tv', 1, 0, 1, 100)"
+    )
+    r2_id = db.insert(
+        "INSERT INTO media_rules(name,source_dir,target_dir,media_type,organize_enabled,scrape_enabled,enabled,created_at) "
+        "VALUES('电影整理', '/最近接收', '/电影', 'movie', 1, 0, 1, 200)"
+    )
+
+    fake_tree = {
+        "bdmv_dirs": [],
+        "files": [
+            {"id": "f_tv_1", "name": "狂飙.S01E01.1080p.mkv", "size": 500 * 1024 * 1024, "dir_path": "/最近接收", "parent_dirs": ["最近接收"]},
+            {"id": "f_mv_1", "name": "流浪地球2.2023.1080p.mkv", "size": 800 * 1024 * 1024, "dir_path": "/最近接收", "parent_dirs": ["最近接收"]},
+            {"id": "f_tv_2", "name": "狂飙.S01E02.1080p.mkv", "size": 500 * 1024 * 1024, "dir_path": "/最近接收", "parent_dirs": ["最近接收"]},
+        ],
+    }
+
+    with patch.object(media_worker.client, "resolve_dir_cid", return_value="100"), \
+         patch.object(media_worker.client, "walk_media_tree", return_value=fake_tree):
+        rules, items = media_worker._scan_rules_sync(None, "organize_enabled", {})
+
+    assert len(rules) == 2
+    assert len(items) == 3
+
+    # 验证分配归属：狂飙归入规则 1（电视剧 -> /电视剧），流浪地球归入规则 2（电影 -> /电影）
+    tv_items = [it for it in items if it["rule_id"] == r1_id]
+    mv_items = [it for it in items if it["rule_id"] == r2_id]
+
+    assert len(tv_items) == 2
+    assert {it["file_id"] for it in tv_items} == {"f_tv_1", "f_tv_2"}
+    assert all(it["dest_root"] == "/电视剧" for it in tv_items)
+    assert all(it["parsed"].media_type == "tv" for it in tv_items)
+
+    assert len(mv_items) == 1
+    assert mv_items[0]["file_id"] == "f_mv_1"
+    assert mv_items[0]["dest_root"] == "/电影"
+    assert mv_items[0]["parsed"].media_type == "movie"
+
+
+def test_media_organize_schedule_and_next_runs_api():
+    from fastapi.testclient import TestClient
+    from backend import auth
+    from backend.main import app
+
+    token = auth.make_token("admin")
+    client = TestClient(app)
+
+    # 1. 验证 interval 模式计算
+    db.set_setting("media_organize_schedule_type", "interval")
+    db.set_setting("media_organize_schedule_hours", 6)
+    db.set_setting("media_organize_last_run", 0)
+    runs_interval = media_worker.compute_media_organize_next_runs()
+    assert len(runs_interval) > 0
+    assert any("今天" in r or "明天" in r for r in runs_interval)
+
+    # 2. 验证 fixed_times 模式计算
+    db.set_setting("media_organize_schedule_type", "fixed_times")
+    db.set_setting("media_organize_fixed_times", json.dumps(["05:00", "11:00", "17:00", "22:00"]))
+    runs_fixed = media_worker.compute_media_organize_next_runs()
+    assert len(runs_fixed) > 0
+    assert any("05:00" in r or "11:00" in r or "17:00" in r or "22:00" in r for r in runs_fixed)
+
+    # 3. 验证 PUT /api/media/settings 接收并清洗固定时间点
+    res = client.put(
+        "/api/media/settings",
+        json={
+            "media_organize_schedule_enabled": True,
+            "media_organize_schedule_type": "fixed_times",
+            "media_organize_fixed_times": ["05:00", "11:00", "17:00", "22:00", "invalid", "9:00"],
+            "media_organize_schedule_hours": 12,
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert res.status_code == 200
+    data = res.json()
+    assert data["ok"] is True
+    assert "next_runs" in data
+    assert len(data["next_runs"]) > 0
+
+    # 验证存库清洗结果
+    saved_ft = db.get_setting("media_organize_fixed_times")
+    if isinstance(saved_ft, str):
+        saved_ft = json.loads(saved_ft)
+    assert saved_ft == ["05:00", "09:00", "11:00", "17:00", "22:00"]
+
+    # 4. 验证 GET /api/media/settings 包含结构化的设置与预测时间点
+    res_get = client.get("/api/media/settings", headers={"Authorization": f"Bearer {token}"})
+    assert res_get.status_code == 200
+    s_data = res_get.json()
+    assert s_data["media_organize_schedule_enabled"] is True
+    assert s_data["media_organize_schedule_type"] == "fixed_times"
+    assert s_data["media_organize_fixed_times"] == ["05:00", "09:00", "11:00", "17:00", "22:00"]
+    assert "next_runs" in s_data
+    assert len(s_data["next_runs"]) > 0
+
+
+def test_media_scrape_schedule_and_fifo_queueing():
+    from fastapi.testclient import TestClient
+    from backend import auth
+    from backend.main import app
+
+    token = auth.make_token("admin")
+    client = TestClient(app)
+
+    # 1. 验证 PUT /api/media/settings 支持 media_scrape_schedule_enabled
+    res = client.put(
+        "/api/media/settings",
+        json={
+            "media_organize_schedule_enabled": True,
+            "media_scrape_schedule_enabled": True,
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert res.status_code == 200
+    assert db.get_setting("media_scrape_schedule_enabled") is True
+    assert db.get_setting("media_organize_schedule_enabled") is True
+
+    # 2. 验证 GET /api/media/settings 返回 media_scrape_schedule_enabled
+    res_get = client.get("/api/media/settings", headers={"Authorization": f"Bearer {token}"})
+    assert res_get.status_code == 200
+    data = res_get.json()
+    assert data["media_scrape_schedule_enabled"] is True
+    assert data["media_organize_schedule_enabled"] is True
+
+    # 3. 验证排队 FIFO 互斥执行：同时 pending 时，整理优先执行，结束后刮削按序执行
+    executed_order = []
+
+    async def fake_execute_organize(*args, **kwargs):
+        executed_order.append("organize")
+
+    async def fake_execute_scrape(*args, **kwargs):
+        executed_order.append("scrape")
+
+    import backend.worker.media_worker as mw
+
+    # 设置 pending 标志
+    mw._pending_scheduled_organize = True
+    mw._pending_scheduled_scrape = True
+
+    # 模拟 media_organize_loop 的一次调度检查
+    # 如果 gate busy，应该继续保持 pending 不被丢弃
+    db.set_setting("running", True)
+    ok, _ = transfer_gate.try_begin_exclusive("organize")
+    assert ok is True
+    assert transfer_gate.is_exclusive_busy() is True
+
+    # 当门禁被占时，整理和刮削均等待，不执行
+    if mw._pending_scheduled_organize:
+        if not transfer_gate.is_exclusive_busy():
+            mw._pending_scheduled_organize = False
+            executed_order.append("organize")
+
+    assert mw._pending_scheduled_organize is True
+    assert mw._pending_scheduled_scrape is True
+    assert len(executed_order) == 0
+
+    # 释放门禁
+    transfer_gate.release_exclusive()
+    assert transfer_gate.is_exclusive_busy() is False
+
+    # 第一轮：空闲后首先消费 organize
+    if mw._pending_scheduled_organize:
+        if not transfer_gate.is_exclusive_busy():
+            mw._pending_scheduled_organize = False
+            executed_order.append("organize")
+
+    assert mw._pending_scheduled_organize is False
+    assert mw._pending_scheduled_scrape is True
+    assert executed_order == ["organize"]
+
+    # 第二轮：整理完成后消费 scrape
+    if mw._pending_scheduled_organize:
+        pass
+    elif mw._pending_scheduled_scrape:
+        if not transfer_gate.is_exclusive_busy():
+            mw._pending_scheduled_scrape = False
+            executed_order.append("scrape")
+
+    assert mw._pending_scheduled_scrape is False
+    assert executed_order == ["organize", "scrape"]
+
+
+

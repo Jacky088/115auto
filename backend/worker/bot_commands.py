@@ -54,7 +54,8 @@ async def restore_upload_flow(client: "httpx.AsyncClient", token: str, chat_id: 
                          timeout=60)
     file_name = str(doc.get("file_name") or "").lower()
     try:
-        data = db.parse_backup_bytes(f.content, filename=file_name)
+        # 大备份文件的 gunzip + json 解析是重 CPU 同步操作，放线程池避免卡事件循环
+        data = await asyncio.to_thread(db.parse_backup_bytes, f.content, filename=file_name)
     except ValueError as e:
         msg = str(e)
         if "ZIP 压缩包内未找到" in msg:
@@ -133,27 +134,30 @@ def _check_sender(msg: dict) -> tuple[bool, str]:
     - notify_chat_id 配成群组时，群里任何人都能给 Bot 发消息；不校验发送者
       等于把 /retry /restore 等指令开放给全体群成员。管理员绑定（TOFU）仅在
       **私聊**中自动完成——群聊首用会被拒绝并引导先私聊绑定，防止群成员抢绑。
-    - 绑定值带上 chat_id（f"{chat_id}:{user_id}"）：换 Bot/换对话后自动重新绑定。
-    - channel_post 等无发送者信息（from 为空）的消息：保持原有 chat_id 口径放行。
+    - 绑定值按管理员用户 id 校验（兼容旧版 f"{chat_id}:{user_id}" 格式，取末段比较），
+      私聊绑定后即可在授权群内使用同一指令集；换 Bot 账号需重新私聊绑定。
+    - channel_post 等无发送者信息（from 为空）的消息（如频道自动转发）：无法确认
+      身份，一律拒绝执行指令，防止有发帖权限的任何人绕过管理员绑定。
     """
     chat_id = str(msg.get("chat", {}).get("id", ""))
     chat_type = str(msg.get("chat", {}).get("type") or "")
     sender = str((msg.get("from") or {}).get("id") or "")
     if not sender:
-        return True, ""
+        logstream.warn("system", f"TG Bot 收到对话 {chat_id} 中无发送者信息的消息，已拒绝执行指令")
+        return False, "无法识别发送者（频道自动转发等消息不支持 Bot 指令）"
     stored = str(db.get_setting("tg_admin_id", "") or "")
-    bound = f"{chat_id}:{sender}"
-    if not stored:
+    stored_uid = stored.split(":")[-1] if stored else ""
+    if not stored_uid:
         if chat_type != "private":
             logstream.warn("system", f"TG Bot 收到群聊 {chat_id} 中用户 {sender} 的首次指令，"
                                      "已拒绝（管理员绑定仅限私聊完成）")
             return False, ("该 Bot 尚未绑定管理员。出于安全考虑，请在与 Bot 的私聊中发送任意指令"
                            "完成绑定，之后即可在群内使用。")
-        db.set_setting("tg_admin_id", bound)
+        db.set_setting("tg_admin_id", f"{chat_id}:{sender}")
         logstream.warn("system", f"TG Bot 已绑定管理员用户 {sender}（私聊自动绑定；"
                                  "如非本人操作，请立即到网页改绑或停止使用该 Bot）")
         return True, ""
-    if stored != bound:
+    if stored_uid != sender:
         logstream.warn("system", f"TG Bot 收到非管理员用户 {sender} 的指令，已拒绝")
         return False, "仅绑定的管理员用户可使用 Bot 指令"
     return True, ""
@@ -389,7 +393,8 @@ async def add_channel_flow(raw: str) -> str:
         return "频道名过长（最多 64 字符）"
     if not _re.fullmatch(r"[0-9A-Za-z_]{1,64}", name):
         return "频道名仅支持字母、数字与下划线（1-64 位）"
-    if db.query("SELECT 1 FROM channels WHERE name=?", (name,), one=True):
+    if db.query("SELECT 1 FROM channels WHERE name=? COLLATE NOCASE", (name,), one=True):
+        # 大小写不敏感查重：@Foo 与 @foo 是同一频道，双链路接入会导致消息重复处理
         # 不限制 type：同一频道若已有 userbot 记录，再加 polling 会导致消息被两条链路重复处理
         return f"频道 @{name} 已存在。订阅模式可在网页「账号管理」按频道开关"
     n = db.query("SELECT count(*) c FROM channels", one=True)["c"]
@@ -495,8 +500,10 @@ async def sub_search_flow(client: "httpx.AsyncClient", token: str,
     cands = []
     for k in ("tv", "movie"):
         try:
-            resp = _tmdb_get(f"/search/{k}", {"api_key": api_key, "query": query,
-                                              "language": "zh-CN"})
+            # TMDB 搜索是同步 httpx 调用，必须放线程池，否则慢代理下会卡死整个事件循环
+            resp = await asyncio.to_thread(
+                _tmdb_get, f"/search/{k}",
+                {"api_key": api_key, "query": query, "language": "zh-CN"})
             if resp.status_code == 200:
                 cands += [x for x in (_tmdb_item(it, k)
                                       for it in (resp.json().get("results") or [])) if x]
@@ -771,7 +778,13 @@ async def bot_command_loop():
         )
 
     while True:
-        token, chat_id, proxy = await asyncio.to_thread(_bot_cfg)
+        try:
+            token, chat_id, proxy = await asyncio.to_thread(_bot_cfg)
+        except Exception as e:
+            # DB 瞬时异常不能杀死主循环（否则 TG 远程指令静默失效且健康监控无感知）
+            logstream.error("system", f"TG Bot 配置读取异常，30 秒后重试: {logstream.exc(e)}")
+            await asyncio.sleep(30)
+            continue
         if not token or not chat_id:
             announced = None
             await asyncio.sleep(30)
@@ -915,7 +928,21 @@ async def bot_command_loop():
                         msg = (upd.get("message")
                                or upd.get("channel_post")
                                or upd.get("edited_message") or {})
-                        if str(msg.get("chat", {}).get("id", "")) != chat_id:
+                        msg_chat_id = str(msg.get("chat", {}).get("id", ""))
+                        if msg_chat_id != chat_id:
+                            # notify 配置为群聊时，允许来自任意私聊的首次指令完成管理员绑定（TOFU）；
+                            # 绑定完成后指令仍仅在授权对话内执行
+                            if (str(msg.get("chat", {}).get("type") or "") == "private"
+                                    and not str(db.get_setting("tg_admin_id", "") or "").strip()):
+                                ok, _ = _check_sender(msg)
+                                if ok:
+                                    try:
+                                        await client.post(
+                                            f"https://api.telegram.org/bot{token}/sendMessage",
+                                            json={"chat_id": msg_chat_id,
+                                                  "text": "✅ 管理员绑定成功。现在可以在 notify 对话中使用 Bot 指令了。"})
+                                    except Exception:
+                                        pass
                             continue  # 非授权对话
                         sender_ok, sender_hint = _check_sender(msg)
                         if not sender_ok:

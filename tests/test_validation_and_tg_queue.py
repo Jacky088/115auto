@@ -4,6 +4,9 @@ import queue
 import time
 import pytest
 from fastapi.testclient import TestClient
+import os
+import tempfile
+os.environ.setdefault("DATA_DIR", tempfile.mkdtemp(prefix="autosave_test_"))
 from backend.main import app
 from backend import auth, database as db
 from backend.worker import jobs

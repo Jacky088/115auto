@@ -162,13 +162,13 @@ let replayWithoutSeq = false
 const connectWs = () => {
   if (disposed) return
   const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-  const token = localStorage.getItem('token')
-  // token 经 Sec-WebSocket-Protocol 头传递（浏览器 WebSocket 无法自定义请求头），
-  // 避免 JWT 出现在 URL 里被访问日志/代理记录
-  ws = new WebSocket(`${proto}://${location.host}/ws/logs`, ['bearer', token])
+  // 鉴权走 HttpOnly Cookie（sa_auth，WebSocket 握手自动携带同源 Cookie）：
+  // token 不再经子协议传递，前端无需持有任何 token
+  ws = new WebSocket(`${proto}://${location.host}/ws/logs`)
   ws.onopen = () => { wsOk.value = true; replayWithoutSeq = true }
   ws.onmessage = (ev) => {
-    const l = JSON.parse(ev.data)
+    let l
+    try { l = JSON.parse(ev.data) } catch { return } // 丢弃异常帧，不中断消息处理
     if (typeof l.seq === 'number') {
       // 后端重连时会补发最近 100 条：seq <= lastSeq 的都是已显示过的，直接丢弃
       if (lastSeq !== null && l.seq <= lastSeq) return

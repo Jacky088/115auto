@@ -12,13 +12,17 @@ from .. import auth, config, database as db
 from ..core import classifier, filters, logstream, patguard, pipeline, subscribe as submod, transfer_gate
 from ..pan115 import client as pan
 from ..worker import jobs
-from .deps import require_user
+from .deps import AUTH_COOKIE, require_user
 
 router = APIRouter(prefix="/api")
 
 # 海报专用 HttpOnly Cookie：路径收窄到海报接口，避免随全部 API 请求发送；
 # 浏览器 <img> 无法带 Authorization 头，靠同源 Cookie 鉴权（不再把长期 JWT 放 URL）。
 POSTER_COOKIE = "sa_poster"
+
+# 设置接口的密钥掩码：GET /api/settings 对凭据类键不再回传明文，
+# 改回哨兵值；PUT 收到哨兵值表示「保持已存值不变」，防止表单整体保存把密钥冲掉
+SECRET_MASK = "__SAVED__"
 
 
 def _is_trusted_proxy(host: str) -> bool:
@@ -53,15 +57,43 @@ def _client_ip(request: Request) -> str:
     return parts[0] if parts else remote
 
 
+def _is_https(request: Request) -> bool:
+    """请求是否经 HTTPS 到达用户浏览器。
+
+    反代/CDN 场景下容器内看到的是 http（request.url.scheme 恒为 http），
+    必须参考 X-Forwarded-Proto；但该头可被客户端伪造，因此仅当直连来源
+    命中 TRUSTED_PROXIES 白名单时才采信（与 _client_ip 的 XFF 防伪同一套信任模型）。
+    公网反代部署务必设置 TRUSTED_PROXIES，否则 Cookie 不带 Secure 标记。"""
+    if request.url.scheme == "https":
+        return True
+    proto = request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower()
+    if proto != "https":
+        return False
+    remote = request.client.host if request.client else ""
+    return _is_trusted_proxy(remote)
+
+
 def _set_poster_cookie(response: Response, request: Request, token: str) -> None:
     """下发海报鉴权 Cookie（HttpOnly + SameSite=Lax，路径限定于 TMDB 与本地媒体海报接口）。"""
-    secure_flag = request.url.scheme == "https"
+    secure_flag = _is_https(request)
     for p in ("/api/tmdb/poster", "/api/media/poster"):
         response.set_cookie(
             POSTER_COOKIE, token, max_age=auth.TOKEN_TTL,
             httponly=True, samesite="lax", path=p,
             secure=secure_flag,
         )
+
+
+def _set_auth_cookie(response: Response, request: Request, token: str) -> None:
+    """下发登录态 Cookie（HttpOnly + SameSite=Strict，全站路径）。
+
+    token 不再落 localStorage：脚本读不到，登出/改密即时失效。"""
+    secure_flag = _is_https(request)
+    response.set_cookie(
+        AUTH_COOKIE, token, max_age=auth.TOKEN_TTL,
+        httponly=True, samesite="strict", path="/",
+        secure=secure_flag,
+    )
 
 
 def _like_escape(s: str) -> str:
@@ -87,19 +119,32 @@ def login(body: dict, request: Request, response: Response):
         logstream.warn("system", f"登录请求被限速（来源 {ip}）")
         raise HTTPException(429, "失败次数过多，请 1 分钟后再试", headers={"Retry-After": "60"})
     stored = db.get_setting("web_password_hash", "")
-    if username != _web_username() or not auth.verify_password(password, stored):
+    username_ok = username == _web_username()
+    if not username_ok:
+        # 用户名不匹配时也执行一次等价 PBKDF2 验证拉平响应耗时（防用户名枚举时序侧信道）
+        auth.verify_password(password, auth.hash_password("timing-equalizer"))
+    if not username_ok or not auth.verify_password(password, stored):
         auth.record_login_fail(ip)
         logstream.warn("system", f"网页登录失败（来源 {ip}）")
         raise HTTPException(401, "用户名或密码错误")
+    # 用户名正确但密码哈希仍是旧格式/低迭代：借这次成功的验证透明升级到当前强度
+    if auth.password_needs_rehash(stored):
+        db.set_setting("web_password_hash", auth.hash_password(password))
     logstream.info("system", "网页登录成功")
     token = auth.make_token(username)
     _set_poster_cookie(response, request, token)
+    _set_auth_cookie(response, request, token)
     return {"token": token}
 
 
 @router.post("/auth/logout")
-def logout(response: Response):
-    """退出登录：清除海报 Cookie（前端同时丢弃 localStorage 中的 token）。"""
+def logout(request: Request, response: Response):
+    """退出登录：清除 Cookie 并吊销全部已签发 token（版本号 +1）。
+
+    单管理员系统下「登出即全端下线」：被盗的 token 即使在 7 天有效期内也无法继续使用。
+    """
+    auth.revoke_all_tokens()
+    response.delete_cookie(AUTH_COOKIE, path="/", secure=_is_https(request))
     for p in ("/api/tmdb/poster", "/api/media/poster"):
         response.delete_cookie(POSTER_COOKIE, path=p)
     return {"ok": True}
@@ -107,9 +152,12 @@ def logout(response: Response):
 
 @router.get("/auth/me")
 def me(request: Request, response: Response, authorization: str = Header(default="")):
-    username = require_user(authorization, response)
+    username = require_user(request, response, authorization)
     if authorization.startswith("Bearer "):
-        _set_poster_cookie(response, request, authorization[7:])
+        # 旧会话迁移：token 经 Bearer 头到达时补发 HttpOnly Cookie，后续请求不再依赖前端保存
+        token = authorization[7:]
+        _set_poster_cookie(response, request, token)
+        _set_auth_cookie(response, request, token)
     return {"username": _web_username()}
 
 
@@ -122,11 +170,14 @@ def change_pwd(body: dict, request: Request, response: Response, _=Depends(requi
     """修改用户名和/或密码（都需验证旧密码）。body: {old, new?, username?}"""
     ip = _client_ip(request)
     old = body.get("old", "")
-    if not auth.verify_password(old, db.get_setting("web_password_hash", "")):
+    # 限速检查必须在 PBKDF2 验证之前：否则第 5 次失败后每个请求仍会完整跑一次哈希，
+    # 持有效会话的攻击者可高并发调用本端点打满单进程 CPU
+    if auth.login_throttled(ip):
+        raise HTTPException(429, "失败次数过多，请 1 分钟后再试", headers={"Retry-After": "60"})
+    stored = db.get_setting("web_password_hash", "")
+    if not auth.verify_password(old, stored):
         auth.record_login_fail(ip)  # 旧密码连续错误同样触发限速，防止已登录会话被暴力猜密码
         raise HTTPException(400, "旧密码错误")
-    if auth.login_throttled(ip):
-        raise HTTPException(429, "失败次数过多，请 1 分钟后再试")
     username = str(body.get("username") or "").strip()
     new = str(body.get("new") or "")
     if not username and not new:
@@ -153,6 +204,7 @@ def change_pwd(body: dict, request: Request, response: Response, _=Depends(requi
     auth.rotate_secret()
     new_token = auth.make_token(_web_username())
     _set_poster_cookie(response, request, new_token)
+    _set_auth_cookie(response, request, new_token)
     return {"ok": True, "username": _web_username(), "token": new_token}
 
 
@@ -337,7 +389,8 @@ async def add_channel(body: dict, _=Depends(require_user)):
         raise HTTPException(400, "频道名仅支持字母、数字与下划线（1-64 位）")
     if ctype not in ("polling", "userbot"):
         raise HTTPException(400, "type 必须是 polling 或 userbot")
-    if db.query("SELECT 1 FROM channels WHERE name=?", (name,), one=True):
+    if db.query("SELECT 1 FROM channels WHERE name=? COLLATE NOCASE", (name,), one=True):
+        # 大小写不敏感查重：@Foo 与 @foo 是同一频道，双链路接入会导致消息重复处理
         raise HTTPException(400, "该频道已存在（同一频道不能同时用轮询与 Userbot 接入，避免重复处理）")
     # 频道数量上限：防止误操作/脚本灌入海量频道拖垮轮询与 115 风控
     n = db.query("SELECT count(*) c FROM channels", one=True)["c"]
@@ -924,16 +977,17 @@ _POSTER_CACHE_MAX = 300
 def tmdb_poster(
     request: Request,
     path: str = "",
-    token: str = Query(default=""),
     authorization: str = Header(default=""),
 ):
-    """后端代理 TMDB 海报图片（支持 Token 参数、HttpOnly Cookie 与 Bearer 头三重鉴权，带内存缓存与海外直连保底）。"""
+    """后端代理 TMDB 海报图片（Bearer 头 / 登录态 Cookie / 海报专用 Cookie 三重鉴权，带内存缓存与海外直连保底）。
+
+    不再接受 URL ?token= 参数：JWT 落在查询串会进入访问日志与浏览器历史。"""
     from fastapi.responses import Response
     user = ""
     if authorization.startswith("Bearer "):
         user = auth.check_token(authorization[7:]) or ""
-    if not user and token:
-        user = auth.check_token(token) or ""
+    if not user:
+        user = auth.check_token(request.cookies.get(AUTH_COOKIE, "")) or ""
     if not user:
         user = auth.check_token(request.cookies.get(POSTER_COOKIE, "")) or ""
     if not user:
@@ -979,9 +1033,11 @@ def tmdb_poster(
             try:
                 resp = httpx.get(url, headers=headers, proxy=None, timeout=12)
             except Exception as e2:
-                raise HTTPException(502, f"海报获取失败: {str(e2)[:120]}")
+                logstream.warn("scrape", f"海报拉取失败（直连兜底亦失败）: {logstream.exc(e2)}")
+                raise HTTPException(502, "海报获取失败（网络异常，已尝试代理与直连）")
         else:
-            raise HTTPException(502, f"海报获取失败: {str(e)[:120]}")
+            logstream.warn("scrape", f"海报拉取失败: {logstream.exc(e)}")
+            raise HTTPException(502, "海报获取失败（网络异常）")
 
     if not resp or resp.status_code != 200:
         raise HTTPException(resp.status_code if resp else 404, "海报获取失败")
@@ -1502,7 +1558,14 @@ def get_settings(_=Depends(require_user)):
                 "auto_backup_enabled": False, "auto_backup_days": 7, "auto_backup_time": "04:00",
                 "auto_move_enabled": False, "auto_move_dedup_by_episode": True,
                 "running_timeout_min": 60}
-    return {k: db.get_setting(k, defaults.get(k)) for k in keys}
+    # 密钥类键不回传明文（token/api_hash/推送 key/代理凭据等，口径与备份脱敏一致）：
+    # 已配置 → 回哨兵值 SECRET_MASK（前端据此显示「已配置」），未配置 → 空串
+    _SECRET_KEYS = {"notify_token", "tg_api_hash", "tg_phone", "proxy",
+                    "bark_url", "pushplus_token", "ntfy_token", "api_token", "tmdb_api_key"}
+    out = {k: db.get_setting(k, defaults.get(k)) for k in keys}
+    for k in _SECRET_KEYS:
+        out[k] = SECRET_MASK if str(out.get(k) or "").strip() else ""
+    return out
 
 
 @router.put("/settings")
@@ -1528,8 +1591,12 @@ def put_settings(body: dict, _=Depends(require_user)):
                "auto_move_dedup_by_episode", "auto_move_enabled"}
     # 先整体校验再落库：任一字段非法时不写入，避免半新半旧配置。
     # null 表示「前端从未配置过该键」，跳过不写，防止 bool(null)=false 把默认开启的功能关掉
+    # 哨兵值 SECRET_MASK 表示「密钥保持已存值不变」（GET 掩码后的表单整体保存原样回传）
+    _SECRET_KEYS = {"notify_token", "tg_api_hash", "tg_phone", "proxy",
+                    "bark_url", "pushplus_token", "ntfy_token", "api_token", "tmdb_api_key"}
     updates = {k: _norm_setting(k, v) for k, v in body.items()
-               if k in allowed and v is not None}
+               if k in allowed and v is not None
+               and not (k in _SECRET_KEYS and v == SECRET_MASK)}
     # 间隔成对提交时保证 min <= max
     for lo_k, hi_k in (("poll_interval_min", "poll_interval_max"),
                        ("transfer_interval_min", "transfer_interval_max")):
@@ -1569,7 +1636,15 @@ def put_settings(body: dict, _=Depends(require_user)):
 def test_proxy(body: dict = None, _=Depends(require_user)):
     """测试 TG 代理连通性（用输入框当前值，未保存也可直接测）。"""
     body = body or {}
-    proxy = body.get("proxy") or db.get_setting("proxy", "")
+    proxy = str(body.get("proxy") or "").strip()
+    if not proxy or proxy == SECRET_MASK:
+        # 输入框是掩码（未改动）或为空：回落到已保存配置
+        proxy = str(db.get_setting("proxy", "") or "").strip()
+    else:
+        # 与保存入口（_norm_setting）同一格式校验：防止把任意 http://内网IP:端口 当代理做内网探测
+        proxy = _norm_setting("proxy", proxy)
+        if not proxy:
+            raise HTTPException(400, "代理地址不能为空")
     ok, detail = jobs.test_proxy(proxy)
     if not ok:
         raise HTTPException(400, detail)
@@ -1580,8 +1655,10 @@ def test_proxy(body: dict = None, _=Depends(require_user)):
 def test_notify(body: dict = None, _=Depends(require_user)):
     """发送测试通知。优先用传入的 Token/Chat ID（未保存也可直接测），否则用已保存配置。"""
     body = body or {}
-    token = body.get("token") or db.get_setting("notify_token", "")
-    chat_id = body.get("chat_id") or db.get_setting("notify_chat_id", "")
+    token = str(body.get("token") or "").strip()
+    if not token or token == SECRET_MASK:
+        token = str(db.get_setting("notify_token", "") or "").strip()
+    chat_id = str(body.get("chat_id") or "").strip() or str(db.get_setting("notify_chat_id", "") or "").strip()
     ok, detail = jobs.send_test(token, chat_id)
     if not ok:
         raise HTTPException(400, detail)
@@ -1921,7 +1998,8 @@ async def backup_bundle_preview(request: Request, _=Depends(require_user)):
     import shutil
     from ..core import migration_bundle
 
-    work_dir, zip_path = await _stream_bundle_to_temp(request)
+    async with _BUNDLE_UPLOAD_SEM:
+        work_dir, zip_path = await _stream_bundle_to_temp(request)
     try:
         info = await asyncio.to_thread(migration_bundle.inspect_migration_bundle, zip_path, work_dir / "stage")
         info.pop("staged_db", None)
@@ -1933,16 +2011,24 @@ async def backup_bundle_preview(request: Request, _=Depends(require_user)):
         shutil.rmtree(work_dir, ignore_errors=True)
 
 
+# 迁移包上传/落盘并发上限：单包最大 2GB，小盘 NAS 并发接收多包可写满磁盘影响 SQLite 落盘
+_BUNDLE_UPLOAD_SEM = asyncio.Semaphore(2)
+
+
 @router.post("/backup/bundle/restore")
 @router.post("/settings/backup/bundle/restore")
 async def backup_bundle_restore(
     request: Request,
     response: Response,
-    restore_credentials: bool = True,
+    restore_credentials: bool = False,
     restore_meta: bool = True,
     _=Depends(require_user),
 ):
-    """流式接收并从 ZIP 迁移包恢复整机状态（系统需处于停止状态）。"""
+    """流式接收并从 ZIP 迁移包恢复整机状态（系统需处于停止状态）。
+
+    restore_credentials 默认 False：与 JSON 备份恢复的口径一致（备份不应携带可利用凭据）。
+    恶意迁移包若默认采纳包内 web_password_hash/secret.key/115 Cookie，导入即被静默接管；
+    确属整机迁移的场景由前端显式传 true（网页恢复向导默认不传）。"""
     import shutil
     from ..core import migration_bundle
 
@@ -1951,7 +2037,8 @@ async def backup_bundle_restore(
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
 
-    work_dir, zip_path = await _stream_bundle_to_temp(request)
+    async with _BUNDLE_UPLOAD_SEM:
+        work_dir, zip_path = await _stream_bundle_to_temp(request)
     try:
         res = await migration_bundle.apply_migration_bundle(
             zip_path,
@@ -1962,6 +2049,7 @@ async def backup_bundle_restore(
         if res.get("restored_credentials"):
             new_token = auth.make_token(_web_username())
             _set_poster_cookie(response, request, new_token)
+            _set_auth_cookie(response, request, new_token)
             out["token"] = new_token
         logstream.info(
             "system",

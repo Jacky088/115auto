@@ -8,7 +8,7 @@
  *   - 确定：不保存直接离开（回退该页未保存的更改——离开即丢弃）
  *   - 取消：留在当前页面
  */
-import { onBeforeUnmount, onMounted } from 'vue'
+import { nextTick, onBeforeUnmount, onMounted } from 'vue'
 import { onBeforeRouteLeave } from 'vue-router'
 import { ElMessageBox } from 'element-plus'
 
@@ -28,6 +28,10 @@ export function useUnsavedGuard(dirty) {
       return true
     } catch {
       return false       // 用户取消：留在本页
+    } finally {
+      // 放行标记一次性消费：若全局守卫随后取消了本次导航（如向导重查重定向 /setup），
+      // 组件仍挂载且 dirty 未变，此时必须重新询问，避免此后所有离开被静默放行
+      nextTick(() => { confirmed = false })
     }
   })
 

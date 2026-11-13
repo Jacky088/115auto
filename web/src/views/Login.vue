@@ -25,7 +25,7 @@
 import { reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { api, errMsg } from '../api'
+import { api, errMsg, markLoggedIn } from '../api'
 
 const router = useRouter()
 const form = reactive({ username: 'admin', password: '' })
@@ -34,8 +34,9 @@ const loading = ref(false)
 const submit = async () => {
   loading.value = true
   try {
-    const { data } = await api.post('/api/auth/login', form)
-    localStorage.setItem('token', data.token)
+    await api.post('/api/auth/login', form)
+    // 登录态由服务端 Set-Cookie（HttpOnly）建立，前端只记非敏感的会话标记供路由守卫使用
+    markLoggedIn()
     ElMessage.success('登录成功')
     router.push('/dashboard')
   } catch (e) {

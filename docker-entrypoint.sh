@@ -9,6 +9,10 @@ set -e
 export HOME="/app/data/home"
 mkdir -p "$HOME" 2>/dev/null || true
 
+# 端口映射由 compose 的 PAN_BIND_IP 决定（默认 0.0.0.0 暴露到所有网卡）：
+# 容器内始终监听 0.0.0.0 以兼容 bridge 映射，公网部署务必在 .env 设 PAN_BIND_IP=127.0.0.1 并加反向代理
+echo "[entrypoint] 提示：容器内监听 0.0.0.0，实际暴露范围由 docker-compose 的 PAN_BIND_IP 决定；公网部署请设 PAN_BIND_IP=127.0.0.1 并使用反向代理 + HTTPS"
+
 if [ "$(id -u)" = "0" ]; then
     chown -R app:app /app/data 2>/dev/null || true
     exec setpriv --reuid=app --regid=app --clear-groups \

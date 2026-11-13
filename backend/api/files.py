@@ -151,7 +151,8 @@ def _client():
     try:
         return pan._get_client()
     except Exception as e:
-        raise HTTPException(400, f"115 客户端不可用: {e}")
+        # 截断异常文本：p115client 异常可能内嵌请求参数，完整堆栈只进服务端日志
+        raise HTTPException(400, f"115 客户端不可用: {str(e)[:150]}")
 
 
 def _check(resp, action: str) -> dict:
@@ -170,7 +171,7 @@ def _call_impl(action: str, func, serialize: bool, *args, **kwargs) -> dict:
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(400, f"{action}失败: {e}")
+        raise HTTPException(400, f"{action}失败: {str(e)[:150]}")
     return _check(resp, action)
 
 

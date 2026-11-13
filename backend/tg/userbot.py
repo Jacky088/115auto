@@ -14,6 +14,7 @@
 """
 import asyncio
 import re
+import time
 from pathlib import Path
 
 from telethon import TelegramClient, events
@@ -193,6 +194,14 @@ async def _cleanup_flow():
     _remove_session_files(_LOGIN_SESSION)
 
 
+async def _expire_stale_flow():
+    """废弃的登录流程超时回收：发起验证码后 10 分钟未完成，自动清理临时连接与 session。"""
+    flow = _login_flow
+    if flow.get("pending") and time.time() - float(flow.get("created_at") or 0) > 600:
+        logstream.warn("userbot", "登录流程超过 10 分钟未完成，已自动清理临时会话（可重新发起登录）")
+        await _cleanup_flow()
+
+
 async def login_start(api_id: int, api_hash: str, phone: str) -> dict:
     """发送登录验证码（在临时 session 中完成，成功后替换主 session）。"""
     async with _lock:
@@ -215,12 +224,14 @@ async def login_start(api_id: int, api_hash: str, phone: str) -> dict:
             "phone_code_hash": sent.phone_code_hash,
             "api_id": int(api_id),
             "api_hash": api_hash,
+            "created_at": time.time(),
         })
         return {"sent": True}
 
 
 async def login_submit(code: str) -> dict:
     async with _lock:
+        await _expire_stale_flow()
         flow = _login_flow
         if not flow.get("pending"):
             raise RuntimeError("没有进行中的登录，请先发送验证码")
@@ -296,6 +307,9 @@ async def _finish_login(c: TelegramClient, flow: dict):
         if src.exists():
             dst.parent.mkdir(parents=True, exist_ok=True)
             src.replace(dst)
+            # session 文件等价于 TG 账号完全控制权：替换落盘立即收紧权限，
+            # 不等下次进程重启（启动时的 _harden_credential_files 只覆盖已存在文件）
+            config.secure_file(dst)
 
     db.set_setting("tg_api_id", int(flow["api_id"]))
     db.set_setting("tg_api_hash", flow["api_hash"])
@@ -390,10 +404,10 @@ def _register_handlers(c: TelegramClient):
                 db.query, "SELECT name FROM channels WHERE type='userbot' AND enabled=1")
             name = _match_channel(watched, chat)
             if name is None:
-                # 未配置任何 userbot 频道时保持旧行为：处理所有消息
-                if watched:
-                    return
-                name = getattr(chat, "username", None) or str(getattr(chat, "id", ""))
+                # 只处理已配置的 userbot 频道。不再回退到「未配置时处理所有消息」：
+                # 那样任何能给该账号发私信/把它拉进群的人都能驱动 115 转存，
+                # 信任边界完全打开。未配置频道时 userbot 本来就不该工作。
+                return
             text = event.message.message or ""
             buttons = []
             rows = event.message.buttons
@@ -441,9 +455,21 @@ async def catch_up(c: TelegramClient):
             except Exception as e:
                 logstream.warn("userbot", f"[{name}] 补漏拉取失败（下一轮不再自动重试）: {type(e).__name__}: {str(e)[:120]}")
                 continue
+            # 先查已处理集合再决定是否 resolve：重连/重启风暴时避免对同一批消息
+            # 重复发起第三方按钮页抓取（resolver 出站请求放大）
+            id_floor = min((m.id for m in msgs if m and m.id > 0), default=0)
+            known_ids: set[int] = set()
+            if id_floor:
+                known_rows = await asyncio.to_thread(
+                    db.query,
+                    "SELECT message_id FROM messages WHERE channel=? AND message_id>=?",
+                    (name, id_floor))
+                known_ids = {int(r["message_id"]) for r in known_rows}
             fresh = 0
             for m in reversed(msgs):  # 从旧到新处理，与频道推送顺序一致
                 if not m or m.id <= 0:
+                    continue
+                if m.id in known_ids:
                     continue
                 text = m.message or ""
                 buttons = [b.url for row in (m.buttons or [])

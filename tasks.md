@@ -29,7 +29,7 @@
 - [x] **T16 transfers 保留策略** — 每日清理保留 duplicate/skipped 7 天，success/failed 台账永久保留。文件：[jobs.py](file:///c:/Users/littl/Desktop/115atuosave/backend/worker/jobs.py)
 - [x] **T17 TMDB 分类首页短缓存** — discover 结果 5 分钟缓存（最多 100 键），降低 N+1 与配额消耗。文件：[manage.py](file:///c:/Users/littl/Desktop/115atuosave/backend/api/manage.py)
 - [x] **T18 外网用例稳定跳过** — t.me 返回不足 15 条（错误页）即按网络不可用跳过，离线可稳定全绿。文件：[test_worker_mock.py](file:///c:/Users/littl/Desktop/115atuosave/tests/test_worker_mock.py)
-- [x] **T19 部署默认绑定与资源限制** — 默认仅监听 `127.0.0.1`，新增日志轮转（10m×3）与可选 `mem_limit` 示例。文件：[docker-compose.yml](file:///c:/Users/littl/Desktop/115atuosave/docker-compose.yml)
+- [x] **T19 部署默认绑定与资源限制** — 新增日志轮转（10m×3）与可选 `mem_limit` 示例。⚠️ 勘误（2026-11-13）：「默认仅监听 127.0.0.1」与实际不符——docker-compose 默认 `${PAN_BIND_IP:-0.0.0.0}`（全网卡），公网部署请在 `.env` 设 `PAN_BIND_IP=127.0.0.1` 并加反向代理。文件：[docker-compose.yml](file:///c:/Users/littl/Desktop/115atuosave/docker-compose.yml)
 - [x] **T20 备份恢复加固** — 保持整体事务 + 列白名单；备份中的凭据类键一律跳过，禁止被备份值覆盖。文件：[database.py](file:///c:/Users/littl/Desktop/115atuosave/backend/database.py)
 
 ## 验证结果

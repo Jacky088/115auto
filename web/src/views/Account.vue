@@ -426,8 +426,9 @@ const changeType = async (row, v) => {
     await api.put(`/api/channels/${row.id}`, { type: v })
     row.type = v
     const label = { polling: '网页轮询', userbot: 'Userbot' }
+    const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     ElMessageBox.alert(
-      `已将 @${row.name} 的接入方式改为「${label[v]}」。<br/><br/>` +
+      `已将 @${esc(row.name)} 的接入方式改为「${label[v]}」。<br/><br/>` +
       `<b>⚠️ 注意：</b>如系统当前正在运行，需点击顶栏的「停止」再「运行」（或重启容器）以重启监听线程。`,
       '修改成功（需重启监听生效）',
       { dangerouslyUseHTMLString: true, confirmButtonText: '知道了' },
