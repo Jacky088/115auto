@@ -497,7 +497,9 @@ async def search_tmdb_manual(q: str, kind: str = "multi", year: str = ""):
 
 @router.get("/records")
 def list_records(batch_id: str = "", undone: str = "all", limit: int = 120):
-    where = ["1=1"]
+    # 整理刮削账本只展示本模块的记录：定时文件整理（auto_move）的移动账本
+    # 在「转存归档 → 整理记录」页展示，两套账本互不混排
+    where = ["(action IS NULL OR action != 'auto_move')"]
     params: list = []
     if batch_id:
         where.append("batch_id=?")

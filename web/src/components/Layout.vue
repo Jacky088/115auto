@@ -15,7 +15,7 @@
           <el-menu-item index="/dirs"><el-icon><Collection /></el-icon>转存目录</el-menu-item>
           <el-menu-item index="/media"><el-icon><MagicStick /></el-icon>整理刮削</el-menu-item>
           <el-menu-item index="/match"><el-icon><Sort /></el-icon>匹配规则</el-menu-item>
-          <el-menu-item index="/transfers"><el-icon><List /></el-icon>转存记录</el-menu-item>
+          <el-menu-item index="/transfers"><el-icon><List /></el-icon>转存归档</el-menu-item>
           <el-menu-item index="/history"><el-icon><Tickets /></el-icon>日志查询</el-menu-item>
           <el-menu-item index="/account"><el-icon><User /></el-icon>账号管理</el-menu-item>
           <el-menu-item index="/settings"><el-icon><Setting /></el-icon>系统设置</el-menu-item>
@@ -40,7 +40,7 @@
         <el-menu-item index="/dirs"><el-icon><Collection /></el-icon>转存目录</el-menu-item>
         <el-menu-item index="/media"><el-icon><MagicStick /></el-icon>整理刮削</el-menu-item>
         <el-menu-item index="/match"><el-icon><Sort /></el-icon>匹配规则</el-menu-item>
-        <el-menu-item index="/transfers"><el-icon><List /></el-icon>转存记录</el-menu-item>
+        <el-menu-item index="/transfers"><el-icon><List /></el-icon>转存归档</el-menu-item>
         <el-menu-item index="/history"><el-icon><Tickets /></el-icon>日志查询</el-menu-item>
         <el-menu-item index="/account"><el-icon><User /></el-icon>账号管理</el-menu-item>
         <el-menu-item index="/settings"><el-icon><Setting /></el-icon>系统设置</el-menu-item>
@@ -168,7 +168,7 @@ const route = useRoute()
 const router = useRouter()
 const titles = { dashboard: '仪表盘', files: '网盘文件', channels: '账号管理', subscriptions: '订阅追剧',
                  dirs: '转存目录', media: '整理刮削', match: '匹配规则',
-                 transfers: '转存记录', history: '日志查询',
+                 transfers: '转存归档', history: '日志查询',
                  account: '账号管理', settings: '系统设置', setup: '初始化向导' }
 const title = computed(() => titles[route.path.slice(1)] || '')
 

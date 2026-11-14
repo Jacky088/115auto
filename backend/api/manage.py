@@ -2260,3 +2260,76 @@ async def run_auto_move_now(_=Depends(require_user)):
         "msg": "已触发排队整理：系统正在等待现有转存/云下载及重试全部完成，完成后将自动开启移动归档。"
     }
 
+
+@router.post("/auto-move/preview")
+async def preview_auto_move_now(body: dict | None = None, _=Depends(require_user)):
+    """整理前预览（dry_run）：返回各启用规则「将会移动哪些文件」的计划，不做任何移动。"""
+    rule_ids = (body or {}).get("rule_ids")
+    if rule_ids is not None and not isinstance(rule_ids, list):
+        raise HTTPException(400, "rule_ids 必须是数组")
+    res = await jobs.preview_auto_move(rule_ids)
+    if not res.get("ok"):
+        raise HTTPException(400 if not res.get("msg", "").startswith("当前有互斥") else 409, res.get("msg", "预览失败"))
+    return res
+
+
+@router.get("/auto-move/records")
+def list_auto_move_records(rule_id: int = 0, undone: str = "all", batch_id: str = "",
+                           keyword: str = "", page: int = 1, size: int = 50,
+                           _=Depends(require_user)):
+    """整理账本（定时文件整理的移动记录）：平铺分页 + 批次列表。"""
+    where, params = ["action='auto_move'"], []
+    if rule_id > 0:
+        where.append("task_id=?")
+        params.append(int(rule_id))
+    if undone in ("0", "1"):
+        where.append("undone=?")
+        params.append(int(undone))
+    if batch_id:
+        where.append("batch_id=?")
+        params.append(batch_id.strip()[:64])
+    if keyword.strip():
+        esc = _like_escape(keyword.strip()[:100])
+        where.append("(orig_name LIKE ? ESCAPE '\\' OR dest_path LIKE ? ESCAPE '\\')")
+        params += [f"%{esc}%", f"%{esc}%"]
+    page_n, size_n = _clamp_page(page, size, 200)
+    w = " AND ".join(where)
+    total = db.query(f"SELECT count(*) c FROM organized_records WHERE {w}", tuple(params), one=True)["c"]
+    rows = db.query(
+        f"SELECT * FROM organized_records WHERE {w} ORDER BY id DESC LIMIT ? OFFSET ?",
+        tuple(params + [size_n, (page_n - 1) * size_n]))
+    rule_rows = db.query("SELECT id, source_dir, target_dir, keyword, mode FROM auto_move_rules")
+    rule_map = {r["id"]: r for r in (dict(x) for x in rule_rows)}
+    items = []
+    for r in rows:
+        d = dict(r)
+        rr = rule_map.get(int(d["task_id"] or 0))
+        d["rule_label"] = (f"{rr['source_dir']} ➔ {rr['target_dir']}" if rr else "规则已删除")
+        items.append(d)
+    batches = [dict(b) for b in db.query(
+        "SELECT batch_id, count(*) c, min(created_at) t0, max(created_at) t1,"
+        " sum(CASE WHEN undone=0 THEN 1 ELSE 0 END) alive,"
+        " GROUP_CONCAT(DISTINCT task_id) rule_ids"
+        " FROM organized_records WHERE action='auto_move' GROUP BY batch_id ORDER BY t0 DESC LIMIT 60")]
+    return {"total": total, "items": items, "page": page_n, "size": size_n, "batches": batches}
+
+
+@router.post("/auto-move/records/undo")
+async def undo_auto_move_records(body: dict, _=Depends(require_user)):
+    """撤销整理记录（单条 record_id 或整批 batch_id），可选 stop_rule_ids 同时停用涉及规则。
+
+    撤销会把文件移回源目录；若不停用规则，下一轮定时整理命中后会再次移走——
+    前端在确认弹窗中向用户说明该后果并由用户勾选是否停用。
+    """
+    record_id = int(body.get("record_id") or 0)
+    batch_id = str(body.get("batch_id") or "").strip()
+    stop_rule_ids = body.get("stop_rule_ids")
+    if stop_rule_ids is not None and not isinstance(stop_rule_ids, list):
+        raise HTTPException(400, "stop_rule_ids 必须是数组")
+    res = await jobs.undo_auto_move_records(record_id, batch_id, stop_rule_ids)
+    if not res.get("ok") and res.get("msg"):
+        # 无可撤销记录/独占忙碌等业务原因：独占忙碌按 409，其余按 400
+        code = 409 if "互斥" in res["msg"] else 400
+        raise HTTPException(code, res["msg"])
+    return res
+

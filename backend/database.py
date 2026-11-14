@@ -196,6 +196,7 @@ CREATE TABLE IF NOT EXISTS organized_records(
     tmdb_id INTEGER,
     batch_id TEXT DEFAULT '',
     undone INTEGER NOT NULL DEFAULT 0,
+    undo_note TEXT DEFAULT '',
     created_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_org_records_file ON organized_records(file_id, undone);
@@ -456,6 +457,10 @@ def _migrate():
     ccols = {r["name"] for r in _conn.execute("PRAGMA table_info(channels)")}
     if "sub_only" not in ccols:
         _conn.execute("ALTER TABLE channels ADD COLUMN sub_only INTEGER NOT NULL DEFAULT 0")
+    # 整理账本撤销备注（定时文件整理的账本复用本表；撤销遇位置漂移等原因记在此处）
+    ocols = {r["name"] for r in _conn.execute("PRAGMA table_info(organized_records)")}
+    if "undo_note" not in ocols:
+        _conn.execute("ALTER TABLE organized_records ADD COLUMN undo_note TEXT DEFAULT ''")
     # 订阅别名与结构化追更进度（旧库无这些列，默认空值即可兼容）
     # 注意：col/ddl 来自上方硬编码元组（非用户输入），f-string 拼接安全；
     # 若未来改为动态来源，必须先过白名单

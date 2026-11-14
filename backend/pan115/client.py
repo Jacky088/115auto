@@ -1021,7 +1021,9 @@ def move_matched_files_for_rule(source_dir: str, target_dir: str,
                                 fuzzy_t2s: bool = True,
                                 dedup_by_episode: bool | None = None,
                                 max_depth: int = 2,
-                                scan_cache: dict | None = None) -> tuple[int, list[str]]:
+                                scan_cache: dict | None = None,
+                                dry_run: bool = False,
+                                moved_out: list | None = None) -> tuple:
     """按映射规则排队移动满足条件的文件（做好 115 严格风控）：
 
     模式支持：
@@ -1031,6 +1033,15 @@ def move_matched_files_for_rule(source_dir: str, target_dir: str,
     - exact（一对一精确匹配模式）：目标目录作为具体剧目目录（如 /电视剧/折月亮 (2026)），仅移动匹配此剧名的文件。
     仅接受以上两个值；规则的 "default" 由调用方（jobs.auto_move）归一化为全局模式后传入，
     其他未知值兜底按 library 处理。
+
+    返回值按模式区分：
+    - 正常模式（dry_run=False）：(移动数, 样例文件名列表)，与历史版本一致；
+      若传入 moved_out 列表，成功移动的每个文件明细 dict 会追加其中
+      （id/name/from_cid/from_path/dest_cid/dest_path/drama/season/size），供上层落整理账本。
+    - dry_run=True：不做任何移动，返回 (计划数, 计划 dict)——dict 含
+      items（与 moved_out 同结构的明细列表，另含 matched 命中词）/ skip_ep / skip_ep_samples。
+      注意 mkdirs 仍会确保源/目标目录存在（均为用户配置的既有目录，幂等）。
+      跳过统计中的防重计数为"若执行将会跳过"的预演结果。
 
     防风控与安全原则：
     1. 只移动文件，文件夹绝不移动（is_dir == False），忽略 BDMV/花絮/字幕独立文件夹
@@ -1274,6 +1285,7 @@ def move_matched_files_for_rule(source_dir: str, target_dir: str,
         drama_cid = matched_drama["cid"]
         final_dest_cid = drama_cid
         seasons_map: dict[int, int] = {}
+        season_name = ""
         if season_folder:
             s_num, ep_num, _ = parse_episode(fname)
             if s_num is None and ep_num is not None:
@@ -1284,6 +1296,8 @@ def move_matched_files_for_rule(source_dir: str, target_dir: str,
                 seasons_map = get_season_subdirs(drama_cid)
                 if s_num in seasons_map:
                     final_dest_cid = seasons_map[s_num]
+                    season_name = drama_season_names.get(drama_cid, {}).get(
+                        s_num, f"Season {s_num}")
 
         # 若文件已经在目标目录，无需移动
         if f.get("_parent_cid") == final_dest_cid:
@@ -1328,9 +1342,12 @@ def move_matched_files_for_rule(source_dir: str, target_dir: str,
             "dup_idx": dup_idx,
             "size": int(f.get("size", f.get("s", 0)) or 0),
             "parent_cid": f.get("_parent_cid"),
+            "from_folder": f.get("_parent_folder_name", ""),
             "dest_cid": final_dest_cid,
             "drama_cid": drama_cid,
             "drama_name": matched_drama["name"],
+            "matched": matched_drama["kw"],
+            "season_name": season_name if final_dest_cid != drama_cid else "",
             "ep_keys": ep_keys,
         })
 
@@ -1373,7 +1390,32 @@ def move_matched_files_for_rule(source_dir: str, target_dir: str,
             f"按季集防重跳过 {ep_skipped_cnt} 个同季同集视频（目标或本批已存在）：{'、'.join(ep_skipped_samples[:3])}",
         )
 
-    # 按目标目录分组移动
+    # 按目标目录分组移动（dry_run 在此返回计划，不做任何 115 写操作）
+    src_root = (source_dir or "").rstrip("/")
+    if dry_run:
+        plan_items = []
+        for x in files_to_move:
+            from_folder = str(x.get("from_folder") or "")
+            season_name = str(x.get("season_name") or "")
+            plan_items.append({
+                "id": x["id"],
+                "name": x["name"],
+                "from_cid": x["parent_cid"],
+                "from_path": f"{src_root}/{from_folder}" if from_folder else (src_root or "/"),
+                "dest_cid": x["dest_cid"],
+                "dest_path": (target_dir or "").rstrip("/") + "/" + str(x["drama_name"])
+                             + (f"/{season_name}" if season_name else ""),
+                "drama": x["drama_name"],
+                "season": season_name,
+                "matched": x.get("matched", ""),
+                "size": int(x.get("size") or 0),
+            })
+        return len(plan_items), {
+            "items": plan_items,
+            "skip_ep": ep_skipped_cnt,
+            "skip_ep_samples": list(ep_skipped_samples)[:5],
+        }
+
     by_dest: dict[int, list[dict]] = {}
     for item in files_to_move:
         by_dest.setdefault(item["dest_cid"], []).append(item)
@@ -1397,6 +1439,23 @@ def move_matched_files_for_rule(source_dir: str, target_dir: str,
                 moved_count += len(ids)
                 sample_names.extend([x["name"] for x in batch][:2])
                 note_115_ok()
+                # 移动成功才落明细：供上层写整理账本（撤销依据），失败批次不产生记录
+                if moved_out is not None:
+                    for x in batch:
+                        from_folder = str(x.get("from_folder") or "")
+                        season_name = str(x.get("season_name") or "")
+                        moved_out.append({
+                            "id": x["id"],
+                            "name": x["name"],
+                            "from_cid": x["parent_cid"],
+                            "from_path": f"{src_root}/{from_folder}" if from_folder else (src_root or "/"),
+                            "dest_cid": x["dest_cid"],
+                            "dest_path": (target_dir or "").rstrip("/") + "/" + str(x["drama_name"])
+                                         + (f"/{season_name}" if season_name else ""),
+                            "drama": x["drama_name"],
+                            "season": season_name,
+                            "size": int(x.get("size") or 0),
+                        })
                 if scan_cache is not None:
                     entries_cache.pop(dest_cid, None)
                     for x in batch:

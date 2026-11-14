@@ -511,13 +511,44 @@
         </el-button>
       </template>
     </el-dialog>
+
+    <!-- 整理预览弹窗（两段式执行第一步）：确认后才真正排队执行 -->
+    <el-dialog v-model="previewVisible" title="整理预览 — 将移动以下文件" :width="'min(860px, 96vw)'" top="6vh">
+      <el-alert type="info" :closable="false" show-icon style="margin-bottom: 10px"
+                title="以下为当前时刻的扫描快照（本次预览未移动任何文件）。确认后将重新扫描并执行，期间新增或手动移走的文件与预览可能存在差异。" />
+      <el-alert v-if="previewData?.risk_aborted" type="error" :closable="false" show-icon style="margin-bottom: 10px"
+                title="预览过程触发 115 风控信号，已中止剩余规则的预览，以下仅为部分结果。" />
+      <el-table :data="previewRows" size="small" max-height="46vh">
+        <el-table-column type="index" label="#" width="50" />
+        <el-table-column prop="name" label="文件名" min-width="220" show-overflow-tooltip />
+        <el-table-column prop="from_path" label="源位置" width="150" show-overflow-tooltip />
+        <el-table-column prop="dest_path" label="目标位置" min-width="220" show-overflow-tooltip />
+        <el-table-column prop="size" label="大小" width="90">
+          <template #default="{ row }">{{ row.size ? fmtSize(row.size) : '-' }}</template>
+        </el-table-column>
+        <el-table-column prop="matched" label="命中词" width="120" show-overflow-tooltip />
+        <el-table-column prop="rule_label" label="规则" width="170" show-overflow-tooltip />
+      </el-table>
+      <div v-if="previewData?.rules?.some((r) => r.skip_ep > 0 || r.error)" style="margin-top: 10px">
+        <div v-for="r in previewData.rules" :key="r.rule_id" style="font-size: var(--fs-caption); color: var(--saas-text-sub); line-height: 1.7">
+          <span v-if="r.skip_ep > 0">「{{ r.target_dir }}」按季集防重将跳过 {{ r.skip_ep }} 个文件{{ r.skip_ep_samples?.length ? `（如 ${r.skip_ep_samples.slice(0, 2).join('、')}）` : '' }}；</span>
+          <span v-if="r.error" style="color: var(--el-color-danger)">「{{ r.target_dir }}」{{ r.error }}；</span>
+        </div>
+      </div>
+      <template #footer>
+        <el-button @click="previewVisible = false">取消</el-button>
+        <el-button type="primary" :loading="previewConfirming" @click="confirmRunAfterPreview">
+          确认执行（共 {{ previewRows.length }} 个文件）
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { api, errMsg, saveOk } from '../api'
+import { api, errMsg, fmtSize, saveOk } from '../api'
 import { useUnsavedGuard } from '../composables/unsavedGuard'
 import DirPicker from '../components/DirPicker.vue'
 
@@ -914,21 +945,62 @@ const runAutoMoveNow = async () => {
     ElMessage.warning('定时文件整理功能尚未开启，请先打开功能总开关！')
     return
   }
+  // 两段式执行：先 dry-run 预览将移动的文件，用户确认后才真正排队执行
   runningMove.value = true
+  try {
+    const { data: pv } = await api.post('/api/auto-move/preview')
+    if (!pv.ok) {
+      ElMessage.warning(pv.msg || '预览失败')
+      return
+    }
+    if (!pv.total_planned) {
+      const skipInfo = (pv.rules || [])
+        .filter((r) => r.skip_ep > 0)
+        .map((r) => `防重跳过 ${r.skip_ep} 个`)
+        .join('；')
+      ElMessage.info(`当前没有需要移动的文件${skipInfo ? `（${skipInfo}）` : ''}`)
+      return
+    }
+    previewData.value = pv
+    previewVisible.value = true
+  } catch (e) {
+    ElMessage.error(errMsg(e))
+  } finally {
+    runningMove.value = false
+  }
+}
+
+// 预览弹窗数据：按规则分组的计划明细与跳过统计
+const previewVisible = ref(false)
+const previewData = ref(null)
+const previewConfirming = ref(false)
+const previewRows = computed(() => {
+  const rows = []
+  for (const r of (previewData.value?.rules || [])) {
+    for (const it of (r.planned || [])) {
+      rows.push({ rule_label: `${r.source_dir} ➔ ${r.target_dir}`, ...it })
+    }
+  }
+  return rows
+})
+
+const confirmRunAfterPreview = async () => {
+  previewConfirming.value = true
   try {
     const { data } = await api.post('/api/auto-move/run')
     if (data.ok) {
+      previewVisible.value = false
       ElMessage.info(data.msg || '已发起排队整理，正在等待转存/云下载队列终点...')
       gateState.value = data.gate_state || 'draining'
       if (data.drain_status) drainStatus.value = data.drain_status
       startAutoMovePolling()
     } else {
       ElMessage.warning(data.msg || '执行未完成')
-      runningMove.value = false
     }
   } catch (e) {
     ElMessage.error(errMsg(e))
-    runningMove.value = false
+  } finally {
+    previewConfirming.value = false
   }
 }
 

@@ -7,6 +7,7 @@ import queue
 import re
 import threading
 import time
+import uuid
 from urllib.parse import unquote
 
 import httpx
@@ -1229,6 +1230,14 @@ async def execute_auto_move(trigger: str = "scheduled") -> dict:
             if drained is False or transfer_gate.is_cancel_requested():
                 return {"ok": False, "cancelled": True, "msg": "排队等待期间已取消"}
             details = []
+            # 整理账本批次号：一次执行 = 一个批次，撤销与追溯都以它为键
+            batch_id = uuid.uuid4().hex[:12]
+
+            # 账本保留策略：90 天前的整理记录自动清理（低频数据，随执行顺手清理）
+            await asyncio.to_thread(
+                db.execute,
+                "DELETE FROM organized_records WHERE action='auto_move' AND created_at < ?",
+                (time.time() - 90 * 86400,))
 
             def _load_move_opts():
                 return (
@@ -1258,6 +1267,7 @@ async def execute_auto_move(trigger: str = "scheduled") -> dict:
                     continue
 
                 try:
+                    moved_items: list = []
                     moved_count, sample_names = await pan.run_pan_thread(
                         pan.move_matched_files_for_rule,
                         s_dir, t_dir, kw,
@@ -1268,12 +1278,34 @@ async def execute_auto_move(trigger: str = "scheduled") -> dict:
                         dedup_by_episode=dedup_by_episode,
                         max_depth=2,
                         scan_cache=scan_cache,
+                        moved_out=moved_items,
                     )
                     await asyncio.to_thread(
                         db.execute,
                         "UPDATE auto_move_rules SET last_run_at=?, last_moved_count=? WHERE id=?",
                         (time.time(), moved_count, r["id"]),
                     )
+                    # 整理账本：成功移动的文件逐条落记录（撤销与「整理记录」页的数据源）。
+                    # 只在移动成功后落账；账本写入失败不回滚移动，只记警告（移动已实际发生）
+                    if moved_items:
+                        def _write_ledger(items=moved_items, rid=r["id"], bid=batch_id):
+                            now = time.time()
+                            with db.transaction() as con:
+                                for it in items:
+                                    con.execute(
+                                        "INSERT INTO organized_records(task_id,file_id,parent_cid,size,"
+                                        "orig_path,orig_name,dest_cid,dest_path,dest_name,action,"
+                                        "batch_id,undone,undo_note,created_at) "
+                                        "VALUES(?,?,?,?,?,?,?,?,?,'auto_move',?,0,'',?)",
+                                        (int(rid), str(it["id"]), str(it.get("from_cid") or ""),
+                                         int(it.get("size") or 0), str(it.get("from_path") or ""),
+                                         str(it["name"]), str(it.get("dest_cid") or ""),
+                                         str(it.get("dest_path") or ""), str(it["name"]),
+                                         bid, now))
+                        try:
+                            await asyncio.to_thread(_write_ledger)
+                        except Exception as le:
+                            logstream.warn("auto_move", f"整理账本写入失败（移动已生效）: {le}")
                     mode_label = "总库分流" if effective_mode == "library" else f"精确匹配({kw})"
                     details.append({
                         "id": r["id"], "source_dir": s_dir, "target_dir": t_dir,
@@ -1341,6 +1373,237 @@ async def execute_auto_move(trigger: str = "scheduled") -> dict:
         finally:
             # 整理完成或异常中止，停止移动任务并恢复新任务接收与转存工作器
             transfer_gate.resume_all()
+
+
+async def preview_auto_move(rule_ids: list[int] | None = None) -> dict:
+    """整理前预览（dry_run）：按启用规则扫描源目录，返回「将会移动哪些文件」的计划。
+
+    只读不写：不做任何移动/重命名；不进独占门闸（不需要暂停转存工作器），
+    但独占任务执行中拒绝预览（避免叠加 115 扫描请求），并与正式执行共用模块锁互斥。
+    预览的 115 请求量与正式执行相当（只少 fs_move），结果为当前时刻快照，
+    确认执行时会重新扫描（期间新增/手动移走的文件与预览存在差异）。
+    """
+    def _preflight():
+        return (str(db.get_setting("running", False)).lower() == "true",
+                bool(db.get_setting("auto_move_enabled", False)))
+
+    is_running, am_enabled = await asyncio.to_thread(_preflight)
+    if not is_running:
+        return {"ok": False, "msg": "系统处于停止状态，请先在顶栏点击「运行」后再预览"}
+    if not am_enabled:
+        return {"ok": False, "msg": "定时文件整理功能未开启，请先打开功能总开关"}
+    if transfer_gate.is_exclusive_busy():
+        return {"ok": False, "msg": f"当前有互斥任务（{transfer_gate.get_active_mode()}）执行中，请待结束后再预览"}
+
+    lock = _get_auto_move_lock()
+    if lock.locked():
+        return {"ok": False, "msg": "整理任务正在执行中，请稍后再预览"}
+
+    async with lock:
+        rules = [dict(r) for r in await asyncio.to_thread(
+            db.query, "SELECT * FROM auto_move_rules WHERE enabled=1 ORDER BY id ASC")]
+        if rule_ids:
+            want = {int(x) for x in rule_ids if str(x).isdigit()}
+            rules = [r for r in rules if r["id"] in want]
+        if not rules:
+            return {"ok": True, "total_planned": 0, "rules": []}
+
+        def _load_move_opts():
+            return (
+                bool(db.get_setting("auto_move_scan_subdirs", True)),
+                db.get_setting("auto_move_mode", "library"),
+                bool(db.get_setting("auto_move_season_folder", True)),
+                bool(db.get_setting("auto_move_fuzzy_t2s", True)),
+                bool(db.get_setting("auto_move_dedup_by_episode", True)),
+            )
+
+        scan_subdirs, global_mode, season_folder, fuzzy_t2s, dedup_by_episode = \
+            await asyncio.to_thread(_load_move_opts)
+        scan_cache: dict = {}
+        out_rules: list[dict] = []
+        total_planned = 0
+        risk_aborted = False
+
+        for r in rules:
+            s_dir = r.get("source_dir", "").strip()
+            t_dir = r.get("target_dir", "").strip()
+            rule_mode = r.get("mode") or "default"
+            effective_mode = rule_mode if rule_mode in ("library", "exact") else global_mode
+            kw = (r.get("keyword", "") or pan.extract_target_folder_name(t_dir)).strip()
+            entry = {"rule_id": r["id"], "source_dir": s_dir, "target_dir": t_dir,
+                     "mode": effective_mode, "keyword": kw,
+                     "planned": [], "skip_ep": 0, "skip_ep_samples": [], "error": ""}
+
+            if effective_mode == "exact" and not kw:
+                entry["error"] = "目标文件夹名为空，无法提取匹配关键词"
+                out_rules.append(entry)
+                continue
+            try:
+                planned_cnt, plan = await pan.run_pan_thread(
+                    pan.move_matched_files_for_rule,
+                    s_dir, t_dir, kw,
+                    scan_subdirs=scan_subdirs,
+                    mode=effective_mode,
+                    season_folder=season_folder,
+                    fuzzy_t2s=fuzzy_t2s,
+                    dedup_by_episode=dedup_by_episode,
+                    max_depth=2,
+                    scan_cache=scan_cache,
+                    dry_run=True,
+                )
+                if isinstance(plan, dict):
+                    entry["planned"] = plan.get("items", [])
+                    entry["skip_ep"] = int(plan.get("skip_ep") or 0)
+                    entry["skip_ep_samples"] = list(plan.get("skip_ep_samples") or [])
+                total_planned += len(entry["planned"])
+                logstream.info("auto_move",
+                               f"预览 [{s_dir} ➔ {t_dir}]：计划移动 {len(entry['planned'])} 个文件"
+                               + (f"，按季集防重将跳过 {entry['skip_ep']} 个" if entry["skip_ep"] else ""))
+            except Exception as e:
+                entry["error"] = str(e)[:200]
+                logstream.warn("auto_move", f"预览规则 #{r['id']} [{s_dir} ➔ {t_dir}] 异常: {e}")
+                if any(k in str(e).lower() for k in pan._RISK_KEYWORDS):
+                    risk_aborted = True
+                    out_rules.append(entry)
+                    break
+            out_rules.append(entry)
+            # 规则之间小间隔，与正式执行的防风控口径一致（预览不触发写操作，间隔可短些）
+            await asyncio.sleep(0.3)
+
+        if risk_aborted:
+            logstream.error("auto_move", "⚠️ 预览过程触发 115 风控信号，已中止剩余规则的预览")
+        return {"ok": True, "total_planned": total_planned, "rules": out_rules,
+                "risk_aborted": risk_aborted}
+
+
+def _undo_auto_move_sync(records: list[dict]) -> dict:
+    """同步撤销整理账本记录：把文件从账本目标目录移回源目录（经 pan_call 串行节流）。
+
+    位置漂移防护（绝不盲移）：
+    - 文件仍在账本目标目录 → 移回记录的源目录（源目录被删则按 orig_path 逐级重建）
+    - 文件已在源目录（用户自己移回来了）→ 不动文件，直接标记已撤销
+    - 两处都不在（被手动移动/删除/二次整理）→ 跳过并记 undo_note，请用户人工处理
+    """
+    undone = 0
+    failed = 0
+    skipped: list[dict] = []
+
+    def _dir_ids(cid: int) -> set[str] | None:
+        try:
+            return {str(e["id"]) for e in pan.list_entries(cid, limit=2000)}
+        except Exception:
+            return None
+
+    dest_cache: dict[int, set[str] | None] = {}
+    src_cache: dict[int, set[str] | None] = {}
+
+    for rec in records:
+        fid = str(rec["file_id"] or "")
+        name = str(rec["orig_name"] or "")
+        try:
+            dest_cid = int(str(rec.get("dest_cid") or 0) or 0)
+            from_cid = int(str(rec.get("parent_cid") or 0) or 0)
+            orig_path = str(rec.get("orig_path") or "")
+            if not fid or dest_cid <= 0:
+                raise RuntimeError("账本记录缺少文件 id 或目标目录")
+
+            if dest_cid not in dest_cache:
+                dest_cache[dest_cid] = _dir_ids(dest_cid)
+            in_dest = dest_cache[dest_cid] is not None and fid in dest_cache[dest_cid]
+
+            if not in_dest:
+                # 不在目标目录：看是否已被移回源目录（用户手动移回的场景）
+                if from_cid > 0:
+                    if from_cid not in src_cache:
+                        src_cache[from_cid] = _dir_ids(from_cid)
+                    if src_cache[from_cid] is not None and fid in src_cache[from_cid]:
+                        db.execute("UPDATE organized_records SET undone=1, undo_note=? WHERE id=?",
+                                   ("文件已在原位置", rec["id"]))
+                        undone += 1
+                        continue
+                db.execute("UPDATE organized_records SET undo_note=? WHERE id=? AND undone=0",
+                           ("位置已变化（文件已不在记录的目标目录），请人工核对", rec["id"]))
+                skipped.append({"name": name, "reason": "位置已变化，请人工核对"})
+                continue
+
+            # 源目录兜底：记录的源 cid 无效时按 orig_path（源目录完整路径）逐级重建
+            target_from_cid = from_cid
+            if target_from_cid <= 0 or target_from_cid == dest_cid:
+                target_from_cid = pan.mkdirs(orig_path) if orig_path else 0
+            if target_from_cid <= 0 or target_from_cid == dest_cid:
+                db.execute("UPDATE organized_records SET undo_note=? WHERE id=? AND undone=0",
+                           ("源目录不可用，无法移回，请人工核对", rec["id"]))
+                skipped.append({"name": name, "reason": "源目录不可用"})
+                continue
+
+            try:
+                pan.move_entries([fid], target_from_cid)
+            except Exception:
+                # 源目录可能已被清理（移动失败常因父目录不存在）：按路径重建后重试一次
+                if not orig_path:
+                    raise
+                rebuilt = pan.mkdirs(orig_path)
+                if not rebuilt or rebuilt == dest_cid:
+                    raise
+                pan.move_entries([fid], rebuilt)
+                target_from_cid = rebuilt
+            db.execute("UPDATE organized_records SET undone=1, undo_note='' WHERE id=?", (rec["id"],))
+            undone += 1
+            if dest_cache.get(dest_cid) is not None:
+                dest_cache[dest_cid].discard(fid)
+            time.sleep(0.6 * pan.pace_factor())
+        except Exception as e:
+            failed += 1
+            logstream.warn("auto_move", f"撤销记录 #{rec['id']}({name}) 失败: {e}")
+    return {"undone": undone, "failed": failed, "skipped": skipped}
+
+
+async def undo_auto_move_records(record_id: int = 0, batch_id: str = "",
+                                 stop_rule_ids: list[int] | None = None) -> dict:
+    """撤销整理记录（单条或整批），可选同时停用涉及的规则。
+
+    撤销后文件回到源目录——若规则仍启用且文件仍命中匹配条件，下一轮定时整理会
+    再次把它移走；前端据此提供「撤销并停用规则」选项（stop_rule_ids），停用后
+    启用规则归零时联动关闭功能总开关（与删除规则的行为一致）。
+    """
+    if transfer_gate.is_exclusive_busy():
+        return {"ok": False, "msg": f"当前有互斥任务（{transfer_gate.get_active_mode()}）执行中，请待结束后再撤销"}
+    if not record_id and not batch_id:
+        return {"ok": False, "msg": "请指定要撤销的记录或批次"}
+
+    if record_id:
+        rows = [dict(r) for r in await asyncio.to_thread(
+            db.query, "SELECT * FROM organized_records WHERE id=? AND action='auto_move' AND undone=0",
+            (int(record_id),))]
+    else:
+        rows = [dict(r) for r in await asyncio.to_thread(
+            db.query, "SELECT * FROM organized_records WHERE batch_id=? AND action='auto_move' AND undone=0"
+                      " ORDER BY id DESC", (batch_id,))]
+    if not rows:
+        return {"ok": False, "msg": "没有可撤销的记录（可能已撤销或不存在）"}
+
+    involved = {int(r["task_id"] or 0) for r in rows if r["task_id"]}
+    stop_ids = [int(x) for x in (stop_rule_ids or []) if str(x).isdigit() and int(x) in involved]
+
+    res = await pan.run_pan_thread(_undo_auto_move_sync, rows)
+
+    disabled_rules: list[int] = []
+    if res["undone"] > 0 and stop_ids:
+        for rid in stop_ids:
+            db.execute("UPDATE auto_move_rules SET enabled=0 WHERE id=?", (rid,))
+            disabled_rules.append(rid)
+        rem = db.query("SELECT count(*) c FROM auto_move_rules WHERE enabled=1", one=True)
+        if not rem or int(rem["c"]) == 0:
+            if bool(db.get_setting("auto_move_enabled", False)):
+                db.set_setting("auto_move_enabled", False)
+                logstream.warn("auto_move", "所有启用的整理规则已停用，定时文件整理总开关已自动关闭")
+
+    logstream.info("auto_move",
+                   f"撤销整理：恢复 {res['undone']} 条（失败 {res['failed']}，"
+                   f"跳过 {len(res['skipped'])}），停用规则 {disabled_rules or '无'}")
+    return {"ok": res["undone"] > 0 or bool(disabled_rules), "undone": res["undone"],
+            "failed": res["failed"], "skipped": res["skipped"],
+            "disabled_rules": disabled_rules}
 
 
 async def auto_move_loop():
