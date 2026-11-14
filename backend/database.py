@@ -127,6 +127,7 @@ CREATE TABLE IF NOT EXISTS auto_move_rules(
     target_dir TEXT NOT NULL,
     keyword TEXT NOT NULL,
     mode TEXT NOT NULL DEFAULT 'default',
+    media_type TEXT NOT NULL DEFAULT 'auto',   -- auto | movie | tv：movie 规则跳过带集数标识文件
     enabled INTEGER NOT NULL DEFAULT 1,
     created_at REAL NOT NULL,
     last_run_at REAL,
@@ -461,6 +462,10 @@ def _migrate():
     ocols = {r["name"] for r in _conn.execute("PRAGMA table_info(organized_records)")}
     if "undo_note" not in ocols:
         _conn.execute("ALTER TABLE organized_records ADD COLUMN undo_note TEXT DEFAULT ''")
+    # 整理规则的媒体类型（movie 规则跳过带集数标识文件，解两库同名错位归档）
+    acols = {r["name"] for r in _conn.execute("PRAGMA table_info(auto_move_rules)")}
+    if "media_type" not in acols:
+        _conn.execute("ALTER TABLE auto_move_rules ADD COLUMN media_type TEXT NOT NULL DEFAULT 'auto'")
     # 订阅别名与结构化追更进度（旧库无这些列，默认空值即可兼容）
     # 注意：col/ddl 来自上方硬编码元组（非用户输入），f-string 拼接安全；
     # 若未来改为动态来源，必须先过白名单

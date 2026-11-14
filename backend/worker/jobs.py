@@ -1252,6 +1252,24 @@ async def execute_auto_move(trigger: str = "scheduled") -> dict:
             risk_aborted = False
             scan_cache: dict = {}
 
+            # 跨规则同名歧义预检：≥2 个总库规则时，收集被多库共有的剧名关键词。
+            # 复用 scan_cache——预检列过的库根目录，移动阶段零重复请求
+            lib_targets = []
+            for r in rules:
+                rm = r.get("mode") or "default"
+                em = rm if rm in ("library", "exact") else global_mode
+                if em == "library" and r.get("target_dir", "").strip():
+                    lib_targets.append(r["target_dir"].strip())
+            ambiguous_kws: set[str] = set()
+            if len(lib_targets) >= 2:
+                ambiguous_kws = await pan.run_pan_thread(
+                    pan.collect_library_keyword_conflicts, lib_targets, fuzzy_t2s, scan_cache)
+                if ambiguous_kws:
+                    logstream.info(
+                        "auto_move",
+                        f"同名歧义预检：{len(lib_targets)} 个总库存在同名剧名 "
+                        f"{sorted(ambiguous_kws)[:5]}，无集数标识的裸文件名将留源目录交用户手动处理")
+
             for r in rules:
                 s_dir = r.get("source_dir", "").strip()
                 t_dir = r.get("target_dir", "").strip()
@@ -1279,6 +1297,8 @@ async def execute_auto_move(trigger: str = "scheduled") -> dict:
                         max_depth=2,
                         scan_cache=scan_cache,
                         moved_out=moved_items,
+                        rule_media_type=str(r.get("media_type") or "auto"),
+                        ambiguous_kws=ambiguous_kws,
                     )
                     await asyncio.to_thread(
                         db.execute,
@@ -1420,6 +1440,19 @@ async def preview_auto_move(rule_ids: list[int] | None = None) -> dict:
         scan_subdirs, global_mode, season_folder, fuzzy_t2s, dedup_by_episode = \
             await asyncio.to_thread(_load_move_opts)
         scan_cache: dict = {}
+
+        # 跨规则同名歧义预检（与正式执行同口径，预览如实反映将跳过的歧义文件）
+        lib_targets = []
+        for r in rules:
+            rm = r.get("mode") or "default"
+            em = rm if rm in ("library", "exact") else global_mode
+            if em == "library" and r.get("target_dir", "").strip():
+                lib_targets.append(r["target_dir"].strip())
+        ambiguous_kws: set[str] = set()
+        if len(lib_targets) >= 2:
+            ambiguous_kws = await pan.run_pan_thread(
+                pan.collect_library_keyword_conflicts, lib_targets, fuzzy_t2s, scan_cache)
+
         out_rules: list[dict] = []
         total_planned = 0
         risk_aborted = False
@@ -1432,7 +1465,8 @@ async def preview_auto_move(rule_ids: list[int] | None = None) -> dict:
             kw = (r.get("keyword", "") or pan.extract_target_folder_name(t_dir)).strip()
             entry = {"rule_id": r["id"], "source_dir": s_dir, "target_dir": t_dir,
                      "mode": effective_mode, "keyword": kw,
-                     "planned": [], "skip_ep": 0, "skip_ep_samples": [], "error": ""}
+                     "planned": [], "skip_ep": 0, "skip_ep_samples": [],
+                     "skip_movie": 0, "skip_ambiguous": 0, "skip_ambiguous_samples": [], "error": ""}
 
             if effective_mode == "exact" and not kw:
                 entry["error"] = "目标文件夹名为空，无法提取匹配关键词"
@@ -1450,11 +1484,16 @@ async def preview_auto_move(rule_ids: list[int] | None = None) -> dict:
                     max_depth=2,
                     scan_cache=scan_cache,
                     dry_run=True,
+                    rule_media_type=str(r.get("media_type") or "auto"),
+                    ambiguous_kws=ambiguous_kws,
                 )
                 if isinstance(plan, dict):
                     entry["planned"] = plan.get("items", [])
                     entry["skip_ep"] = int(plan.get("skip_ep") or 0)
                     entry["skip_ep_samples"] = list(plan.get("skip_ep_samples") or [])
+                    entry["skip_movie"] = int(plan.get("skip_movie") or 0)
+                    entry["skip_ambiguous"] = int(plan.get("skip_ambiguous") or 0)
+                    entry["skip_ambiguous_samples"] = list(plan.get("skip_ambiguous_samples") or [])
                 total_planned += len(entry["planned"])
                 logstream.info("auto_move",
                                f"预览 [{s_dir} ➔ {t_dir}]：计划移动 {len(entry['planned'])} 个文件"

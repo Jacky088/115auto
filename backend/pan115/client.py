@@ -1023,7 +1023,9 @@ def move_matched_files_for_rule(source_dir: str, target_dir: str,
                                 max_depth: int = 2,
                                 scan_cache: dict | None = None,
                                 dry_run: bool = False,
-                                moved_out: list | None = None) -> tuple:
+                                moved_out: list | None = None,
+                                rule_media_type: str = "auto",
+                                ambiguous_kws: set | frozenset | None = None) -> tuple:
     """按映射规则排队移动满足条件的文件（做好 115 严格风控）：
 
     模式支持：
@@ -1039,9 +1041,17 @@ def move_matched_files_for_rule(source_dir: str, target_dir: str,
       若传入 moved_out 列表，成功移动的每个文件明细 dict 会追加其中
       （id/name/from_cid/from_path/dest_cid/dest_path/drama/season/size），供上层落整理账本。
     - dry_run=True：不做任何移动，返回 (计划数, 计划 dict)——dict 含
-      items（与 moved_out 同结构的明细列表，另含 matched 命中词）/ skip_ep / skip_ep_samples。
+      items（与 moved_out 同结构的明细列表，另含 matched 命中词）/ skip_ep / skip_ep_samples /
+      skip_movie / skip_ambiguous 及各自样例。
       注意 mkdirs 仍会确保源/目标目录存在（均为用户配置的既有目录，幂等）。
       跳过统计中的防重计数为"若执行将会跳过"的预演结果。
+
+    媒体类型守卫（rule_media_type）与同名歧义拦截（ambiguous_kws）：
+    - rule_media_type='movie'：跳过一切带集数标识的文件（S01E01/E01/第1集/1话）——
+      电影库不收剧集，重名场景下剧集留给 tv/auto 规则认领，与规则顺序无关
+    - ambiguous_kws：跨规则同名预检得到的剧名关键词集合（出现在 ≥2 个总库的目录名）。
+      命中这些关键词且**无集数标识**的裸文件名不自动处理（两库同名无法判别，留给用户手动判断）
+    - 两者均默认关闭（'auto' / None），行为与历史版本一致
 
     防风控与安全原则：
     1. 只移动文件，文件夹绝不移动（is_dir == False），忽略 BDMV/花絮/字幕独立文件夹
@@ -1066,6 +1076,29 @@ def move_matched_files_for_rule(source_dir: str, target_dir: str,
     else:
         dedup_ep = bool(dedup_by_episode)
 
+    # 跳过统计（提前初始化：统一出口 _result 在任何早退路径都要能带出计数）
+    ep_skipped_cnt = 0
+    ep_skipped_samples: list[str] = []
+    movie_skip_cnt = 0
+    movie_skip_samples: list[str] = []
+    ambiguous_cnt = 0
+    ambiguous_samples: list[str] = []
+    plan_items: list[dict] = []
+
+    def _result(count, items):
+        """统一出口：dry_run 返回 (计划数, 统计 dict)，正常模式返回 (移动数, 样例名)。"""
+        if dry_run:
+            return count, {
+                "items": plan_items,
+                "skip_ep": ep_skipped_cnt,
+                "skip_ep_samples": list(ep_skipped_samples)[:5],
+                "skip_movie": movie_skip_cnt,
+                "skip_movie_samples": list(movie_skip_samples)[:5],
+                "skip_ambiguous": ambiguous_cnt,
+                "skip_ambiguous_samples": list(ambiguous_samples)[:5],
+            }
+        return count, items
+
     target_cid = mkdirs(target_dir)
     if target_cid is None:
         raise RuntimeError(f"无法获取或创建目标目录: {target_dir}")
@@ -1076,7 +1109,7 @@ def move_matched_files_for_rule(source_dir: str, target_dir: str,
 
     if mode == "exact" and source_cid == target_cid:
         logstream.info("auto_move", f"精确模式下源目录与目标目录相同「{target_dir}」，无需移动")
-        return 0, []
+        return _result(0, [])
 
     pace = pace_factor()
     client = _get_client()
@@ -1123,7 +1156,7 @@ def move_matched_files_for_rule(source_dir: str, target_dir: str,
         drama_targets.sort(key=lambda x: len(x["norm_kw"]), reverse=True)
         if not drama_targets:
             logstream.info("auto_move", f"总库「{target_dir}」下暂未发现包含中文的剧集子文件夹，跳过本次分流")
-            return 0, []
+            return _result(0, [])
     else:
         # 一对一精确匹配模式
         norm_kw = normalize_title(kw, fuzzy_t2s=fuzzy_t2s)
@@ -1188,7 +1221,7 @@ def move_matched_files_for_rule(source_dir: str, target_dir: str,
                 scan_queue.append((sub_cid, cur_depth + 1, dname))
 
     if not candidate_files:
-        return 0, []
+        return _result(0, [])
 
     # 季子目录与目标文件查重缓存（原始文件名 + 剥离副本后缀规范名 + 按季集防重集合）
     drama_season_cache: dict[int, dict[int, int]] = {}
@@ -1244,8 +1277,6 @@ def move_matched_files_for_rule(source_dir: str, target_dir: str,
     seen_ids: set[str] = set()
     # 聚类去重：开启按季集防重且为带集号的视频时按 (drama_cid, ep_keys) 聚类择优，否则按 (final_dest_cid, clean_name)
     candidates_by_group: dict[tuple, list[dict]] = {}
-    ep_skipped_cnt = 0
-    ep_skipped_samples: list[str] = []
 
     for f in candidate_files:
         fid = str(f.get("id"))
@@ -1264,6 +1295,17 @@ def move_matched_files_for_rule(source_dir: str, target_dir: str,
         if any(extra in fname_lower for extra in _EXTRA_KEYWORDS):
             continue
 
+        # 媒体类型守卫 / 同名歧义判别都需要集数标识信息（按需解析，正则开销极低）
+        ep_marker = False
+        if rule_media_type == "movie" or ambiguous_kws:
+            ep_marker = parse_episode(fname)[1] is not None
+        # 电影库规则：跳过一切带集数标识的文件（剧集交给 tv/auto 规则认领，与规则顺序无关）
+        if rule_media_type == "movie" and ep_marker:
+            movie_skip_cnt += 1
+            if len(movie_skip_samples) < 5:
+                movie_skip_samples.append(fname)
+            continue
+
         # 软化标题比对（支持中英文混合双层匹配）
         norm_name = normalize_title(fname, fuzzy_t2s=fuzzy_t2s)
         matched_drama = None
@@ -1279,6 +1321,14 @@ def move_matched_files_for_rule(source_dir: str, target_dir: str,
                     matched_drama = dt
                     break
         if not matched_drama:
+            continue
+
+        # 同名歧义拦截：命中的剧名关键词同时出现在 ≥2 个总库，且文件无集数标识
+        # （如「斗罗大陆.mkv」在电影库和电视剧库都有同名目录）→ 不自动处理，留源目录交用户手动判断
+        if ambiguous_kws and not ep_marker and matched_drama["norm_kw"] in ambiguous_kws:
+            ambiguous_cnt += 1
+            if len(ambiguous_samples) < 5:
+                ambiguous_samples.append(fname)
             continue
 
         # 目标 cid 确定：若开启按季归档且剧目下有季子目录，按季落入季目录
@@ -1357,7 +1407,7 @@ def move_matched_files_for_rule(source_dir: str, target_dir: str,
                 "auto_move",
                 f"按季集防重跳过 {ep_skipped_cnt} 个同季同集视频（目标已存在）：{'、'.join(ep_skipped_samples[:3])}",
             )
-        return 0, []
+        return _result(0, [])
 
     # 择优提取：每组仅移动一份文件！
     # 优先级：dup_idx 升序（0 原版最优先，其次 (1)、(2)）；同编号时大文件优先（如 2160p 优于 1080p）
@@ -1392,6 +1442,19 @@ def move_matched_files_for_rule(source_dir: str, target_dir: str,
 
     # 按目标目录分组移动（dry_run 在此返回计划，不做任何 115 写操作）
     src_root = (source_dir or "").rstrip("/")
+    if not dry_run:
+        if movie_skip_cnt > 0:
+            logstream.info(
+                "auto_move",
+                f"电影库规则跳过 {movie_skip_cnt} 个带集数标识的文件（剧集交给剧集规则认领）："
+                f"{'、'.join(movie_skip_samples[:3])}",
+            )
+        if ambiguous_cnt > 0:
+            logstream.info(
+                "auto_move",
+                f"同名歧义跳过 {ambiguous_cnt} 个文件（多库同名且无集数标识，留源目录交用户手动判断）："
+                f"{'、'.join(ambiguous_samples[:3])}",
+            )
     if dry_run:
         plan_items = []
         for x in files_to_move:
@@ -1410,11 +1473,7 @@ def move_matched_files_for_rule(source_dir: str, target_dir: str,
                 "matched": x.get("matched", ""),
                 "size": int(x.get("size") or 0),
             })
-        return len(plan_items), {
-            "items": plan_items,
-            "skip_ep": ep_skipped_cnt,
-            "skip_ep_samples": list(ep_skipped_samples)[:5],
-        }
+        return _result(len(plan_items), [])
 
     by_dest: dict[int, list[dict]] = {}
     for item in files_to_move:
@@ -1465,7 +1524,66 @@ def move_matched_files_for_rule(source_dir: str, target_dir: str,
                 note_115_error(str(e))
                 raise
 
-    return moved_count, sample_names[:5]
+    return _result(moved_count, sample_names[:5])
+
+
+def collect_library_keyword_conflicts(targets: list[str], fuzzy_t2s: bool = True,
+                                      scan_cache: dict | None = None) -> set[str]:
+    """跨规则同名歧义预检：返回被 ≥2 个总库同时拥有的剧名关键词集合。
+
+    对每个总库目标列出一级子目录，按与 move_matched_files_for_rule 完全相同的口径
+    提取/归一化剧名关键词（剥年份、繁简互通、排除季目录与通用文件夹）；出现在
+    ≥2 个库的关键词即为"两库同名"——无集数标识的裸文件名命中它们时不自动处理。
+    targets 少于 2 个时直接返回空集（单库不存在同名歧义）。
+    复用 scan_cache 的目录缓存：预检列过的总库根目录，移动阶段零重复请求。
+    """
+    if not targets or len(targets) < 2:
+        return set()
+    entries_cache: dict[int, list[dict]] = \
+        scan_cache.setdefault("dir_entries", {}) if scan_cache is not None else {}
+    per_rule: list[set[str]] = []
+    for t in targets:
+        t = (t or "").strip()
+        if not t:
+            per_rule.append(set())
+            continue
+        try:
+            cid = mkdirs(t)
+        except Exception:
+            cid = 0
+        if not cid:
+            per_rule.append(set())
+            continue
+        if cid in entries_cache:
+            entries = entries_cache[cid]
+        else:
+            try:
+                entries = list_entries(cid, limit=2000)
+            except Exception:
+                entries = []
+            if scan_cache is not None:
+                entries_cache[cid] = entries
+        kws: set[str] = set()
+        for e in entries:
+            if not e.get("is_dir"):
+                continue
+            nm = str(e.get("name") or "").strip()
+            if not nm or nm.lower() in _GENERIC_LIBRARY_SKIP_FOLDERS:
+                continue
+            if parse_season_number(nm) is not None:
+                continue
+            if not _CHINESE_CHAR_RE.search(nm):
+                continue
+            nk = normalize_title(extract_target_folder_name(nm), fuzzy_t2s=fuzzy_t2s)
+            if len(nk) >= 2:
+                kws.add(nk)
+        per_rule.append(kws)
+    seen: set[str] = set()
+    ambiguous: set[str] = set()
+    for ks in per_rule:
+        ambiguous |= (seen & ks)
+        seen |= ks
+    return ambiguous
 
 
 # ---------- 整理刮削专用 115 底层读写与树扫描封装 ----------

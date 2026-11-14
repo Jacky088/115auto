@@ -2116,6 +2116,11 @@ def save_auto_move_rule(body: dict, _=Depends(require_user)):
     if mode not in ("default", "library", "exact"):
         mode = "default"
 
+    # 媒体类型守卫：movie 规则跳过带集数标识文件（剧集留给剧集规则），auto 为历史行为
+    media_type = str(body.get("media_type", "auto")).strip().lower()
+    if media_type not in ("auto", "movie", "tv"):
+        media_type = "auto"
+
     raw_kw = str(body.get("keyword", "")).strip()
     extracted_kw = pan.extract_target_folder_name(target_dir)
     keyword = raw_kw or extracted_kw
@@ -2126,17 +2131,18 @@ def save_auto_move_rule(body: dict, _=Depends(require_user)):
     rule_id = body.get("id")
     if rule_id:
         db.execute(
-            "UPDATE auto_move_rules SET source_dir=?, target_dir=?, keyword=?, mode=?, enabled=? WHERE id=?",
-            (source_dir, target_dir, keyword, mode, enabled, rule_id)
+            "UPDATE auto_move_rules SET source_dir=?, target_dir=?, keyword=?, mode=?, media_type=?, enabled=? WHERE id=?",
+            (source_dir, target_dir, keyword, mode, media_type, enabled, rule_id)
         )
     else:
         db.execute(
-            "INSERT INTO auto_move_rules(source_dir, target_dir, keyword, mode, enabled, created_at, last_run_at, last_moved_count) "
-            "VALUES(?,?,?,?,?,?,NULL,0)",
-            (source_dir, target_dir, keyword, mode, enabled, time.time())
+            "INSERT INTO auto_move_rules(source_dir, target_dir, keyword, mode, media_type, enabled, created_at, last_run_at, last_moved_count) "
+            "VALUES(?,?,?,?,?,?,?,NULL,0)",
+            (source_dir, target_dir, keyword, mode, media_type, enabled, time.time())
         )
     mode_desc = "总库分流" if mode == "library" else ("精确匹配" if mode == "exact" else "跟随全局")
-    logstream.info("auto_move", f"已保存整理规则 [{source_dir} ➔ {target_dir} / {mode_desc}] (关键词: {keyword or '自动'})")
+    type_desc = {"movie": "，电影库", "tv": "，剧集库"}.get(media_type, "")
+    logstream.info("auto_move", f"已保存整理规则 [{source_dir} ➔ {target_dir} / {mode_desc}{type_desc}] (关键词: {keyword or '自动'})")
     return {"ok": True}
 
 

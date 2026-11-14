@@ -142,6 +142,11 @@ def test_normal_mode_collects_moved_out():
               and "折月亮 (2026)" in it["dest_path"], str(it))
 
 
+async def fake_drain(*args, **kwargs):
+    """execute 排空阶段的通用桩：直接视为已排空。"""
+    return True
+
+
 def test_execute_writes_ledger_and_retention():
     """execute_auto_move 成功移动后落账本（batch_id 一致），90 天前旧记录被清理。"""
     db.execute("DELETE FROM auto_move_rules")
@@ -162,9 +167,6 @@ def test_execute_writes_ledger_and_retention():
                         "dest_path": "/电视剧/折月亮 (2026)", "drama": "折月亮 (2026)",
                         "season": "", "size": 2048})
         return 1, ["折月亮.S01E02.mkv"]
-
-    async def fake_drain(*args, **kwargs):
-        return True
 
     async def scenario():
         with patch.object(transfer_gate, "try_begin_exclusive", return_value=(True, "")), \
@@ -335,6 +337,147 @@ def test_preview_auto_move_flow():
     db.set_setting("auto_move_enabled", False)
 
 
+def test_media_type_movie_skips_marked_files():
+    """电影库规则跳过带集数标识的文件；tv/auto 规则不受影响。"""
+    mock_client = MagicMock()
+    mock_client.fs_move.return_value = {"state": True}
+
+    files = [
+        {"id": "ep1", "name": "斗罗大陆.S01E01.第1集.1080p.mkv", "is_dir": False},
+        {"id": "ep2", "name": "斗罗大陆.第2集.mkv", "is_dir": False},
+        {"id": "mv1", "name": "斗罗大陆 (2026).mkv", "is_dir": False},
+    ]
+
+    def run(media_type):
+        moved: list = []
+        with patch.object(pan, "_get_client", return_value=mock_client), \
+             patch.object(pan, "mkdirs", side_effect=lambda p: 100 if "接收" in p else 200), \
+             patch.object(pan, "list_file_names", return_value=set()), \
+             patch("time.sleep", return_value=None), \
+             patch.object(pan, "list_entries", side_effect=lambda cid, limit=2000: (
+                 files if cid == 100 else [{"id": "201", "name": "斗罗大陆", "is_dir": True}])):
+            mock_client.fs_move.reset_mock()
+            cnt, samples = pan.move_matched_files_for_rule(
+                "/最近接收", "/电影", mode="library", scan_subdirs=False,
+                dedup_by_episode=False, moved_out=moved, rule_media_type=media_type)
+        claimed = sorted(x["id"] for x in moved)
+        return cnt, claimed
+
+    cnt_movie, claimed_movie = run("movie")
+    check("movie 规则跳过集数文件只认裸片名", claimed_movie == ["mv1"], str(claimed_movie))
+    cnt_auto, claimed_auto = run("auto")
+    check("auto 规则行为与历史一致（全部认领）", claimed_auto == ["ep1", "ep2", "mv1"], str(claimed_auto))
+    cnt_tv, claimed_tv = run("tv")
+    check("tv 规则不跳集数文件", claimed_tv == ["ep1", "ep2", "mv1"], str(claimed_tv))
+
+
+def test_dry_run_reports_movie_and_ambiguous_skips():
+    """dry_run 计划如实反映 movie 守卫与同名歧义跳过统计。"""
+    mock_client = MagicMock()
+
+    with patch.object(pan, "_get_client", return_value=mock_client), \
+         patch.object(pan, "mkdirs", side_effect=lambda p: 100 if "接收" in p else 200), \
+         patch.object(pan, "list_file_names", return_value=set()), \
+         patch("time.sleep", return_value=None), \
+         patch.object(pan, "list_entries", side_effect=lambda cid, limit=2000: (
+             [{"id": "ep1", "name": "斗罗大陆.S01E01.mkv", "is_dir": False},
+              {"id": "bare", "name": "斗罗大陆.mkv", "is_dir": False}]
+             if cid == 100 else
+             [{"id": "201", "name": "斗罗大陆", "is_dir": True}] if cid == 200 else [])):
+        cnt, plan = pan.move_matched_files_for_rule(
+            "/最近接收", "/电影", mode="library", scan_subdirs=False,
+            dedup_by_episode=False, dry_run=True,
+            rule_media_type="movie", ambiguous_kws={"斗罗大陆"})
+        check("集数文件被 movie 守卫跳过", plan["skip_movie"] == 1, str(plan))
+        check("无标识裸文件名被歧义拦截", plan["skip_ambiguous"] == 1
+              and plan["skip_ambiguous_samples"] == ["斗罗大陆.mkv"], str(plan))
+        check("计划为空且无移动", cnt == 0 and plan["items"] == [] and mock_client.fs_move.call_count == 0)
+
+
+def test_collect_library_keyword_conflicts():
+    """跨库同名预检：两库共有目录名 → 归一化关键词入歧义集；单库返回空。"""
+    def fake_list_entries(cid, limit=2000):
+        if cid == 201:
+            return [{"id": "a1", "name": "斗罗大陆", "is_dir": True},
+                    {"id": "a2", "name": "Season 1", "is_dir": True},
+                    {"id": "a3", "name": "折月亮 (2026)", "is_dir": True}]
+        if cid == 202:
+            return [{"id": "b1", "name": "斗罗大陆 (2024)", "is_dir": True},
+                    {"id": "b2", "name": "庆余年", "is_dir": True}]
+        return []
+
+    with patch.object(pan, "mkdirs", side_effect=lambda p: {"/电影": 201, "/电视剧": 202}.get(p, 0)), \
+         patch.object(pan, "list_entries", side_effect=fake_list_entries):
+        amb = pan.collect_library_keyword_conflicts(["/电影", "/电视剧"], fuzzy_t2s=False)
+        check("两库同名关键词进歧义集", "斗罗大陆" in amb and "折月亮(2026)" not in amb, str(amb))
+        check("单库不产生歧义", pan.collect_library_keyword_conflicts(["/电影"]) == set())
+
+
+def test_execute_passes_media_type_and_ambiguous():
+    """execute 将规则的 media_type 与预检歧义集传给移动函数。"""
+    db.execute("DELETE FROM auto_move_rules")
+    db.execute("DELETE FROM organized_records WHERE action='auto_move'")
+    db.insert("INSERT INTO auto_move_rules(source_dir,target_dir,keyword,mode,media_type,enabled,created_at,last_run_at,last_moved_count)"
+              " VALUES('/r1','/电视剧','', 'library','tv',1,?,NULL,0)", (time.time(),))
+    db.insert("INSERT INTO auto_move_rules(source_dir,target_dir,keyword,mode,media_type,enabled,created_at,last_run_at,last_moved_count)"
+              " VALUES('/r1','/电影','', 'library','movie',1,?,NULL,0)", (time.time(),))
+    db.set_setting("running", True)
+    db.set_setting("auto_move_enabled", True)
+    db.set_setting("auto_move_notify", False)
+
+    captured = []
+
+    def fake_move(*args, **kwargs):
+        captured.append({"media_type": kwargs.get("rule_media_type"),
+                         "ambiguous": kwargs.get("ambiguous_kws")})
+        return 0, []
+
+    async def scenario():
+        with patch.object(transfer_gate, "try_begin_exclusive", return_value=(True, "")), \
+             patch.object(transfer_gate, "prepare_and_drain_transfers", fake_drain), \
+             patch.object(pan, "move_matched_files_for_rule", side_effect=fake_move), \
+             patch.object(pan, "collect_library_keyword_conflicts",
+                          side_effect=lambda targets, *a, **k: {"斗罗大陆"} if len(targets) >= 2 else set()), \
+             patch.object(jobs, "notify", new=lambda *a, **k: None):
+            return await jobs.execute_auto_move(trigger="manual")
+
+    asyncio.run(scenario())
+    check("两条规则都收到 media_type", [c["media_type"] for c in captured] == ["tv", "movie"], str(captured))
+    check("歧义集传入两条规则", all(c["ambiguous"] == {"斗罗大陆"} for c in captured), str(captured))
+    db.set_setting("running", False)
+    db.set_setting("auto_move_enabled", False)
+    db.execute("DELETE FROM auto_move_rules")
+    db.execute("DELETE FROM organized_records WHERE action='auto_move'")
+
+
+def test_old_db_migration_adds_media_type():
+    """老库 auto_move_rules 缺 media_type 列时自动补列。"""
+    old_dir = tempfile.mkdtemp(prefix="autosave_test_ledger_mt_")
+    old_db = os.path.join(old_dir, "app.db")
+    conn = sqlite3.connect(old_db)
+    conn.execute("""CREATE TABLE auto_move_rules(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, source_dir TEXT NOT NULL, target_dir TEXT NOT NULL,
+        keyword TEXT NOT NULL, mode TEXT NOT NULL DEFAULT 'default', enabled INTEGER NOT NULL DEFAULT 1,
+        created_at REAL NOT NULL, last_run_at REAL, last_moved_count INTEGER NOT NULL DEFAULT 0)""")
+    conn.execute("INSERT INTO auto_move_rules(source_dir,target_dir,keyword,created_at) VALUES('/a','/b','k',1)")
+    conn.commit()
+    conn.close()
+
+    import importlib
+    import pathlib
+    from backend import config
+    with patch.object(config, "DATA_DIR", pathlib.Path(old_dir)), \
+         patch.object(config, "DB_PATH", pathlib.Path(old_db)):
+        importlib.reload(db)
+        db.init()
+        cols = {r["name"] for r in db.query("PRAGMA table_info(auto_move_rules)")}
+        check("老库迁移后补出 media_type 列", "media_type" in cols, str(cols))
+        row = db.query("SELECT media_type, source_dir FROM auto_move_rules", one=True)
+        check("存量规则默认 auto 且数据保留", row["media_type"] == "auto" and row["source_dir"] == "/a")
+    importlib.reload(db)
+    db.init()
+
+
 print("\n=== 整理账本与预览功能测试 ===")
 test_migration_undo_note_column()
 test_old_db_migration_adds_undo_note()
@@ -346,6 +489,11 @@ test_undo_already_home_and_drift()
 test_undo_stop_rules_and_master_switch()
 test_undo_rejects_when_exclusive_busy()
 test_preview_auto_move_flow()
+test_media_type_movie_skips_marked_files()
+test_dry_run_reports_movie_and_ambiguous_skips()
+test_collect_library_keyword_conflicts()
+test_execute_passes_media_type_and_ambiguous()
+test_old_db_migration_adds_media_type()
 
 print(f"\n通过 {len(PASS)} 项，失败 {len(FAIL)} 项")
 if FAIL:

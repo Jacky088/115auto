@@ -434,6 +434,19 @@
             </span>
           </template>
         </el-table-column>
+        <el-table-column label="媒体类型" width="120">
+          <template #default="{ row }">
+            <el-tooltip placement="top" :disabled="row.media_type !== 'movie'"
+                        content="电影库规则会跳过带集数标识（S01E01/第1集）的文件，避免重名影片错位归档">
+              <el-select v-model="row.media_type" size="small" style="width: 104px"
+                         @change="saveMoveRule(row)">
+                <el-option label="自动" value="auto" />
+                <el-option label="电影库" value="movie" />
+                <el-option label="剧集库" value="tv" />
+              </el-select>
+            </el-tooltip>
+          </template>
+        </el-table-column>
         <el-table-column label="上次整理状态" width="150">
           <template #default="{ row }">
             <span v-if="row.last_run_at" style="font-size: var(--fs-caption); color: var(--saas-text-main)">
@@ -477,6 +490,18 @@
             <el-radio label="library">总库智能分流</el-radio>
             <el-radio label="exact">一对一精确匹配</el-radio>
           </el-radio-group>
+        </el-form-item>
+        <el-form-item label="媒体类型">
+          <div style="display: flex; flex-direction: column; gap: 4px; width: 100%">
+            <el-radio-group v-model="newRuleForm.media_type">
+              <el-radio label="auto">自动（按标题匹配）</el-radio>
+              <el-radio label="movie">电影库</el-radio>
+              <el-radio label="tv">剧集库</el-radio>
+            </el-radio-group>
+            <span style="color: var(--saas-text-sub); font-size: var(--fs-caption); line-height: 1.4">
+              设为「电影库」后，带集数标识（S01E01/第1集）的文件将被跳过、留给剧集规则——两库同名影片不会错位归档
+            </span>
+          </div>
         </el-form-item>
         <el-form-item label="源目录" required>
           <el-button class="dir-btn" style="width: 100%" @click="openDialogPicker('dialog_source')">
@@ -529,9 +554,13 @@
         <el-table-column prop="matched" label="命中词" width="120" show-overflow-tooltip />
         <el-table-column prop="rule_label" label="规则" width="170" show-overflow-tooltip />
       </el-table>
-      <div v-if="previewData?.rules?.some((r) => r.skip_ep > 0 || r.error)" style="margin-top: 10px">
+      <div v-if="previewData?.rules?.some((r) => r.skip_ep > 0 || r.skip_movie > 0 || r.skip_ambiguous > 0 || r.error)" style="margin-top: 10px">
         <div v-for="r in previewData.rules" :key="r.rule_id" style="font-size: var(--fs-caption); color: var(--saas-text-sub); line-height: 1.7">
           <span v-if="r.skip_ep > 0">「{{ r.target_dir }}」按季集防重将跳过 {{ r.skip_ep }} 个文件{{ r.skip_ep_samples?.length ? `（如 ${r.skip_ep_samples.slice(0, 2).join('、')}）` : '' }}；</span>
+          <span v-if="r.skip_movie > 0">「{{ r.target_dir }}」电影库规则跳过 {{ r.skip_movie }} 个带集数标识的文件（留给剧集规则）；</span>
+          <span v-if="r.skip_ambiguous > 0" style="color: var(--el-color-warning)">
+            「{{ r.target_dir }}」同名歧义跳过 {{ r.skip_ambiguous }} 个文件（多库同名且无集数标识，留源目录待手动处理）{{ r.skip_ambiguous_samples?.length ? `（如 ${r.skip_ambiguous_samples.slice(0, 2).join('、')}）` : '' }}；
+          </span>
           <span v-if="r.error" style="color: var(--el-color-danger)">「{{ r.target_dir }}」{{ r.error }}；</span>
         </div>
       </div>
@@ -649,6 +678,14 @@ const newRuleForm = ref({
   target_dir: '',
   keyword: '',
   mode: 'default',
+  media_type: 'auto',
+})
+
+// 选完目标目录后按路径名自动预选媒体类型（可手动改）
+watch(() => newRuleForm.value.target_dir, (t) => {
+  if (!t) return
+  if (/电影|影片/.test(t)) newRuleForm.value.media_type = 'movie'
+  else if (/电视剧|剧集|短剧|动漫|综艺|纪录片/.test(t)) newRuleForm.value.media_type = 'tv'
 })
 
 const isDialogLibraryMode = computed(() => {
@@ -931,6 +968,7 @@ const confirmAddMoveRule = async () => {
       target_dir: newRuleForm.value.target_dir,
       keyword: newRuleForm.value.keyword || extractKeyword(newRuleForm.value.target_dir),
       mode: newRuleForm.value.mode || 'default',
+      media_type: newRuleForm.value.media_type || 'auto',
     })
     dialogVisible.value = false
     ElMessage.success('整理规则已添加')
