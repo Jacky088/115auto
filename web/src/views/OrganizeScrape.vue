@@ -1071,6 +1071,83 @@
       </el-table>
     </el-drawer>
 
+    <!-- 运行前确认弹窗（两段式执行第二步）：分层应对大清单——汇总 → 分组摘要 → 搜索/筛选 + 前端分页 -->
+    <el-dialog v-model="orgPreview.visible" title="目录整理预览 — 确认后执行" :width="'min(920px, 96vw)'" top="5vh">
+      <div class="mb12" style="display: flex; flex-wrap: wrap; gap: 8px; align-items: center">
+        <el-tag type="warning" effect="dark" size="small">待整理 {{ orgPreview.pending }} 条</el-tag>
+        <el-tag type="success" size="small">已符合规范 {{ orgPreview.total - orgPreview.pending }} 条</el-tag>
+        <el-tag size="small">涉及 {{ orgGroups.length }} 个目标目录</el-tag>
+        <span style="font-size: var(--fs-caption); color: var(--saas-text-sub)">
+          预览为当前时刻快照，确认后将重新扫描执行
+        </span>
+      </div>
+
+      <el-collapse v-if="orgGroups.length" v-model="orgCollapseNames" class="mb12">
+        <el-collapse-item :title="`分组摘要（${orgGroups.length} 个目标目录，错位归档在此一眼可见）`" name="groups">
+          <div v-for="g in orgGroups" :key="g.path"
+               style="display: flex; justify-content: space-between; gap: 10px; padding: 3px 4px; font-size: var(--fs-caption); cursor: pointer"
+               @click="orgGroupFilter = orgGroupFilter === g.path ? '' : g.path; orgPage = 1">
+            <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap"
+                  :style="orgGroupFilter === g.path ? 'color: var(--el-color-primary); font-weight: 600' : ''">
+              {{ g.path }}
+            </span>
+            <span style="flex-shrink: 0; color: var(--saas-text-sub)">{{ g.count }} 条</span>
+          </div>
+        </el-collapse-item>
+      </el-collapse>
+
+      <div class="mb12" style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center">
+        <el-input v-model="orgSearch" placeholder="搜索文件名 / 剧名 / 路径" clearable style="width: 240px"
+                  @input="orgPage = 1" />
+        <el-select v-model="orgGroupFilter" placeholder="按目标目录筛选" clearable filterable
+                   style="width: 280px" @change="orgPage = 1">
+          <el-option v-for="g in orgGroups" :key="g.path" :value="g.path"
+                     :label="`${g.path}（${g.count}）`" />
+        </el-select>
+        <span style="font-size: var(--fs-caption); color: var(--saas-text-sub)">
+          {{ orgFiltered.length }} 条{{ orgGroupFilter ? '（已筛选）' : '' }}
+        </span>
+      </div>
+
+      <el-table :data="orgPagedRows" size="small" stripe max-height="44vh">
+        <template #empty><el-empty :image-size="60" description="无匹配条目" /></template>
+        <el-table-column type="index" :index="(i) => (orgPage - 1) * orgPageSize + i + 1" width="55" />
+        <el-table-column prop="orig_name" label="文件名" min-width="230" show-overflow-tooltip />
+        <el-table-column label="解析结果" width="210" show-overflow-tooltip>
+          <template #default="{ row }">
+            {{ orgParsedLabel(row) }}
+            <el-tag v-if="row.is_bdmv" size="small" type="info" style="margin-left: 4px">原盘</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="现位置 → 目标" min-width="300" show-overflow-tooltip>
+          <template #default="{ row }">
+            <span style="color: var(--saas-text-sub)">{{ row.orig_path }}</span>
+            <span style="margin: 0 4px">➔</span>
+            <span>{{ row.target_path }}/{{ row.target_name }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="类型" width="70">
+          <template #default="{ row }">
+            <el-tag size="small" :type="row.media_type === 'tv' ? 'success' : 'primary'">
+              {{ row.media_type === 'tv' ? '剧' : '影' }}
+            </el-tag>
+          </template>
+        </el-table-column>
+      </el-table>
+
+      <el-pagination v-if="orgPageCount > 1"
+                     style="margin-top: 12px; justify-content: flex-end"
+                     layout="total, prev, pager, next" :total="orgFiltered.length"
+                     :page-size="orgPageSize" v-model:current-page="orgPage" />
+
+      <template #footer>
+        <el-button @click="orgPreview.visible = false">取消</el-button>
+        <el-button type="primary" :loading="orgConfirming" @click="confirmRunOrganize">
+          🚀 确认执行（{{ orgPreview.pending }} 个文件）
+        </el-button>
+      </template>
+    </el-dialog>
+
     <!-- 手动搜索 TMDB 弹窗 -->
     <el-dialog v-model="manualDialog.open" title="手动搜索 TMDB 并暂存绑定" width="640px">
       <div class="mb12 meta-hint">
@@ -1467,13 +1544,89 @@ function onTabChange(tab) {
 }
 
 async function runOrganize() {
+  if (startingOrganize.value) return
+  // 两段式执行：先 dry-run 预览待整理清单，用户在弹窗确认后才真正发起
   startingOrganize.value = true
   try {
+    const { data } = await api.post('/api/media/organize/preview', {})
+    if (!data.ok) {
+      toast.error(data.msg || '预览失败')
+      return
+    }
+    if (!data.pending_count) {
+      toast.info(`当前没有需要整理的文件（已符合规范 ${data.total} 条）`)
+      return
+    }
+    orgPreview.value = {
+      visible: true,
+      items: data.items || [],
+      pending: data.pending_count,
+      total: data.total,
+    }
+    orgPage.value = 1
+    orgSearch.value = ''
+    orgGroupFilter.value = ''
+    orgCollapseNames.value = []
+  } catch (e) { toast.error(errMsg(e)) }
+  finally { startingOrganize.value = false }
+}
+
+// ---- 整理预览确认弹窗（分层应对大清单：汇总 → 分组摘要 → 搜索/筛选 + 前端分页） ----
+const orgPreview = ref({ visible: false, items: [], pending: 0, total: 0 })
+const orgSearch = ref('')
+const orgGroupFilter = ref('')
+const orgPage = ref(1)
+const orgPageSize = 50
+const orgConfirming = ref(false)
+const orgCollapseNames = ref([])
+
+// 只列「待整理」条目；已符合规范的仅在统计头计数
+const orgPendingItems = computed(() =>
+  (orgPreview.value.items || []).filter((it) => !it.already_ok))
+
+// 分组摘要：按目标目录（剧/季）聚合，错位归档在此层面一眼可见
+const orgGroups = computed(() => {
+  const map = new Map()
+  for (const it of orgPendingItems.value) {
+    const key = it.target_path || '(未知目标)'
+    const g = map.get(key) || { path: key, count: 0 }
+    g.count += 1
+    map.set(key, g)
+  }
+  return Array.from(map.values()).sort((a, b) => b.count - a.count)
+})
+
+// 本地搜索 + 按目标目录筛选（纯前端过滤，零请求）
+const orgFiltered = computed(() => {
+  const kw = orgSearch.value.trim().toLowerCase()
+  return orgPendingItems.value.filter((it) => {
+    if (orgGroupFilter.value && (it.target_path || '') !== orgGroupFilter.value) return false
+    if (!kw) return true
+    return [it.orig_name, it.orig_path, it.target_name, it.target_path,
+            it.parsed_title, it.year].some((s) => String(s || '').toLowerCase().includes(kw))
+  })
+})
+const orgPageCount = computed(() => Math.max(1, Math.ceil(orgFiltered.value.length / orgPageSize)))
+const orgPagedRows = computed(() =>
+  orgFiltered.value.slice((orgPage.value - 1) * orgPageSize, orgPage.value * orgPageSize))
+const orgParsedLabel = (it) => {
+  const parts = [it.parsed_title || it.orig_name]
+  if (it.year) parts.push(`(${it.year})`)
+  if (it.media_type === 'tv' && (it.season != null || it.episode != null)) {
+    parts.push(` S${String(it.season ?? 1).padStart(2, '0')}E${String(it.episode ?? 0).padStart(2, '0')}`)
+  }
+  return parts.join('')
+}
+
+const confirmRunOrganize = async () => {
+  orgConfirming.value = true
+  try {
     const { data } = await api.post('/api/media/organize/run', {})
+    orgPreview.value.visible = false
     toast.success(data.msg || '目录整理已发起')
     await Promise.all([loadStatus(), loadRecords()])
   } catch (e) { toast.error(errMsg(e)) }
-  finally { startingOrganize.value = false }
+  finally { orgConfirming.value = false }
 }
 
 async function runScrape() {
