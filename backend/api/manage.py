@@ -138,10 +138,11 @@ def login(body: dict, request: Request, response: Response):
 
 
 @router.post("/auth/logout")
-def logout(request: Request, response: Response):
+def logout(request: Request, response: Response, _=Depends(require_user)):
     """退出登录：清除 Cookie 并吊销全部已签发 token（版本号 +1）。
 
     单管理员系统下「登出即全端下线」：被盗的 token 即使在 7 天有效期内也无法继续使用。
+    需登录态：吊销全端会话是敏感操作，不校验会被未认证请求反复调用（登出 DoS）。
     """
     auth.revoke_all_tokens()
     response.delete_cookie(AUTH_COOKIE, path="/", secure=_is_https(request))
@@ -1461,12 +1462,14 @@ def _norm_setting(k: str, v):
         return s
     if k == "unclassified_action":
         return str(v).strip() or "skip"
-    if k == "proxy":  # 仅接受 http(s)/socks 代理地址，防误填内网 URL 或带换行的脏值
+    if k == "proxy":  # 仅接受 http(s)/socks 代理地址：拦截换行/空格等脏值导致后台请求库解析崩溃。
+        # 不拦截内网地址——局域网代理（如 http://192.168.x.x:7890）是合法部署场景，
+        # 且本设置仅管理员登录后可改，不构成未认证攻击面
         s = str(v or "").strip()
         if s and not re.match(r"^(https?|socks5h?|socks4)://[^\s]+$", s, re.IGNORECASE):
             raise HTTPException(400, "代理地址需以 http(s):// 或 socks5:// 开头")
         return s
-    if k in ("bark_url", "ntfy_url"):  # 推送地址必须是 http(s)，防手滑填成内网/文件地址
+    if k in ("bark_url", "ntfy_url"):  # 推送地址必须是 http(s)：拦截手滑填错的协议（如 file:）
         s = str(v or "").strip()
         if s and not re.match(r"^https?://[^\s]+$", s, re.IGNORECASE):
             raise HTTPException(400, f"{k} 需为 http(s):// 开头的完整 URL")

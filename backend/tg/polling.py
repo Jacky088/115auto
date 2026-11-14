@@ -13,6 +13,12 @@ from . import backfill, resolver
 
 _TIMEOUT = httpx.Timeout(20.0)
 
+# 单条消息连续处理失败达到该轮数后跳过（不再钉死频道水位线）：
+# 处理失败的消息默认不推进 last_message_id、下一轮重试，但确定性失败
+# （磁盘满/消息数据异常等）会让整个频道的后续消息全部阻塞，必须有限度
+_MSG_FAIL_SKIP_ROUNDS = 5
+_msg_fail_streak: dict[tuple[str, int], int] = {}  # (频道, 消息id) → 连续失败轮数
+
 
 def _proxy() -> str | None:
     return str(db.get_setting("proxy", "") or "") or None
@@ -49,7 +55,9 @@ def parse_page(html: str) -> list[dict]:
 
 
 async def fetch_channel(client: httpx.AsyncClient, name: str) -> list[dict]:
-    resp = await client.get(f"https://t.me/s/{name}", timeout=_TIMEOUT)
+    # 与 check_channel 一致带上 UA：t.me 对无 UA 请求可能返回不同内容/被风控
+    resp = await client.get(f"https://t.me/s/{name}", timeout=_TIMEOUT,
+                            headers={"User-Agent": "Mozilla/5.0"})
     if resp.status_code != 200:
         raise RuntimeError(f"HTTP {resp.status_code}（频道不存在或为私密频道）")
     # BeautifulSoup 解析约 1MB 页面是 CPU 密集操作（单次可达上百毫秒），
@@ -130,8 +138,20 @@ async def _poll_one(client: httpx.AsyncClient, ch: dict):
                 if full_text:
                     # 消息入库/分类/去重是同步 DB 操作：放线程池，不阻塞事件循环
                     await asyncio.to_thread(pipeline.process_message, name, m["id"], full_text)
+                _msg_fail_streak.pop((name, m["id"]), None)
             except Exception as e:
-                logstream.error("polling", f"[{name}] 消息 {m['id']} 处理失败: {e}")
+                # 连续多轮失败的消息不再无限钉死频道水位线（否则整频道新消息都会被阻塞），
+                # 达到阈值后跳过该消息并继续推进；轮询间隔下约几分钟内自动重试若干次
+                streak = _msg_fail_streak.get((name, m["id"]), 0) + 1
+                _msg_fail_streak[(name, m["id"])] = streak
+                if streak >= _MSG_FAIL_SKIP_ROUNDS:
+                    _msg_fail_streak.pop((name, m["id"]), None)
+                    logstream.error("polling",
+                                    f"[{name}] 消息 {m['id']} 连续 {streak} 轮处理失败，本轮起跳过该消息"
+                                    "（不再阻塞频道水位线，可用「消息预览」复核）: "
+                                    f"{str(e)[:160]}")
+                    continue
+                logstream.error("polling", f"[{name}] 消息 {m['id']} 处理失败（第 {streak} 次重试）: {e}")
                 if first_fail_id is None:
                     first_fail_id = m["id"]
     if preserve_gap:
@@ -196,7 +216,9 @@ async def polling_loop():
                             return lo, hi
 
                         lo, hi = await asyncio.to_thread(_read_poll_interval)
-                        # 按设置页承诺的「区间内随机」取值；旧实现把上限截到 lo+5，导致 max 基本不生效
+                        # 按设置页承诺的「区间内随机」取值；旧实现把上限截到 lo+5，导致 max 基本不生效。
+                        # 间隔刻意放在每频道循环内（而非每轮一次）：各频道的抓取节奏被自然错开，
+                        # 避免多频道同一时刻集中轰 t.me；设置页的间隔语义即「每频道轮询间隔」
                         await asyncio.sleep(random.uniform(lo, hi) if hi > lo else lo)
             else:
                 await asyncio.sleep(15)

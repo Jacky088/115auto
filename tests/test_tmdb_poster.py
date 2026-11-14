@@ -159,6 +159,13 @@ def test_logout_revokes_tokens_and_password_rehash():
     token1 = auth.make_token("admin")
     assert auth.check_token(token1) == "admin"
 
-    # 登出吊销全部 token
-    client.post("/api/auth/logout")
+    # 未认证的登出请求被拒绝（登出是敏感操作：防止未认证请求反复吊销全端会话）。
+    # 注意用全新 client：上面的登录已把 sa_auth Cookie 持久化在共享 client 上
+    anon = TestClient(app).post("/api/auth/logout")
+    assert anon.status_code == 401, anon.status_code
+    assert auth.check_token(token1) == "admin"
+
+    # 登出吊销全部 token（需携带登录态）
+    authed = client.post("/api/auth/logout", headers={"Authorization": f"Bearer {token1}"})
+    assert authed.status_code == 200, authed.status_code
     assert auth.check_token(token1) is None

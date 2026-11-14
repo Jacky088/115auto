@@ -2,19 +2,24 @@
 import hashlib
 import re
 
-# 链接 + 可选的 ?password=xxx
+# 链接 + 可选的 ?password=xxx。左边界 (?<![0-9A-Za-z])：防止 "xx115.com/s/xxx"、
+# "9115.com/s/xxx"（无关域名）从中间截取误判为 115 分享；子域名（www./m. 等）不受影响
 URL_RE = re.compile(
-    r"(?:https?://)?(?:www\.)?(115\.com|115cdn\.com|anxia\.com)/s/(?P<code>[0-9A-Za-z]+)"
+    r"(?<![0-9A-Za-z])(?:https?://)?(?:www\.)?(115\.com|115cdn\.com|anxia\.com)/s/(?P<code>[0-9A-Za-z]+)"
     r"(?:\?password=(?P<pw>[0-9A-Za-z]+))?",
     re.IGNORECASE,
 )
-# 115://code?password=xxx 秒传式写法
-PROTO_RE = re.compile(r"115://(?P<code>[0-9A-Za-z]+)\?password=(?P<pw>[0-9A-Za-z]+)", re.IGNORECASE)
+# 115://code?password=xxx 秒传式写法。password 可选（公开分享无提取码）；左边界防
+# "xx115://…" 之类的子串误提取。无提取码时与网页链接同口径以空 receive_code 入队
+PROTO_RE = re.compile(r"(?<![0-9A-Za-z])115://(?P<code>[0-9A-Za-z]+)(?:\?password=(?P<pw>[0-9A-Za-z]+))?", re.IGNORECASE)
 # 独立提取码写法：提取码：xxxx / 访问码 xxxx / 密码: xxxx / 提取码 xxxx
-PW_RE = re.compile(r"(?:提取码|访问码|密码|访问密码|取件码)\s*[:：]?\s*([0-9A-Za-z]{4})", re.IGNORECASE)
+# 4~8 位 + 右边界：固定 4 位会把 5 位以上的提取码截断成错误前 4 位（转存必败）；
+# 右边界防止从 9 位以上的长串截出前 8 位——宁可不提取也不提取错误的码
+PW_RE = re.compile(r"(?:提取码|访问码|密码|访问密码|取件码)\s*[:：]?\s*([0-9A-Za-z]{4,8})(?![0-9A-Za-z])", re.IGNORECASE)
 # ED2K 电驴 / 磁力链（115 云下载支持）
 ED2K_RE = re.compile(r"ed2k://\|file\|[^|\s]+\|\d+\|[0-9A-Fa-f]{32}\|/?", re.IGNORECASE)
-MAGNET_RE = re.compile(r"magnet:\?xt=urn:btih:[0-9A-Za-z]{32,40}[^\s]*", re.IGNORECASE)
+# xt 参数前的其他参数（如 magnet:?dn=xx&xt=…）同样识别
+MAGNET_RE = re.compile(r"magnet:\?(?:[^\s]*&)?xt=urn:btih:[0-9A-Za-z]{32,40}[^\s]*", re.IGNORECASE)
 # 迅雷链接（thunder:// = base64("AA" + url + "ZZ")），解码后转为 http/ftp 云下载
 THUNDER_RE = re.compile(r"thunder://([A-Za-z0-9+/=]{20,})", re.IGNORECASE)
 

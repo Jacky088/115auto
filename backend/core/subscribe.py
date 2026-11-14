@@ -77,8 +77,9 @@ def _term_hit(term: str, text_norm: str, low: str) -> bool:
     if not kw_norm or kw_norm not in text_norm:
         return False
     # 短英文词的误报保护：归一化域太宽，退回原文按完整单词匹配
+    #（右侧同时排除撇号：订阅 IT 不应命中 it's / it's）
     if len(kw_norm) < 4 and kw_norm.isascii() and kw_norm.isalpha():
-        return bool(re.search(rf"(?<![0-9a-z]){re.escape(kw_norm)}(?![0-9a-z])", low))
+        return bool(re.search(rf"(?<![0-9a-z]){re.escape(kw_norm)}(?![0-9a-z'’])", low))
     return True
 
 
@@ -145,11 +146,18 @@ def record_progress(sub: dict, title: str, season: int | None = None,
     """
     old_season, old_ep = _legacy_numbers(sub)
     old_display = str(sub.get("last_ep") or "")
-    # 重新读取库中最新进度：调用方持有的 sub 可能是并发处理前的旧快照
+    # 重新读取库中最新进度：调用方持有的 sub 可能是并发处理前的旧快照。
+    # cas_* 记录读取时的原始列值，写入时做 CAS（compare-and-swap）守卫：
+    # 并发线程在此期间推进过进度则写入失败（rowcount=0），按「非新集」降级，
+    # 从根上消除「读-判-写」竞态导致的进度回退与重复通知。
+    cas_display = sub.get("last_ep")
+    cas_season = sub.get("last_season")
+    cas_episode = sub.get("last_episode")
     row = db.query(
         "SELECT last_ep, last_season, last_episode FROM subscriptions WHERE id=?",
         (sub["id"],), one=True)
     if row is not None:
+        cas_display, cas_season, cas_episode = row["last_ep"], row["last_season"], row["last_episode"]
         old_display = str(row["last_ep"] or "") or old_display
         if row["last_season"] is not None:
             old_season = int(row["last_season"])
@@ -170,14 +178,22 @@ def record_progress(sub: dict, title: str, season: int | None = None,
         is_new = int(ep) > int(old_ep)
 
     display = episode.canonical(season, ep, kind) if ep is not None else old_display
-    db.execute(
+    if not is_new:
+        # 旧集重发/无集数重复命中：只刷新展示字段，绝不回退追更进度（S01E03 晚于
+        # S02E05 到达时 last_episode 不得被覆盖回 3，否则后续新集会重复推送）
+        db.execute(
+            "UPDATE subscriptions SET last_title=?, last_match_at=? WHERE id=?",
+            ((title or "")[:200], time.time(), sub["id"]))
+        return False
+    changed = db.execute(
         "UPDATE subscriptions SET last_ep=?, last_season=?, last_episode=?, last_title=?,"
-        " last_match_at=? WHERE id=?",
+        " last_match_at=? WHERE id=? AND last_ep IS ? AND last_season IS ? AND last_episode IS ?",
         (display,
          season if ep is not None else old_season,
          ep if ep is not None else old_ep,
-         (title or "")[:200], time.time(), sub["id"]))
-    return is_new
+         (title or "")[:200], time.time(), sub["id"],
+         cas_display, cas_season, cas_episode))
+    return bool(changed)
 
 
 def touch_match(sub: dict, title: str) -> None:

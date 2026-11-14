@@ -2,6 +2,7 @@
 import json
 import logging
 import os
+import re
 import shutil
 import sqlite3
 import threading
@@ -14,7 +15,9 @@ from . import config
 
 logger = logging.getLogger("database")
 
-_lock = threading.Lock()
+# RLock（而非 Lock）：transaction() 上下文与 _migrate 等持锁路径内严禁调用
+# execute/query/add_log 的约定改为结构性保证——同线程重入不再死锁
+_lock = threading.RLock()
 _conn: sqlite3.Connection | None = None
 
 SCHEMA = """
@@ -454,6 +457,8 @@ def _migrate():
     if "sub_only" not in ccols:
         _conn.execute("ALTER TABLE channels ADD COLUMN sub_only INTEGER NOT NULL DEFAULT 0")
     # 订阅别名与结构化追更进度（旧库无这些列，默认空值即可兼容）
+    # 注意：col/ddl 来自上方硬编码元组（非用户输入），f-string 拼接安全；
+    # 若未来改为动态来源，必须先过白名单
     scols = {r["name"] for r in _conn.execute("PRAGMA table_info(subscriptions)")}
     for col, ddl in (("aliases", "TEXT DEFAULT ''"),
                      ("tmdb_id", "INTEGER"),
@@ -622,6 +627,8 @@ BACKUP_EXCLUDE_SETTINGS = {
     "api_token",           # 对外 API Token
     "tmdb_api_key",
     "tg_admin_id",         # TG Bot 授权用户绑定（auth 类配置，随登录凭据一并保留）
+    "notify_chat_id",      # TG 通知目标会话：与 notify_token 同属推送目的地，恢复外来值
+                           # 会把自动备份/通知导向未知会话，恢复后保留本机当前值
 }
 
 # 绑定本机文件或引导完成的本地状态键：保留目标实例当前值，避免跨机恢复后把空机器误判为已登录/已配置
@@ -882,7 +889,9 @@ def restore_payload(data: dict) -> dict:
                     pass  # 表无 AUTOINCREMENT 时没有 sqlite_sequence 行，忽略
             cur.execute("DELETE FROM settings")
             for k, v in (data["settings"] or {}).items():
-                if not isinstance(k, str) or not k or len(k) > 64:
+                # 键名限定为应用自身的设置键格式（小写字母/数字/下划线）：
+                # 恶意备份无法借恢复通道注入任意键名/符号键
+                if (not isinstance(k, str) or not re.fullmatch(r"[a-z0-9_]{1,64}", k)):
                     raise ValueError("备份 settings 中存在非法键名")
                 # 凭据/本机状态与内部运行态一律不采纳备份值，防止替换敏感凭据或误恢复运行态
                 if k in BACKUP_KEEP_SETTINGS or is_runtime_setting_key(k):

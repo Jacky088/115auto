@@ -18,7 +18,10 @@
         <div style="text-align: center; min-height: 220px">
           <template v-if="qr.loading"><el-skeleton style="width: 180px; margin: 0 auto" animated /></template>
           <template v-else-if="qr.svg">
-            <div class="qr-box" v-html="qr.svg" @click="createQr"></div>
+            <!-- 后端生成的 SVG 改用 data URI 承载：不再以 v-html 直插外部接口数据 -->
+            <div class="qr-box" @click="createQr">
+              <img :src="qrSvgUrl" alt="115 登录二维码">
+            </div>
             <p v-if="qr.err" class="qr-err">❌ {{ qr.err }}</p>
             <p v-else-if="qr.scanned" style="color: #67c23a; margin: 4px">✅ 已扫描，请在手机上确认</p>
             <p v-else style="color: #999; font-size: var(--fs-caption); margin: 4px">点击二维码可刷新</p>
@@ -197,6 +200,9 @@ let pollSeq = 0   // 轮询会话号：重新生成二维码/离开页面时 +1 
 let pollErrCount = 0
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+// SVG → data URI（encodeURIComponent 兼容任意字符）：供 <img> 展示，替代 v-html 直插
+const qrSvgUrl = computed(() => qr.svg ? 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(qr.svg) : '')
 
 const createQr = async () => {
   const my = ++pollSeq
@@ -431,7 +437,7 @@ const finish = async () => {
 }
 .setup-card :deep(.el-step__title) { word-break: keep-all; }
 .qr-box { width: 200px; margin: 0 auto; cursor: pointer; background: #fff; padding: 8px; border-radius: 8px; }
-.qr-box :deep(svg) { width: 100%; height: auto; display: block; }
+.qr-box :deep(svg), .qr-box img { width: 100%; height: auto; display: block; }
 .qr-err { color: #f56c6c; font-size: var(--fs-body); margin: 4px; }
 .ub-wizard {
   border: 1px solid var(--el-color-primary-light-7); background: var(--el-color-primary-light-9);

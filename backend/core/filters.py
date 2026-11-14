@@ -27,11 +27,23 @@ def invalidate():
     _cache = ({}, 0.0)
 
 
+def _norm_channel(s: str) -> str:
+    """频道名归一化：统一去掉 @ 前缀再比较。用户添加黑名单时常写成 @xxx，
+    而库内频道名不带 @——不归一化会让 @xxx 条目永远匹配不到（静默失效）。"""
+    return (s or "").strip().lstrip("@").lower()
+
+
 def check_message(text: str, channel: str | None = None) -> tuple[bool, str, str]:
-    """消息级检查：频道黑名单 + 标题关键词。返回 (blocked, rule_type, rule_value)。"""
+    """消息级检查：频道黑名单 + 标题关键词。返回 (blocked, rule_type, rule_value)。
+
+    频道条目保持子串匹配（拉黑 movie 连带拦截 movies123 是刻意的宽口径，误拦
+    方向安全且有「命中复核放行」兜底）；仅对两侧做 @ 前缀与小写归一化。
+    """
     if channel:
+        ch_norm = _norm_channel(channel)
         for ch in _blacklist()["channel"]:
-            if ch.lower() in channel.lower():
+            hit = _norm_channel(ch)
+            if hit and hit in ch_norm:
                 return True, "channel", ch
     text = (text or "")[:4000]  # 与 classifier 同口径：截断超长文本再匹配
     for kw in _blacklist()["keyword"]:

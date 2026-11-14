@@ -140,12 +140,16 @@ def release_exclusive(mode: str | None = None) -> None:
 
 
 def _reset_gate_on_drain_abort() -> None:
-    """排空阶段收到取消信号时将门闸复位为空闲（不触碰工作器事件，保持转存继续运行）。"""
+    """排空阶段收到取消信号时将门闸复位为空闲（不触碰工作器事件，保持转存继续运行）。
+
+    intake 在此一并恢复开闸：本函数被调用意味着本次独占任务已彻底放弃，
+    若调用方遗漏 finally resume_all，追剧补全等 intake 门闸消费者也不会被永久挂起。"""
     global _state, _active_mode, _cutoff_id
     _state = "idle"
     _active_mode = "none"
     _cutoff_id = 0
     _media_progress.pop("drain_started_at", None)
+    _get_intake_event().set()
 
 
 def get_exclusive_status() -> dict:
@@ -182,9 +186,12 @@ def is_draining() -> bool:
     return _state == "draining"
 
 
-def is_transfer_active() -> bool:
-    """当前是否有单笔转存任务正在调用 115 API。"""
-    return _transfer_active
+def drain_cutoff() -> int:
+    """排空/独占期的任务水线：id 大于该值的任务应继续排队等待（0 = 无水线限制）。
+
+    供转存工作器领取任务时使用：排空期新进 TG 消息入库的任务留在队列里，
+    待整理/刮削结束后再继续，与 get_drain_status 的统计口径一致。"""
+    return int(_cutoff_id or 0) if _state in ("draining", "organizing") else 0
 
 
 def _norm_hhmm(raw: str, fallback: str) -> str:
@@ -262,8 +269,10 @@ def _get_unfinished_transfers_count() -> int:
 def get_drain_status() -> dict:
     """获取当前排空与未完成任务的详细明细（包括转存中、云下载中、重试倒计时中）。
 
-    排空期若已锁定番号水线 _cutoff_id，queued / retrying 只统计水线之前的任务，
-    水线之后刚由 TG 采集入库的新任务留在队列里等待整理/刮削完毕后再继续。
+    排空期若已锁定番号水线 _cutoff_id，queued / retrying / running / submitted 只统计
+    水线之前的任务：running/submitted 的任务必然在排空开始前就已入队（id<=水线），
+    水线之后刚由 TG 采集入库的新任务留在队列里等待整理/刮削完毕后再继续——
+    活跃频道持续来新消息时排空不会被新任务无限饿死。
     """
     cutoff = _cutoff_id
     if cutoff is not None and _state in ("draining", "organizing"):
@@ -271,10 +280,10 @@ def get_drain_status() -> dict:
             SELECT
                 SUM(CASE WHEN status='queued' AND (attempts IS NULL OR attempts=0) AND id<=? THEN 1 ELSE 0 END) as queued_count,
                 SUM(CASE WHEN status='queued' AND attempts>0 AND id<=? THEN 1 ELSE 0 END) as retry_count,
-                SUM(CASE WHEN status='running' THEN 1 ELSE 0 END) as running_count,
-                SUM(CASE WHEN status='submitted' THEN 1 ELSE 0 END) as submitted_count
+                SUM(CASE WHEN status='running' AND id<=? THEN 1 ELSE 0 END) as running_count,
+                SUM(CASE WHEN status='submitted' AND id<=? THEN 1 ELSE 0 END) as submitted_count
             FROM transfers WHERE status IN ('queued', 'running', 'submitted')
-        """, (cutoff, cutoff), one=True)
+        """, (cutoff, cutoff, cutoff, cutoff), one=True)
     else:
         row = db.query("""
             SELECT
@@ -397,7 +406,8 @@ async def prepare_and_drain_transfers(max_wait_seconds: float = 3600.0, mode: st
         logstream.warn(log_mod, f"转存队列排空已达收口点，等待最后一笔在途转存线程退出后开始{mode_name}...")
         while _transfer_active and (time.time() - grace_start < grace_limit):
             await asyncio.sleep(0.5)
-    _state = "organizing"
+    with _mode_lock:
+        _state = "organizing"  # 状态迁移与 resume_all 同锁：读侧不会看到中间态组合
     set_media_progress({**_media_progress, "phase": "running", "exclusive_at": time.time()})
     logstream.info(log_mod, f"⏸️ 转存/云下载工作器已挂起，开始独占执行{mode_name}（严格队列串行，防 115 风控）。")
 

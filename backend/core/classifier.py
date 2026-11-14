@@ -39,9 +39,22 @@ def headline(text: str, limit: int = 120) -> str:
     return ""
 
 
+_routes_cache: tuple[set[str], float] = (set(), 0.0)
+
+
+def _known_categories() -> set[str]:
+    """路由表里的分类名（5 秒缓存）：标签匹配每个频道消息都要查路由，高频下纯性能损耗。"""
+    global _routes_cache
+    import time
+    now = time.time()
+    if now - _routes_cache[1] > _CACHE_TTL:
+        _routes_cache = ({r["category"] for r in db.query("SELECT category FROM routes")}, now)
+    return _routes_cache[0]
+
+
 def _tag_category(text: str) -> tuple[str, str]:
     """返回频道标签对应的分类（仅当该分类存在于路由表时生效）。"""
-    known = {r["category"] for r in db.query("SELECT category FROM routes")}
+    known = _known_categories()
     for m in _TAG_RE.finditer(text):
         cat = _TAG_ALIASES.get(m.group(1))
         if cat and cat in known:
@@ -62,8 +75,9 @@ def _rules() -> list[dict]:
 
 def invalidate():
     """规则/路由变更后立即失效缓存（否则最多 5 秒内仍用旧规则）。"""
-    global _cache
+    global _cache, _routes_cache
     _cache = ([], 0.0)
+    _routes_cache = (set(), 0.0)
 
 
 # 单次参与正则匹配的最大文本长度：频道正文（≤4KB）足够，telegra.ph 解析回灌的长文

@@ -36,6 +36,8 @@ except Exception:  # pragma: no cover - 兼容不同 Telethon 版本
 _lock = asyncio.Lock()
 client: TelegramClient | None = None
 _login_flow: dict = {}  # 网页登录中间状态
+# 系统停机期间收到过消息的标记：恢复运行后触发一轮 catch_up 补漏（对齐轮询缺口回补）
+_missed_while_stopped = False
 
 _LOGIN_SESSION = config.TG_SESSION_FILE.parent / "tg_login"
 _SESSION_SUFFIXES = (".session", ".session-journal")
@@ -399,6 +401,17 @@ def _register_handlers(c: TelegramClient):
     @c.on(events.NewMessage())
     async def on_new_message(event):
         try:
+            # 与网页轮询对齐：系统未启动时待机不采集入库（否则停机期间任务表/
+            # messages 表持续增长）。停机期间漏掉的消息由恢复后的补漏兜底。
+            global _missed_while_stopped
+            if not await asyncio.to_thread(db.get_setting, "running", False):
+                _missed_while_stopped = True
+                return
+            if _missed_while_stopped:
+                _missed_while_stopped = False
+                # 从停机恢复：补漏一轮（对齐轮询的缺口回补）。catch_up 依据 messages
+                # 表已处理集合去重，只补停机期间真正漏掉的消息
+                asyncio.create_task(catch_up(c), name="userbot-catchup")
             chat = await event.get_chat()
             watched = await asyncio.to_thread(
                 db.query, "SELECT name FROM channels WHERE type='userbot' AND enabled=1")

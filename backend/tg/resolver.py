@@ -96,7 +96,13 @@ async def _url_safe(url: str) -> bool:
 async def _fetch_page(client: httpx.AsyncClient, url: str) -> str:
     """抓取中间页：手动跟随重定向（最多 3 跳），每一跳都重跑 SSRF 校验——
     频道按钮指向的页面是第三方可控输入，follow_redirects=True 会被 302 绕过
-    内网防护（跳向 127.0.0.1/云元数据等）。"""
+    内网防护（跳向 127.0.0.1/云元数据等）。
+
+    返回 "" 表示确定性无内容（4xx / 内网拦截 / 无跳转地址），可安全缓存；
+    5xx 与网络异常向上抛出（瞬时故障不应被当成「无链接」缓存或入库）。
+    已知限制：SSRF 校验与实际请求是两次 DNS 解析，理论上有 DNS rebinding 窗口；
+    彻底封堵需把校验通过的 IP 固定进连接（自定义 transport），当前以逐跳重校验 + 
+    代理环境放行 Fake-IP 的口径折中。"""
     current = url
     for _ in range(3):
         if not await _url_safe(current):
@@ -110,6 +116,8 @@ async def _fetch_page(client: httpx.AsyncClient, url: str) -> str:
                 return ""
             current = urljoin(current, loc)
             continue
+        if resp.status_code >= 500:
+            raise RuntimeError(f"中间页服务端错误 HTTP {resp.status_code}")
         if resp.status_code != 200:
             return ""
         # 流式读取并在上限处截断：恶意/异常页面返回超大响应体时不会整个读入内存打爆 NAS
@@ -123,7 +131,12 @@ async def _fetch_page(client: httpx.AsyncClient, url: str) -> str:
 
 
 async def resolve_message(text: str, buttons: list[str]) -> str:
-    """合并消息正文与按钮解析出的链接，返回增强后的完整文本。"""
+    """合并消息正文与按钮解析出的链接，返回增强后的完整文本。
+
+    抓取失败（网络异常/超时/5xx）时向上抛出、且不缓存失败结果：
+    调用方（轮询/userbot/backfill）均有单条消息级 try/except 兜底——
+    轮询会保留水位线下一轮重试，避免 telegra.ph 短暂故障期间扫过的按钮链接
+    以「无链接」身份永久入库丢失。确定性无内容（4xx/内网拦截）正常返回并缓存。"""
     combined = (text or "").rstrip()
     if extractor.extract(combined):
         return combined  # 正文已有链接，按钮多为推广，跳过
@@ -150,10 +163,12 @@ async def resolve_message(text: str, buttons: list[str]) -> str:
             try:
                 async with httpx.AsyncClient(proxy=_tg_proxy()) as client:
                     html = await _fetch_page(client, url)
-                extracted = _extract_from_html(html) if html else ""
             except Exception as e:
+                # 瞬时故障：不缓存（缓存会把 "" 永久钉死该按钮），向上抛出交给
+                # 调用方的消息级重试机制，见函数 docstring
                 logstream.warn("resolver", f"按钮页面解析失败 {url.split('?')[0][:80]}: {e}")
-                extracted = ""
+                raise
+            extracted = _extract_from_html(html) if html else ""
             if len(_cache) >= _CACHE_MAX:
                 _cache.clear()
             _cache[url] = extracted

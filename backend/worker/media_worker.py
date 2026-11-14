@@ -1215,7 +1215,10 @@ async def execute_organize_queue(rule_ids: list[int] | None = None, trigger: str
         if _ACTIVE_TASK_REF.get("organize") is asyncio.current_task():
             _ACTIVE_TASK_REF["organize"] = None
         transfer_gate.clear_cancel()
-        await asyncio.to_thread(transfer_gate.resume_all)
+        # 同步调用（不 await to_thread）：resume 内部只有短暂锁与事件 set；
+        # 若在此让出事件循环，新独占任务可能恰好 begin_exclusive 成功后被旧任务的
+        # resume 误复位门闸（jobs.auto_move 的 finally 亦为同步调用，口径一致）
+        transfer_gate.resume_all()
 
     elapsed_sec = int(round(time.monotonic() - started_at))
     tg_text = _build_organize_tg_report(
@@ -2024,9 +2027,9 @@ async def execute_scrape_queue(mode: str = "scan_and_run", rule_ids: list[int] |
         logstream.error("scrape", f"媒体刮削异常: {logstream.exc(e)}")
         result_payload = {"ok": False, "msg": str(e)}
     finally:
-        # 主程序转存与云下载先于通知立即恢复运行
+        # 主程序转存与云下载先于通知立即恢复运行（同步调用防门闸复位竞态，口径同 organize）
         transfer_gate.clear_cancel()
-        await asyncio.to_thread(transfer_gate.resume_all)
+        transfer_gate.resume_all()
         rerun_committed = bool(_COMMIT_WAKEUP_REQUESTED and outcome == "done" and is_system_running())
         _COMMIT_WAKEUP_REQUESTED = False
         if _ACTIVE_TASK_REF.get("scrape") is asyncio.current_task():

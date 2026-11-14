@@ -1,6 +1,7 @@
 """日志流：写 SQLite + 内存缓冲 + asyncio 广播给 WebSocket 客户端。"""
 import asyncio
 import itertools
+import re
 import threading
 import time
 from collections import deque
@@ -57,7 +58,24 @@ def _push(q: asyncio.Queue, entry: dict):
         _subscribers.discard(q)
 
 
+# 纵深防御：日志统一出口处的凭据特征脱敏。当前代码没有直接打印 Cookie/Token 的调用点，
+# 但异常串可能内嵌带凭据的请求上下文（p115client/httpx 的错误 repr）——在唯一出口
+# 统一抹掉，任何未来调用点泄露凭据都会被这里兜住（WS 日志流 + SQLite logs 表同源）。
+_SECRET_RE = re.compile(
+    r"((?:UID|CID|SEID|KID|api_hash|access_token|refresh_token)\s*[=:]\s*)[^;\"'\s&,]+",
+    re.IGNORECASE,
+)
+_BEARER_RE = re.compile(r"(Bearer\s+)[A-Za-z0-9._\-]+")
+
+
+def _redact(message: str) -> str:
+    s = str(message or "")
+    s = _SECRET_RE.sub(r"\1***", s)
+    return _BEARER_RE.sub(r"\1***", s)
+
+
 def log(level: str, module: str, message: str):
+    message = _redact(message)
     entry = {"seq": next(_seq), "level": level, "module": module,
              "message": message, "ts": time.time()}
     _buf.append(entry)

@@ -17,23 +17,6 @@ def init_test_db():
     yield
 
 
-def test_is_generic_name():
-    assert queue_worker._is_generic_name("1.mp4") is True
-    assert queue_worker._is_generic_name("01.mp4") is True
-    assert queue_worker._is_generic_name("001.mkv") is True
-    assert queue_worker._is_generic_name("EP01.mp4") is True
-    assert queue_worker._is_generic_name("E05.mp4") is True
-    assert queue_worker._is_generic_name("第1集.mp4") is True
-    assert queue_worker._is_generic_name("cover.jpg") is True
-    assert queue_worker._is_generic_name("poster.jpg") is True
-    assert queue_worker._is_generic_name("sample.mkv") is True
-
-    # 具有特异性的视频名不属于通用名
-    assert queue_worker._is_generic_name("庆余年.S02E01.4k.mkv") is False
-    assert queue_worker._is_generic_name("流浪地球.2019.2160p.mkv") is False
-    assert queue_worker._is_generic_name("verify.mkv") is False
-
-
 def test_dedup_by_name_deep_files(monkeypatch):
     db.set_setting("dedup_by_name", True)
     # 模拟目标目录只有 1.mp4

@@ -12,6 +12,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
+import httpx  # noqa: F401  check_login 的网络异常分类依赖（缺失时 isinstance 抛 NameError）
 import qrcode
 import qrcode.image.svg
 
@@ -28,8 +29,15 @@ _client = None  # P115Client 单例（懒加载）
 # 转存节奏由 queue_worker 读取 pace_factor() 应用。
 _risk_lock = threading.Lock()
 _consec_risk = 0
-_RISK_KEYWORDS = ("频繁", "风控", "验证码", "IP登录异常", "too many", "limit", "405")
+_RISK_KEYWORDS = ("频繁", "风控", "验证码", "IP登录异常", "too many")
+# limit / 405 用词边界匹配：errno=405、HTTP 405、rate limit 命中；
+# "abc405xx"（分享码）、"file size limitation" 等无关错误串不命中（子串匹配误升退避档）
+_RISK_WORD_RE = re.compile(r"(?<![0-9a-z])(?:limit|405)(?![0-9a-z])")
 _PACE_STEPS = (1, 2, 3, 5, 8)
+
+
+def _hits_risk_keyword(s: str) -> bool:
+    return any(k in s for k in _RISK_KEYWORDS) or bool(_RISK_WORD_RE.search(s))
 
 
 def note_115_error(err: str):
@@ -37,7 +45,7 @@ def note_115_error(err: str):
     global _consec_risk
     s = (err or "").lower()
     with _risk_lock:
-        if any(k in s for k in _RISK_KEYWORDS):
+        if _hits_risk_keyword(s):
             _consec_risk = min(_consec_risk + 1, len(_PACE_STEPS) - 1)
 
 
@@ -103,7 +111,16 @@ _SPACE_TTL = 300        # 容量信息: 5 分钟
 
 
 class Pan115Error(Exception):
-    pass
+    # Cookie 特征字段（p115client 部分异常会把带凭据的请求上下文带进消息）：
+    # 异常统一在构造时脱敏，避免 UID/CID/SEID 值经日志 / WS 日志流 / 接口响应外泄
+    _COOKIE_RE = re.compile(r"((?:UID|CID|SEID|KID)\s*=\s*)[^;\"'\s&]+", re.IGNORECASE)
+
+    @staticmethod
+    def _scrub(text: str) -> str:
+        return Pan115Error._COOKIE_RE.sub(r"\1***", str(text or ""))
+
+    def __init__(self, *args):
+        super().__init__(*(self._scrub(a) if isinstance(a, str) else a for a in args))
 
 
 def _invalidate_caches():
@@ -137,10 +154,25 @@ def reset_client():
 
 # ---------- 扫码登录 ----------
 
+# 扫码登录可用的 115 客户端标识（与 p115client 的 APP_TO_SSOENT 已知集合一致）：
+# qrcode_poll 的 app 参数来自请求体，白名单防止任意字符串直打 115 登录接口
+_QR_LOGIN_APPS = frozenset({
+    "web", "desktop", "ios", "bios", "115ios", "android", "bandroid", "115android",
+    "ipad", "bipad", "115ipad", "tv", "apple_tv", "qandroid", "qios", "qipad",
+    "os_windows", "os_mac", "os_linux", "windows", "mac", "linux",
+    "wechatmini", "alipaymini", "harmony",
+})
+
+
+def _norm_qr_app(app) -> str:
+    a = str(app or "").strip() or "alipaymini"
+    return a if a in _QR_LOGIN_APPS else "alipaymini"
+
+
 def qrcode_create() -> dict:
     """生成登录二维码。返回 {uid, qr_svg, token}。"""
     from p115client import P115Client
-    app = str(db.get_setting("115_app", "alipaymini"))
+    app = _norm_qr_app(db.get_setting("115_app", "alipaymini"))
     resp = P115Client.login_qrcode_token(app=app)
     token = resp["data"]
     qr_content = token.pop("qrcode", "") or f"https://115.com/scan/dg-{token['uid']}"
@@ -189,7 +221,7 @@ def _login_err_hint(resp: dict) -> str:
     if "IP登录异常" in raw:
         return ("115 登录风控（IP 登录异常），一般当日 0 点自动解禁；可更换网络出口重试，"
                 "或点「手动导入 Cookie」。")
-    return f"获取 cookie 失败: {raw}"
+    return f"获取 cookie 失败: {Pan115Error._scrub(raw)}"
 
 
 def qrcode_finish(uid: str, app: str) -> dict:
@@ -201,6 +233,7 @@ def qrcode_finish(uid: str, app: str) -> dict:
     """
     from p115client import P115Client
     last_err: Exception | None = None
+    app = _norm_qr_app(app)  # 白名单校验（qrcode_poll 的 app 来自请求体）
     with _finish_lock:
         for _ in range(3):
             try:
@@ -598,10 +631,11 @@ def share_snap_all(share_code: str, receive_code: str, max_files: int = 5000) ->
                 total_size += size
             offset += len(items)  # 按实际返回条数翻页：固定 1150 在服务端少返回时会漏项
             if not items or len(files) >= max_files:
-                if len(files) >= max_files and (int(total or 0) > max_files or stack):
+                # total 用 _to_int 容错：接口偶发返回字符串/异常值时不能中断整个遍历
+                if len(files) >= max_files and (_to_int(total, 0) > max_files or stack):
                     truncated = True  # 超大分享达到遍历上限，超出部分不会转存
                 break
-            if total and offset >= total:
+            if total and offset >= _to_int(total, 0):
                 # count 偶发缺失（total=0）时以空页作为唯一退出条件，避免大分享漏扫
                 break
             time.sleep(0.5)
@@ -995,6 +1029,8 @@ def move_matched_files_for_rule(source_dir: str, target_dir: str,
       （如 折月亮 (2026)、繁花 (2023)），根据文件名智能归入对应剧目文件夹；若剧目下有季子目录（如 Season 1/第一季），
       且开启了 season_folder，自动分流入季目录。
     - exact（一对一精确匹配模式）：目标目录作为具体剧目目录（如 /电视剧/折月亮 (2026)），仅移动匹配此剧名的文件。
+    仅接受以上两个值；规则的 "default" 由调用方（jobs.auto_move）归一化为全局模式后传入，
+    其他未知值兜底按 library 处理。
 
     防风控与安全原则：
     1. 只移动文件，文件夹绝不移动（is_dir == False），忽略 BDMV/花絮/字幕独立文件夹

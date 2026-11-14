@@ -269,9 +269,14 @@ check("telegra.ph 是中间页", not resolver.is_direct_resource("https://telegr
 # 11.2 中间页抓取解析（真实 telegra.ph 文章，内容为 ED2K）
 TELEGRAPH = "https://telegra.ph/狄仁杰之不死军-2026-10-20"
 async def _resolve():
-    return await resolver.resolve_message(
-        "哆啦A梦：伴我同行 (2014) 简中 1080P BluRay 评分: 7.5",
-        ["https://t.me/Movie4ktop_bot/moviesapp", TELEGRAPH, "https://t.me/some_promo"])
+    try:
+        return await resolver.resolve_message(
+            "哆啦A梦：伴我同行 (2014) 简中 1080P BluRay 评分: 7.5",
+            ["https://t.me/Movie4ktop_bot/moviesapp", TELEGRAPH, "https://t.me/some_promo"])
+    except Exception:
+        # resolver 现在对瞬时抓取失败向上抛出（交由上层消息级重试），此处模拟上层兜底：
+        # 网络不可达时返回空结果走 skip 断言，不让整体崩掉
+        return ""
 resolved = asyncio.run(_resolve())
 n_ed2k = resolved.count("ed2k://")
 # 真实 telegra.ph 文章：网络不可达（SSL EOF / 被墙）时跳过中间页解析断言，不让整体崩掉
@@ -1217,8 +1222,8 @@ finally:
     pan.list_file_names = _orig_list_names5
     db.set_setting("dedup_by_name", True)
 
-print("\n=== 33. 反查失败 → 全盘找回「复制」到目标目录（必须要存进去）===")
-# 文件被接收到了其他位置时：搜索定位 → 复制（不动原文件）→ 再反查 → success
+print("\n=== 33. 反查暂未落盘 → 抛出重试异常（杜绝跨目录模糊搜索复制污染）===")
+# 修复：严禁全盘模糊搜索复制其他剧集文件；落库延迟时抛异常进入退避，下轮重试自然落盘
 _orig_snap_all6, _orig_mkdirs6, _orig_receive6 = pan.share_snap_all, pan.mkdirs, pan.receive
 _orig_list_names6, _orig_search6, _orig_copy6 = pan.list_file_names, pan.search_file, pan.copy_files_to
 try:
@@ -1227,22 +1232,20 @@ try:
     pan.receive = lambda code, rc, cid, fids: {"state": True}
     _copied = {}
 
-    def _list_names_recover(cid, limit=500):
-        # 复制发生前：目录里始终没有（模拟整轮反查落库延迟/文件落在别处）；
-        # 找回复制后：能查到
-        return {"别的文件.mkv"} if not _copied else {FakePan.files[0]["fn"]}
-
-    pan.list_file_names = _list_names_recover
+    pan.list_file_names = lambda cid, limit=500: {"别的文件.mkv"}
     pan.search_file = lambda name, limit=20: [
-        {"id": "999", "name": FakePan.files[0]["fn"], "parent": "888"}]  # 在其他目录找到
+        {"id": "999", "name": FakePan.files[0]["fn"], "parent": "888"}]
     pan.copy_files_to = lambda ids, cid: _copied.update({"ids": list(ids), "cid": cid}) or {"state": True}
     db.set_setting("dedup_by_name", False)
     job = mkjob("recover001")
-    queue_worker._process_one(job)
-    row = dict(db.query("SELECT * FROM transfers WHERE id=?", (job["id"],), one=True))
-    check("反查失败 → 全盘找回复制 → 再反查 → success", row["status"] == "success", row["status"])
-    check("复制到了目标目录且不动原文件",
-          _copied.get("cid") == 12345 and _copied.get("ids") == ["999"], str(_copied))
+    got_err = False
+    try:
+        queue_worker._process_one(job)
+    except RuntimeError as e:
+        got_err = True
+        check("反查未落盘抛出重试异常", "落库延迟" in str(e))
+        db.execute("UPDATE transfers SET status='queued' WHERE id=?", (job["id"],))
+    check("严禁全盘复制其他文件进目标目录", len(_copied) == 0, str(_copied))
 finally:
     pan.share_snap_all, pan.mkdirs, pan.receive = _orig_snap_all6, _orig_mkdirs6, _orig_receive6
     pan.list_file_names, pan.search_file, pan.copy_files_to = _orig_list_names6, _orig_search6, _orig_copy6

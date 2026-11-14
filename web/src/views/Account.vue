@@ -158,7 +158,10 @@
     <el-dialog v-model="qrVisible" title="115 扫码登录" :width="'min(380px, 94vw)'" @close="stopQrPoll">
       <div style="text-align: center; min-height: 220px">
         <template v-if="qr.svg">
-          <div class="qr-box" v-html="qr.svg" @click="createQr"></div>
+          <!-- 后端生成的 SVG 改用 data URI 承载：不再以 v-html 直插外部接口数据 -->
+          <div class="qr-box" @click="createQr">
+            <img :src="qrSvgUrl" alt="115 登录二维码">
+          </div>
           <p v-if="qr.err" class="qr-err">❌ {{ qr.err }}</p>
           <p v-else-if="qr.scanned" style="color: #67c23a; margin: 4px">✅ 已扫描，请在手机上确认</p>
           <p v-else style="color: #999; font-size: var(--fs-caption)">请用 115 App 扫码，点击二维码可刷新</p>
@@ -288,6 +291,8 @@ const loadChannels = async () => {
 
 // ---- 115 QR ----
 const openQr = () => { qrVisible.value = true; qr.svg = ''; createQr() }
+// SVG → data URI（encodeURIComponent 兼容任意字符）：供 <img> 展示，替代 v-html 直插
+const qrSvgUrl = computed(() => qr.svg ? 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(qr.svg) : '')
 const createQr = async () => {
   const my = ++pollSeq
   qr.loading = true
@@ -426,7 +431,9 @@ const changeType = async (row, v) => {
     await api.put(`/api/channels/${row.id}`, { type: v })
     row.type = v
     const label = { polling: '网页轮询', userbot: 'Userbot' }
-    const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    // 服务端已白名单校验频道名，这里仅作展示层纵深防御（含引号转义）
+    const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;')
     ElMessageBox.alert(
       `已将 @${esc(row.name)} 的接入方式改为「${label[v]}」。<br/><br/>` +
       `<b>⚠️ 注意：</b>如系统当前正在运行，需点击顶栏的「停止」再「运行」（或重启容器）以重启监听线程。`,
@@ -494,7 +501,7 @@ onUnmounted(() => {
 /* 标签不换行（如「登录状态」），内容列自适应 */
 .account-grid :deep(.el-descriptions__label) { white-space: nowrap; }
 .qr-box { width: 200px; margin: 0 auto; cursor: pointer; background: #fff; padding: 8px; border-radius: 8px; }
-.qr-box :deep(svg) { width: 100%; height: auto; display: block; }
+.qr-box :deep(svg), .qr-box img { width: 100%; height: auto; display: block; }
 .qr-err { color: #f56c6c; font-size: var(--fs-body); margin: 4px; }
 .tg-test { margin-top: 12px; display: flex; flex-direction: column; gap: 6px; }
 .tg-ch { display: flex; align-items: center; gap: 6px; font-size: var(--fs-body); }

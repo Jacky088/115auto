@@ -43,9 +43,11 @@ def validate_link(kind: str, share_code: str, share_url: str) -> str:
     url = (share_url or "").strip()
     if not url:
         return "云下载地址为空"
-    if url.startswith("magnet:?xt=urn:btih:"):
-        h = url.split("btih:", 1)[1].split("&", 1)[0]
-        if re.fullmatch(r"[0-9a-fA-F]{40}", h) or re.fullmatch(r"[A-Za-z2-7]{32}", h):
+    if url.startswith("magnet:?"):
+        # xt 参数不一定在最前（如 magnet:?dn=xx&xt=urn:btih:…），全文检索 hash
+        m = re.search(r"xt=urn:btih:([0-9A-Za-z]+)", url, re.IGNORECASE)
+        if m and (re.fullmatch(r"[0-9a-fA-F]{40}", m.group(1))
+                  or re.fullmatch(r"[A-Za-z2-7]{32}", m.group(1))):
             return ""
         return "磁力链 hash 格式不支持（115 仅支持 BTv1：40 位十六进制或 32 位 Base32），无法云下载"
     if url.startswith("ed2k://|file|"):
@@ -465,15 +467,14 @@ def _process_one(job: dict):
     # 5. 双重确认：反查目标目录，确认文件真实到达（防接口误报）。
     # 已确认文件在目标目录的（重试预检命中 / 已接收信号）除外。
     if not confirmed and not _verify_receive(cid, snap):
-        # 「必须要存进去」兜底：文件可能被接收到了网盘其他位置（如早前用其他方式
-        # 转存过同一分享、或分类调整过）。全盘搜索后用「复制」找回到目标目录——
-        # 不动原文件，多一份也无妨。
+        # 严格禁止跨目录全盘搜索复制：115 搜索是分词模糊匹配，全盘找回会把其他影视目录中同集数/同名的文件
+        # 错误复制进目标目录（严重污染媒体库并产生 (1) 冲突副本）。
+        # 此处如未查到，多为 115 落库延迟，直接抛出重试异常；60 秒后工作器重试时
+        # 会通过 pre-check（已有同名文件）自动命中并标记成功，零跨目录污染。
         _assert_still_running(job)
-        _recover_misplaced(cid, snap)
-        if not _verify_receive(cid, snap):
-            raise RuntimeError("转存接口已返回成功，但反查目标目录未查到文件（多为 115 落库延迟，"
-                               "已尝试全盘找回，将自动重试）；多次重试仍失败时，"
-                               "请到 115 网页搜索文件名或检查回收站")
+        raise RuntimeError("转存接口已返回成功，但反查目标目录暂未查到文件（多为 115 落库延迟，"
+                           "系统将自动重试确认，无需手动处理）；多次重试仍失败时，"
+                           "请到 115 网页核对目标目录或检查回收站")
 
     changed = db.execute("UPDATE transfers SET status='success', title=?, size=?, file_count=?, "
                          "finished_at=?, running_at=NULL, next_retry_at=NULL"
@@ -497,61 +498,6 @@ def _process_one(job: dict):
     # 说明：转存后统一通过「整理刮削」队列互斥执行整理重命名，此处不再直接并发调 organize_seasons。
 
 
-def _is_generic_name(name: str) -> bool:
-    """判断是否为无特异性短名称或通用单集名（如 1.mp4, 01.mp4, cover.jpg 等）。
-    全盘搜索这类名称极易匹配到网盘内其他影视资源导致误复制冲突生成 (1) 副本。"""
-    base = re.sub(r"\.[^.]+$", "", name).strip().lower()
-    if len(base) <= 3 or base.isdigit():
-        return True
-    if re.fullmatch(r"(?:ep?|s\d{1,2}e?|第)?\d{1,4}(?:集|话|話)?", base):
-        return True
-    if base in {"cover", "poster", "folder", "fanart", "sample", "trailer", "thumb", "cd1", "cd2"}:
-        return True
-    return False
-
-
-def _recover_misplaced(cid: int, snap: dict) -> int:
-    """反查失败后的兜底（「必须要存进去」的最后手段）。
-
-    按文件名全盘搜索本分享的文件：若被接收到了其他目录（早前转存过同一分享、
-    手动操作移动等），用「复制」找回到目标目录——不移动、不删除原文件，
-    允许重复，只求文件必须出现在目标目录。返回复制的文件数。
-    搜索/复制之间留小间隔，与库内其他 115 调用的防风控口径一致。
-    """
-    # 严格过滤无特征通用文件名（如 1.mp4, 01.mp4），防止全盘搜索抓取到其他目录的同名剧集
-    sample = [f.get("fn") for f in snap["files"][:5] if f.get("fn") and not _is_generic_name(f.get("fn"))]
-    sample += [n for n in (snap.get("top_names") or [])[:3] if n and not _is_generic_name(n)]
-    sample = [n for n in dict.fromkeys(sample) if n][:5]
-    copied = 0
-    seen_ids: set[str] = set()
-    searched = False
-    for name in sample:
-        if searched:
-            time.sleep(0.5)  # 多次搜索之间留间隔，防风控
-        searched = True
-        try:
-            hits = pan.search_file(name)
-        except Exception as e:
-            logstream.warn("transfer", f"全盘搜索「{name[:40]}」失败，跳过找回: {e}")
-            continue
-        for h in hits:
-            if h["parent"] == str(cid) or h["id"] in seen_ids:
-                continue  # 已在目标目录（多为列表延迟）或已处理过
-            if copied:
-                time.sleep(0.3)  # 多次复制之间留间隔，防风控
-            try:
-                pan.copy_files_to([h["id"]], cid)
-                seen_ids.add(h["id"])
-                copied += 1
-                logstream.info("transfer",
-                               f"在网盘其他位置找到「{h['name'][:50]}」，已复制一份到目标目录")
-            except Exception as e:
-                logstream.warn("transfer", f"复制「{h['name'][:50]}」到目标目录失败: {e}")
-        if copied >= 50:
-            break  # 单次找回上限，防异常数据触发海量复制；剩余交给下一轮重试
-    return copied
-
-
 def _verify_receive(cid: int, snap: dict) -> bool:
     """反查目标目录：抽查分享条目是否真实到达。
 
@@ -564,12 +510,13 @@ def _verify_receive(cid: int, snap: dict) -> bool:
     names = list(dict.fromkeys(names))  # 去重：同一文件可能同时出现在文件列表与顶层条目里
     if not names:
         return True
-    delays = (2, 4, 8)
+    delays = (2, 5, 8)
     try:
         for i, delay in enumerate(delays):
             time.sleep(delay)
             got = pan.list_file_names(cid)
-            if any(n in got for n in names):
+            got_norm = {_norm_filename(n) for n in got}
+            if any(_norm_filename(n) in got_norm for n in names):
                 return True
             if i == len(delays) - 1:
                 logstream.warn("transfer",
@@ -644,8 +591,19 @@ def _norm_filename(s: str) -> str:
 
 def _fetch_next():
     """领取下一个转存任务：优先级高的先跑（向前补全 priority=1，优先消耗每日额度），
-    同级按入队先后（FIFO）。"""
+    同级按入队先后（FIFO）。
+
+    排空/独占期仅领取水线之前的任务：水线之后（排空开始后 TG 新入库）的任务
+    留在队列里等待整理/刮削结束再继续——否则新任务会在排空期被继续消费，
+    既虚耗每日额度又拉长独占等待（与 transfer_gate.get_drain_status 口径一致）。
+    """
     _retry_scan()
+    cutoff = transfer_gate.drain_cutoff()
+    if cutoff:
+        return db.query(
+            "SELECT * FROM transfers WHERE status='queued'"
+            " AND (next_retry_at IS NULL OR next_retry_at<=?) AND id<=?"
+            " ORDER BY priority DESC, id ASC LIMIT 1", (time.time(), cutoff), one=True)
     return db.query(
         "SELECT * FROM transfers WHERE status='queued' AND (next_retry_at IS NULL OR next_retry_at<=?)"
         " ORDER BY priority DESC, id ASC LIMIT 1", (time.time(),), one=True)

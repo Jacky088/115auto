@@ -16,6 +16,7 @@
 """
 import asyncio
 import re
+import uuid
 
 import httpx
 
@@ -43,9 +44,18 @@ def _persist_add(req: dict) -> None:
 
 
 def _persist_done(req: dict) -> None:
+    """从持久化里移除已完成的补全请求。
+
+    按请求唯一 uid 删除：同一请求被重复提交（双击/重试）会产生两条同值记录，
+    按值相等删除会把未处理的另一条一并删掉（重启后丢失）。旧版请求没有 uid，
+    回退按值比较以兼容升级前的存量数据。"""
     try:
         pending = db.get_setting(_PENDING_KEY, []) or []
-        pending = [p for p in pending if p != req]
+        uid = req.get("uid")
+        if uid:
+            pending = [p for p in pending if p.get("uid") != uid]
+        else:
+            pending = [p for p in pending if p != req]
         db.set_setting(_PENDING_KEY, pending)
     except Exception:
         pass
@@ -149,8 +159,8 @@ async def submit_backfill(channel: str, message_id: int, title: str,
     base = re.sub(r"\s+", "", base)
     if _queue is None:
         _queue = asyncio.Queue()
-    req = {"channel": channel, "message_id": int(message_id), "title": title,
-           "base": base, "season": season, "ep": int(ep),
+    req = {"uid": uuid.uuid4().hex[:12], "channel": channel, "message_id": int(message_id),
+           "title": title, "base": base, "season": season, "ep": int(ep),
            "anchor_category": str(anchor_category or ""),
            "anchor_target": str(anchor_target or "")}
     await _queue.put(req)

@@ -89,12 +89,16 @@ export const toast = {
   }
 }
 
+// 转义 & < > 与引号：当前调用点均为元素文本上下文，补引号转义作为纵深防御，
+// 防止该函数的输出未来被用于 HTML 属性上下文（title="..." 等）时被闭合注入
 const _escape = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;').replace(/'/g, '&#39;')
 
 // 115 分享 / 115:// / ed2k / magnet / 普通网页链接
+// 与后端 extractor 同口径的左边界：防止 xx115.com 这类无关域名从中间截取高亮
 const _LINK_RE = new RegExp(
   [
-    '(?:https?://)?(?:www\\.)?(?:115\\.com|115cdn\\.com|anxia\\.com)/s/[0-9A-Za-z]+(?:\\?password=[0-9A-Za-z]+)?',
+    '(?<![0-9A-Za-z])(?:https?://)?(?:www\\.)?(?:115\\.com|115cdn\\.com|anxia\\.com)/s/[0-9A-Za-z]+(?:\\?password=[0-9A-Za-z]+)?',
     '115://[0-9A-Za-z]+(?:\\?password=[0-9A-Za-z]+)?',
     'ed2k://\\|file\\|[^|\\s]+\\|\\d+\\|[0-9A-Fa-f]{32}\\|/?',
     'magnet:\\?xt=urn:btih:[0-9A-Za-z]{32,40}[^\\s]*',
