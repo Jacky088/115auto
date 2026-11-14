@@ -1004,6 +1004,19 @@ _AUTO_MOVE_SKIP_SCAN_DIRS = frozenset({
     "bdmv", "certificate", "video_ts",
 })
 _AUTO_MOVE_SCAN_MAX_DIRS = 50
+# 云下载目录模式的垃圾文件体积下限：真媒体为 GB 级，广告样品只有几百 KB
+_DIR_MATCH_MIN_SIZE = 10 * 1024 * 1024
+# 广告括号段：【更多高清影视请访问 www.xxx.com】/（www.xxx.com）等——比标题还长，匹配前必须剥离
+_AD_BRACKET_RE = re.compile(
+    r"【[^】]*(?:www\.|http)[^】]*】"
+    r"|（[^）]*(?:www\.|http)[^）]*）"
+    r"|\([^)]*(?:www\.|http)[^)]*\)", re.IGNORECASE)
+
+
+def _strip_ad_brackets(name: str) -> str:
+    """剥离目录名中含 www/http 的广告括号段（【…】/（…）/(…) 三种括号），还原真实标题。"""
+    cleaned = _AD_BRACKET_RE.sub(" ", name or "")
+    return re.sub(r"\s{2,}", " ", cleaned).strip()
 
 
 def _should_skip_auto_move_dir(dir_name: str) -> bool:
@@ -1025,7 +1038,9 @@ def move_matched_files_for_rule(source_dir: str, target_dir: str,
                                 dry_run: bool = False,
                                 moved_out: list | None = None,
                                 rule_media_type: str = "auto",
-                                ambiguous_kws: set | frozenset | None = None) -> tuple:
+                                ambiguous_kws: set | frozenset | None = None,
+                                match_by_dir: bool = False,
+                                skip_stats_out: dict | None = None) -> tuple:
     """按映射规则排队移动满足条件的文件（做好 115 严格风控）：
 
     模式支持：
@@ -1039,7 +1054,10 @@ def move_matched_files_for_rule(source_dir: str, target_dir: str,
     返回值按模式区分：
     - 正常模式（dry_run=False）：(移动数, 样例文件名列表)，与历史版本一致；
       若传入 moved_out 列表，成功移动的每个文件明细 dict 会追加其中
-      （id/name/from_cid/from_path/dest_cid/dest_path/drama/season/size），供上层落整理账本。
+      （id/name/from_cid/from_path/dest_cid/dest_path/drama/season/size），供上层落整理账本；
+      若传入 skip_stats_out dict，各层跳过计数会写入其中
+      （ep=按季集防重 / movie=电影库守卫 / ambiguous=同名歧义 / junk=垃圾过滤 / dedup=同名同内容查重），
+      供上层在完成通知中向用户解释「为什么有些文件没有动」。
     - dry_run=True：不做任何移动，返回 (计划数, 计划 dict)——dict 含
       items（与 moved_out 同结构的明细列表，另含 matched 命中词）/ skip_ep / skip_ep_samples /
       skip_movie / skip_ambiguous 及各自样例。
@@ -1052,6 +1070,13 @@ def move_matched_files_for_rule(source_dir: str, target_dir: str,
     - ambiguous_kws：跨规则同名预检得到的剧名关键词集合（出现在 ≥2 个总库的目录名）。
       命中这些关键词且**无集数标识**的裸文件名不自动处理（两库同名无法判别，留给用户手动判断）
     - 两者均默认关闭（'auto' / None），行为与历史版本一致
+
+    云下载目录模式（match_by_dir=True，配合规则上的 dir_match 开关）：
+    中文标题只出现在「下载任务目录名」上、目录内文件多为纯英文名的场景。匹配对象从
+    文件名换成任务子目录名（剥除含 www/http 的【…】广告括号段后做两级匹配），目录内
+    文件继承目录的归属；集数标识取「文件名或目录名任一」。三重垃圾过滤防广告文件混入：
+    文件名含 www./http、视频体积 < 10MB、扩展名白名单；源目录根部散落的文件不参与；
+    字幕等非视频扩展不跟移（留给整理刮削配对）。仅推荐在云下载目录的规则上开启。
 
     防风控与安全原则：
     1. 只移动文件，文件夹绝不移动（is_dir == False），忽略 BDMV/花絮/字幕独立文件夹
@@ -1084,6 +1109,9 @@ def move_matched_files_for_rule(source_dir: str, target_dir: str,
     ambiguous_cnt = 0
     ambiguous_samples: list[str] = []
     plan_items: list[dict] = []
+    dir_junk_cnt = 0
+    dir_junk_samples: list[str] = []
+    dedup_skip_cnt = 0
 
     def _result(count, items):
         """统一出口：dry_run 返回 (计划数, 统计 dict)，正常模式返回 (移动数, 样例名)。"""
@@ -1096,6 +1124,9 @@ def move_matched_files_for_rule(source_dir: str, target_dir: str,
                 "skip_movie_samples": list(movie_skip_samples)[:5],
                 "skip_ambiguous": ambiguous_cnt,
                 "skip_ambiguous_samples": list(ambiguous_samples)[:5],
+                "skip_junk": dir_junk_cnt,
+                "skip_junk_samples": list(dir_junk_samples)[:5],
+                "skip_dedup": dedup_skip_cnt,
             }
         return count, items
 
@@ -1173,12 +1204,13 @@ def move_matched_files_for_rule(source_dir: str, target_dir: str,
     # 1. 受控 BFS 扫描源目录（默认最多穿透 2 层：源目录 -> 剧名目录 -> Season X，并设总目录请求配额防风控）
     effective_depth = 0 if not scan_subdirs else max(1, min(int(max_depth or 2), 3))
     candidate_files: list[dict] = []
-    scan_queue: list[tuple[int, int, str]] = [(source_cid, 0, "")]
+    # 队列元素: (cid, 深度, 紧邻父目录名, 顶级任务目录名)——顶级名供云下载目录模式按目录名匹配
+    scan_queue: list[tuple[int, int, str, str]] = [(source_cid, 0, "", "")]
     visited_scan_cids: set[int] = set()
     scanned_subdirs = 0
 
     while scan_queue:
-        cur_cid, cur_depth, cur_folder_name = scan_queue.pop(0)
+        cur_cid, cur_depth, cur_folder_name, cur_top_name = scan_queue.pop(0)
         if cur_cid in visited_scan_cids:
             continue
         visited_scan_cids.add(cur_cid)
@@ -1206,6 +1238,7 @@ def move_matched_files_for_rule(source_dir: str, target_dir: str,
                     **e,
                     "_parent_cid": cur_cid,
                     "_parent_folder_name": cur_folder_name,
+                    "_top_folder_name": cur_top_name,
                 })
             elif cur_depth < effective_depth and scanned_subdirs < _AUTO_MOVE_SCAN_MAX_DIRS:
                 dname = str(e.get("name") or "").strip()
@@ -1218,7 +1251,9 @@ def move_matched_files_for_rule(source_dir: str, target_dir: str,
                 if sub_cid in visited_scan_cids:
                     continue
                 scanned_subdirs += 1
-                scan_queue.append((sub_cid, cur_depth + 1, dname))
+                # 深度 1 的目录自己就是"顶级任务目录"；更深层继承顶级名
+                scan_queue.append((sub_cid, cur_depth + 1, dname,
+                                   dname if cur_depth == 0 else cur_top_name))
 
     if not candidate_files:
         return _result(0, [])
@@ -1241,6 +1276,24 @@ def move_matched_files_for_rule(source_dir: str, target_dir: str,
                 dest_file_cache[cid] = set()
                 dest_canon_cache[cid] = set()
         return dest_file_cache[cid], dest_canon_cache[cid]
+
+    dest_sha_cache: dict[int, set[str]] = {}
+
+    def get_dest_sha1s(cid: int) -> set[str]:
+        """目标目录已有文件的 sha1 集合（仅云下载目录模式使用）。
+
+        整理刮削可能已按模板重命名了目标库里的同内容文件——名字对不上但内容相同，
+        按 sha1 内容指纹比对才能避免重复归档。拉取失败按空集处理（放行，与名称查重同口径）。
+        """
+        if cid not in dest_sha_cache:
+            try:
+                dest_sha_cache[cid] = {
+                    str(e.get("sha1") or "")
+                    for e in list_entries(cid, limit=2000) if e.get("sha1")
+                }
+            except Exception:
+                dest_sha_cache[cid] = set()
+        return dest_sha_cache[cid]
 
     def get_dir_episode_keys(cid: int, folder_hint: str = "") -> set[tuple[int, int, str, str]]:
         ckey = (cid, folder_hint)
@@ -1278,17 +1331,56 @@ def move_matched_files_for_rule(source_dir: str, target_dir: str,
     # 聚类去重：开启按季集防重且为带集号的视频时按 (drama_cid, ep_keys) 聚类择优，否则按 (final_dest_cid, clean_name)
     candidates_by_group: dict[tuple, list[dict]] = {}
 
+    # 云下载目录模式预计算：按顶级任务目录名分组，剥广告括号后做目录级两级匹配
+    dir_ctx: dict[str, dict] = {}
+    if match_by_dir:
+        dir_groups: dict[str, list[dict]] = {}
+        for f in candidate_files:
+            top = str(f.get("_top_folder_name") or "")
+            if top:
+                dir_groups.setdefault(top, []).append(f)
+        for top_name, group in dir_groups.items():
+            cleaned = _strip_ad_brackets(top_name)
+            has_marker = parse_episode(cleaned)[1] is not None
+            if not has_marker:
+                has_marker = any(
+                    parse_episode(str(x.get("name") or ""))[1] is not None for x in group)
+            dir_norm = normalize_title(cleaned, fuzzy_t2s=fuzzy_t2s)
+            md = None
+            for dt in drama_targets:
+                if dt["norm_kw"] in dir_norm:
+                    md = dt
+                    break
+            if md is None:
+                cn_subject = extract_chinese_subject(cleaned)
+                if cn_subject:
+                    ncs = normalize_title(cn_subject, fuzzy_t2s=fuzzy_t2s)
+                    for dt in drama_targets:
+                        if dt.get("norm_cn_kw") and len(dt["norm_cn_kw"]) >= 2 \
+                                and dt["norm_cn_kw"] in ncs:
+                            md = dt
+                            break
+            dir_ctx[top_name] = {"drama": md, "has_marker": has_marker, "cleaned": cleaned}
+
     for f in candidate_files:
         fid = str(f.get("id"))
         fname = f.get("name", "")
         if not fid or not fname or fid in seen_ids:
             continue
+        # 云下载目录模式：身份由顶级任务目录名承载（目录未命中规则的目录直接整组跳过）
+        dctx = None
+        if match_by_dir:
+            dctx = dir_ctx.get(str(f.get("_top_folder_name") or ""))
+            if dctx is None or dctx["drama"] is None:
+                continue
+
         # 扩展名白名单校验
         ext = os.path.splitext(fname)[1].lower()
         if ext not in _MEDIA_EXTENSIONS:
             continue
-        # 中文硬指标：必须含有汉字（纯数字、纯英文坚决不移动）
-        if not _CHINESE_CHAR_RE.search(fname):
+        # 中文硬指标：必须含有汉字（纯数字、纯英文坚决不移动）；
+        # 云下载目录模式下身份由任务目录名承载，放开文件名中文要求（垃圾由下方过滤拦截）
+        if not match_by_dir and not _CHINESE_CHAR_RE.search(fname):
             continue
         # 预告/花絮非正片过滤
         fname_lower = fname.lower()
@@ -1297,29 +1389,42 @@ def move_matched_files_for_rule(source_dir: str, target_dir: str,
 
         # 媒体类型守卫 / 同名歧义判别都需要集数标识信息（按需解析，正则开销极低）
         ep_marker = False
-        if rule_media_type == "movie" or ambiguous_kws:
+        if rule_media_type == "movie" or ambiguous_kws or match_by_dir:
             ep_marker = parse_episode(fname)[1] is not None
+            if match_by_dir and dctx["has_marker"]:
+                ep_marker = True  # 文件名或任务目录名任一携带集数标识即视为剧集
         # 电影库规则：跳过一切带集数标识的文件（剧集交给 tv/auto 规则认领，与规则顺序无关）
         if rule_media_type == "movie" and ep_marker:
             movie_skip_cnt += 1
             if len(movie_skip_samples) < 5:
                 movie_skip_samples.append(fname)
             continue
+        # 云下载垃圾过滤：广告域名 / 微小体积（真媒体为 GB 级，防广告视频混入媒体库）
+        if match_by_dir:
+            fsize = int(f.get("size", f.get("s", 0)) or 0)
+            if re.search(r"www\.|http", fname_lower) or 0 < fsize < _DIR_MATCH_MIN_SIZE:
+                dir_junk_cnt += 1
+                if len(dir_junk_samples) < 5:
+                    dir_junk_samples.append(fname)
+                continue
 
-        # 软化标题比对（支持中英文混合双层匹配）
-        norm_name = normalize_title(fname, fuzzy_t2s=fuzzy_t2s)
-        matched_drama = None
-        # 第一轮：优先精确匹配完整体关键词（如 doctorx白色黑手党时代 命中）
-        for dt in drama_targets:
-            if dt["norm_kw"] in norm_name:
-                matched_drama = dt
-                break
-        # 第二轮：若完整体未命中，回落比对纯中文主体（如发布组仅写 白色黑手党时代 时命中）
-        if not matched_drama:
+        # 软化标题比对（支持中英文混合双层匹配）；云下载模式直接继承目录级匹配结果
+        if match_by_dir:
+            matched_drama = dctx["drama"]
+        else:
+            norm_name = normalize_title(fname, fuzzy_t2s=fuzzy_t2s)
+            matched_drama = None
+            # 第一轮：优先精确匹配完整体关键词（如 doctorx白色黑手党时代 命中）
             for dt in drama_targets:
-                if dt.get("norm_cn_kw") and len(dt["norm_cn_kw"]) >= 2 and dt["norm_cn_kw"] in norm_name:
+                if dt["norm_kw"] in norm_name:
                     matched_drama = dt
                     break
+            # 第二轮：若完整体未命中，回落比对纯中文主体（如发布组仅写 白色黑手党时代 时命中）
+            if not matched_drama:
+                for dt in drama_targets:
+                    if dt.get("norm_cn_kw") and len(dt["norm_cn_kw"]) >= 2 and dt["norm_cn_kw"] in norm_name:
+                        matched_drama = dt
+                        break
         if not matched_drama:
             continue
 
@@ -1359,7 +1464,16 @@ def move_matched_files_for_rule(source_dir: str, target_dir: str,
         # 目标目录文件名查重：目标库已有原始文件或任一历史副本时，源目录全部副本均跳过
         dest_raw_names, dest_canon_names = get_dest_file_names(final_dest_cid)
         if fname in dest_raw_names or clean_name in dest_raw_names or clean_name in dest_canon_names:
+            dedup_skip_cnt += 1
             continue
+
+        # 云下载目录模式内容级查重：目标库的同内容文件可能已被整理刮削按模板重命名，
+        # 文件名对不上但 sha1 相同 → 同一部影片/同一集，跳过防止重复归档
+        if match_by_dir:
+            src_sha = str(f.get("sha1") or "")
+            if src_sha and src_sha in get_dest_sha1s(final_dest_cid):
+                dedup_skip_cnt += 1
+                continue
 
         # 按季集防重：同剧目标（剧集根目录 + 对应季目录）已有相同季集视频时跳过不同命名版本
         ep_keys = extract_episode_keys(fname, folder_hint=f.get("_parent_folder_name", "")) if dedup_ep else []
@@ -1455,6 +1569,12 @@ def move_matched_files_for_rule(source_dir: str, target_dir: str,
                 f"同名歧义跳过 {ambiguous_cnt} 个文件（多库同名且无集数标识，留源目录交用户手动判断）："
                 f"{'、'.join(ambiguous_samples[:3])}",
             )
+        if dir_junk_cnt > 0:
+            logstream.info(
+                "auto_move",
+                f"云下载垃圾过滤跳过 {dir_junk_cnt} 个文件（广告域名/微小体积）："
+                f"{'、'.join(dir_junk_samples[:3])}",
+            )
     if dry_run:
         plan_items = []
         for x in files_to_move:
@@ -1524,6 +1644,14 @@ def move_matched_files_for_rule(source_dir: str, target_dir: str,
                 note_115_error(str(e))
                 raise
 
+    if skip_stats_out is not None:
+        skip_stats_out.update({
+            "ep": ep_skipped_cnt,
+            "movie": movie_skip_cnt,
+            "ambiguous": ambiguous_cnt,
+            "junk": dir_junk_cnt,
+            "dedup": dedup_skip_cnt,
+        })
     return _result(moved_count, sample_names[:5])
 
 
@@ -1534,10 +1662,13 @@ def collect_library_keyword_conflicts(targets: list[str], fuzzy_t2s: bool = True
     对每个总库目标列出一级子目录，按与 move_matched_files_for_rule 完全相同的口径
     提取/归一化剧名关键词（剥年份、繁简互通、排除季目录与通用文件夹）；出现在
     ≥2 个库的关键词即为"两库同名"——无集数标识的裸文件名命中它们时不自动处理。
-    targets 少于 2 个时直接返回空集（单库不存在同名歧义）。
+    targets 少于 2 个（去重后）时直接返回空集：单库不存在同名歧义——
+    注意必须先去重，同一条库规则出现两次会让"整库剧名"都被误判为两库同名。
     复用 scan_cache 的目录缓存：预检列过的总库根目录，移动阶段零重复请求。
     """
-    if not targets or len(targets) < 2:
+    # 去重（保序）：同一总库被多条规则指向时只算一个库
+    targets = list(dict.fromkeys((t or "").strip() for t in (targets or []) if (t or "").strip()))
+    if len(targets) < 2:
         return set()
     entries_cache: dict[int, list[dict]] = \
         scan_cache.setdefault("dir_entries", {}) if scan_cache is not None else {}

@@ -137,7 +137,7 @@
         </div>
 
         <el-alert type="info" :closable="false" show-icon style="margin-bottom: 10px"
-                  title="整理记录为定时文件整理的实际移动流水（每完成一批移动即记录一条）；撤销会把文件移回整理前的源目录。" />
+                  title="整理移动流水，撤销将文件移回源目录" />
 
         <el-table :data="ledgerItems" size="small" v-loading="ledgerLoading">
           <template #empty>
@@ -177,7 +177,7 @@
             将撤销 <b>{{ undoDialog.label }}</b>，文件会被移回整理前的源目录。
           </p>
           <el-alert type="warning" :closable="false" show-icon style="margin-bottom: 10px"
-                    title="撤销后，若规则仍启用且文件仍命中匹配条件，下次定时整理会把它再次移走。" />
+                    title="规则未停用时，下次整理会再次移走该文件" />
           <el-checkbox v-model="undoDialog.stopRules">
             同时停用涉及的整理规则（{{ undoDialog.ruleLabels || '无' }}）
           </el-checkbox>

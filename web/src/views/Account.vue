@@ -138,12 +138,12 @@
             <div class="table-actions">
               <el-button type="primary" text @click="preview(row)">预览</el-button>
               <el-popconfirm
-                title="重置后该频道将清除已处理的消息去重记录，从最新消息重新获取；已成功的分享不会重复转存。确认重置？"
+                title="清除去重记录，从最新消息重新抓取。确认重置？"
                 confirm-button-text="重置" cancel-button-text="取消" confirm-button-type="warning"
                 width="300" @confirm="reset(row)">
                 <template #reference><el-button type="warning" text>重置</el-button></template>
               </el-popconfirm>
-              <el-popconfirm title="删除后将不再监控该频道，并清除其消息去重记录；重新添加会按新频道重新抓取。确认删除？"
+              <el-popconfirm title="不再监控该频道，并清除其记录。确认删除？"
                              confirm-button-text="删除" cancel-button-text="取消" confirm-button-type="danger"
                              width="300" @confirm="del(row)">
                 <template #reference><el-button type="danger" text>删除</el-button></template>
@@ -513,7 +513,7 @@ onUnmounted(() => {
 
 /* 消息预览卡片 */
 .msg-item {
-  border: 1px solid var(--saas-line); border-radius: 10px; padding: 12px 14px; margin-bottom: 12px;
+  border: 1px solid var(--saas-line); border-radius: var(--r-md); padding: 12px 14px; margin-bottom: 12px;
   background: var(--glass-bg-strong); color: var(--saas-text-main);
 }
 .msg-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }

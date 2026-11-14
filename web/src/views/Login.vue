@@ -58,7 +58,7 @@ const submit = async () => {
 }
 .login-head { text-align: center; margin-bottom: 22px; }
 .login-mark {
-  width: 52px; height: 52px; border-radius: 14px; margin: 0 auto 12px;
+  width: 52px; height: 52px; border-radius: var(--r-lg); margin: 0 auto 12px;
   background: var(--grad-brand);
   display: flex; align-items: center; justify-content: center; color: #fff;
   box-shadow: 0 8px 24px rgba(79, 107, 255, .42);

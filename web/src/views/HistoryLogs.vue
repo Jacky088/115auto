@@ -194,7 +194,7 @@ onMounted(async () => {
 .tip { color: var(--saas-text-sub); font-size: var(--fs-caption); font-weight: 400; }
 .day-chips { display: flex; gap: 10px; flex-wrap: wrap; }
 .day-chip {
-  flex: 1; min-width: 150px; padding: 12px 16px; border-radius: 10px; cursor: pointer;
+  flex: 1; min-width: 150px; padding: 12px 16px; border-radius: var(--r-md); cursor: pointer;
   border: 1px solid var(--saas-line); background: var(--glass-bg-strong); color: var(--saas-text-main); transition: all .15s ease;
 }
 .day-chip:hover {

@@ -441,7 +441,7 @@ const finish = async () => {
 .qr-err { color: #f56c6c; font-size: var(--fs-body); margin: 4px; }
 .ub-wizard {
   border: 1px solid var(--el-color-primary-light-7); background: var(--el-color-primary-light-9);
-  border-radius: 10px; padding: 14px 16px;
+  border-radius: var(--r-md); padding: 14px 16px;
 }
 .ub-wizard-tip { margin: 0 0 10px; font-size: var(--fs-body); color: var(--saas-text-sub); }
 .ub-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: var(--fs-body); }
@@ -453,7 +453,7 @@ const finish = async () => {
 }
 .sub-mode-box {
   margin-top: 12px; border: 1px solid var(--el-color-primary-light-7);
-  background: var(--el-color-primary-light-9); border-radius: 10px; padding: 12px 14px;
+  background: var(--el-color-primary-light-9); border-radius: var(--r-md); padding: 12px 14px;
 }
 .ch-type-tip { margin: 0 0 10px; font-size: var(--fs-caption); color: var(--saas-text-sub); }
 .ch-type-row { display: flex; align-items: center; gap: 10px; padding: 4px 0; }

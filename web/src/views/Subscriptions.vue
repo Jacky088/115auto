@@ -425,11 +425,11 @@ onMounted(load)
 .sub-title,
 .tmdb-title {
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
-  font-weight: 700; font-size: 15px; color: var(--saas-text-main);
+  font-weight: 700; font-size: var(--fs-body); color: var(--saas-text-main);
   margin-bottom: 12px; padding: 9px 14px;
   background: var(--subcard-head-bg);
   border: 1px solid var(--saas-line);
-  border-radius: 10px;
+  border-radius: var(--r-md);
 }
 .sub-title .tip,
 .tmdb-title .tip { font-weight: 400; }
@@ -442,7 +442,7 @@ onMounted(load)
 .tmdb-empty { color: #999; font-size: var(--fs-body); padding: 12px 0 4px; }
 .tmdb-cats { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
 .cat-chip {
-  padding: 5px 14px; border-radius: 999px; font-size: var(--fs-caption); cursor: pointer; user-select: none;
+  padding: 5px 14px; border-radius: var(--r-pill); font-size: var(--fs-caption); cursor: pointer; user-select: none;
   background: var(--glass-bg-strong); color: var(--saas-text-sub);
   border: 1px solid var(--saas-line); transition: all .18s cubic-bezier(0.4, 0, 0.2, 1);
 }
@@ -461,7 +461,7 @@ onMounted(load)
 .tmdb-more { text-align: center; margin-top: 14px; }
 .tmdb-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 340px), 1fr)); gap: 12px; margin-top: 12px; }
 .tmdb-card {
-  display: flex; gap: 12px; padding: 12px; border-radius: 10px;
+  display: flex; gap: 12px; padding: 12px; border-radius: var(--r-md);
   background: var(--saas-card, #fff); border: 1px solid var(--saas-line);
   transition: all .2s ease;
 }
@@ -485,7 +485,7 @@ onMounted(load)
   color: var(--el-color-primary, #4f6bff);
 }
 .poster-err .retry-hint {
-  font-size: 11px;
+  font-size: var(--fs-caption);
   color: var(--el-color-primary, #4f6bff);
   opacity: .9;
 }

@@ -366,7 +366,7 @@ const changePwd = async () => {
 }
 .logo { display: flex; align-items: center; gap: 10px; padding: 20px 18px 16px; }
 .logo-mark {
-  width: 32px; height: 32px; border-radius: 10px; flex: none;
+  width: 32px; height: 32px; border-radius: var(--r-md); flex: none;
   background: var(--grad-brand);
   display: flex; align-items: center; justify-content: center; color: #fff;
   box-shadow: 0 4px 12px rgba(79, 107, 255, .45);
@@ -404,7 +404,7 @@ const changePwd = async () => {
 }
 /* 标题文字不折行；窄屏时允许必要收缩 */
 .header-title .title-text { flex: none; white-space: nowrap; }
-.user-chip { display: flex; align-items: center; gap: 8px; cursor: pointer; padding: 4px 6px; border-radius: 999px; transition: background .15s ease; }
+.user-chip { display: flex; align-items: center; gap: 8px; cursor: pointer; padding: 4px 6px; border-radius: var(--r-pill); transition: background .15s ease; }
 .user-chip:hover { background: rgba(79, 107, 255, .14); }
 .avatar {
   width: 30px; height: 30px; border-radius: 50%;

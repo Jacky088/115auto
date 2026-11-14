@@ -548,7 +548,7 @@ onMounted(() => { loadRules(); loadBlacklist() })
 .hit-summary { cursor: pointer; color: #3a4661; font-size: var(--fs-caption); }
 .hit-summary:hover { color: var(--el-color-primary); text-decoration: underline; }
 .detail-content {
-  margin-top: 14px; padding: 12px 14px; border-radius: 10px;
+  margin-top: 14px; padding: 12px 14px; border-radius: var(--r-md);
   background: #f6f9ff; border: 1px solid #e9eefb;
   font-size: var(--fs-body); line-height: 1.9; color: #3a4661;
   white-space: pre-wrap; word-break: break-word;

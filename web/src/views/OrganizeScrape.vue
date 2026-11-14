@@ -7,7 +7,7 @@
       show-icon
       :closable="false"
       class="mb16"
-      title="顶栏系统运行开关已停止：目录整理与媒体刮削（含提交队列）均已禁用，请先在右上角点击「运行」开启系统。"
+      title="系统未运行，请先点击顶栏「运行」"
     />
     <el-alert
       v-else-if="status.gate.active_mode === 'auto_move'"
@@ -15,7 +15,7 @@
       show-icon
       :closable="false"
       class="mb16"
-      title="当前「定时文件整理 (auto_move)」正在独占执行 115 文件操作，互斥保护中，请等待结束后再运行整理或刮削。"
+      title="归档任务执行中，结束后再运行整理或刮削"
     />
     <el-alert
       v-else-if="isMediaRunning && status.gate.active_mode !== activeTab"
@@ -783,7 +783,7 @@
                     <div class="config-control">
                       <el-switch v-model="cfg.media_organize_schedule_enabled" @change="saveScheduleQuick" />
                       <span class="tip-inline" style="margin-left: 8px">
-                        {{ cfg.media_organize_schedule_enabled ? '已开启后台无人值守自动扫描并执行目录整理' : '已关闭（开启后按设定时段或间隔自动排队整理）' }}
+                        {{ cfg.media_organize_schedule_enabled ? '已开启后台无人值守自动扫描并执行目录整理' : '已关闭，开启后自动定时整理' }}
                       </span>
                     </div>
                   </div>
@@ -793,7 +793,7 @@
                     <div class="config-control">
                       <el-switch v-model="cfg.media_scrape_schedule_enabled" @change="saveScheduleQuick" />
                       <span class="tip-inline" style="margin-left: 8px">
-                        {{ cfg.media_scrape_schedule_enabled ? '已开启后台无人值守自动扫描影视并在线刮削' : '已关闭（开启后按设定时段或间隔自动排队刮削）' }}
+                        {{ cfg.media_scrape_schedule_enabled ? '已开启后台无人值守自动扫描影视并在线刮削' : '已关闭，开启后自动定时刮削' }}
                       </span>
                     </div>
                   </div>
@@ -809,7 +809,7 @@
                       <div class="config-control">
                         <el-tooltip
                           :content="cfg.media_organize_schedule_type === 'interval'
-                            ? '当前为【固定间隔轮询】：按设定的间隔时长（如每 12 小时）周期性排队扫描并整理'
+                            ? '固定间隔：按设定间隔周期性整理'
                             : '当前为【每天固定时间点】：在每天设定的指定时间点准时排队扫描并整理'"
                           placement="top"
                         >
@@ -1051,6 +1051,12 @@
         共扫描到 <b>{{ previewDrawer.total }}</b> 个视频/原盘项目，其中
         <el-tag type="warning" size="small">{{ previewDrawer.pending_count }} 项需要调整命名/位置</el-tag>
         ，其余已符合规范结构。
+        <div v-if="previewDrawer.scan_stats" class="stat-line" style="margin-top: var(--sp-1)">
+          已过滤：非视频 {{ previewDrawer.scan_stats.non_video }} ·
+          类型互斥 {{ previewDrawer.scan_stats.media_type_skip }} ·
+          花絮广告 {{ previewDrawer.scan_stats.extra_skip }} ·
+          其他规则认领 {{ previewDrawer.scan_stats.dedup_seen }}
+        </div>
       </div>
       <el-table :data="previewDrawer.items" size="small" stripe max-height="72vh">
         <el-table-column prop="orig_path" label="当前 115 路径" min-width="230" show-overflow-tooltip />
@@ -1078,12 +1084,30 @@
         <el-tag type="success" size="small">已符合规范 {{ orgPreview.total - orgPreview.pending }} 条</el-tag>
         <el-tag size="small">涉及 {{ orgGroups.length }} 个目标目录</el-tag>
         <span style="font-size: var(--fs-caption); color: var(--saas-text-sub)">
-          预览为当前时刻快照，确认后将重新扫描执行
+          {{ orgFromCache ? '暂存的预览缓存，确认后重新扫描执行' : '预览快照，确认后重新扫描执行' }}
         </span>
+      </div>
+      <div v-if="orgPreview.scan_stats" class="skip-stats">
+        已过滤：非视频 {{ orgPreview.scan_stats.non_video }} ·
+        类型互斥 {{ orgPreview.scan_stats.media_type_skip }} ·
+        花絮广告 {{ orgPreview.scan_stats.extra_skip }} ·
+        其他规则认领 {{ orgPreview.scan_stats.dedup_seen }}
+      </div>
+      <div v-if="orgCountdown > 0" class="stat-line">
+        ⏱ {{ Math.floor(orgCountdown / 60) }} 分 {{ orgCountdown % 60 }} 秒后自动暂存
+      </div>
+      <div v-if="orgPreview.scan_stats" style="margin-bottom: 8px; font-size: var(--fs-caption); color: var(--saas-text-sub)">
+        已过滤：非视频 {{ orgPreview.scan_stats.non_video }} ·
+        类型互斥 {{ orgPreview.scan_stats.media_type_skip }} ·
+        花絮广告 {{ orgPreview.scan_stats.extra_skip }} ·
+        其他规则认领 {{ orgPreview.scan_stats.dedup_seen }}
+      </div>
+      <div v-if="orgCountdown > 0" style="margin-bottom: 8px; font-size: var(--fs-caption); color: var(--saas-text-sub)">
+        ⏱ {{ Math.floor(orgCountdown / 60) }} 分 {{ orgCountdown % 60 }} 秒后自动暂存
       </div>
 
       <el-collapse v-if="orgGroups.length" v-model="orgCollapseNames" class="mb12">
-        <el-collapse-item :title="`分组摘要（${orgGroups.length} 个目标目录，错位归档在此一眼可见）`" name="groups">
+        <el-collapse-item :title="`分组摘要（${orgGroups.length} 个目标目录）`" name="groups">
           <div v-for="g in orgGroups" :key="g.path"
                style="display: flex; justify-content: space-between; gap: 10px; padding: 3px 4px; font-size: var(--fs-caption); cursor: pointer"
                @click="orgGroupFilter = orgGroupFilter === g.path ? '' : g.path; orgPage = 1">
@@ -1141,6 +1165,7 @@
                      :page-size="orgPageSize" v-model:current-page="orgPage" />
 
       <template #footer>
+        <el-button @click="orgRescan" :loading="startingOrganize">重新扫描</el-button>
         <el-button @click="orgPreview.visible = false">取消</el-button>
         <el-button type="primary" :loading="orgConfirming" @click="confirmRunOrganize">
           🚀 确认执行（{{ orgPreview.pending }} 个文件）
@@ -1543,32 +1568,89 @@ function onTabChange(tab) {
   }
 }
 
+// 预览缓存与自动暂存：与转存分流同一套交互——扫描结果缓存 10 分钟，
+// 期内再次点击直接调出（确认执行仍会重新扫描，文件有变动按最新状态整理）
+const ORG_PREVIEW_CACHE_TTL = 10 * 60 * 1000
+const orgPreviewCache = ref(null)   // { ts, data }
+const orgFromCache = ref(false)
+const orgCountdown = ref(0)         // 弹窗自动暂存倒计时（秒）= 缓存剩余寿命
+let orgPreviewTimer = null
+
+const openOrgPreviewDialog = (data, fromCache) => {
+  orgPreview.value = {
+    visible: true,
+    items: data.items || [],
+    pending: data.pending_count,
+    total: data.total,
+    scan_stats: data.scan_stats || null,
+  }
+  orgPage.value = 1
+  orgSearch.value = ''
+  orgGroupFilter.value = ''
+  orgCollapseNames.value = []
+  orgFromCache.value = !!fromCache
+  startOrgCountdown()
+}
+const startOrgCountdown = () => {
+  stopOrgCountdown()
+  const tick = () => {
+    if (!orgPreviewCache.value) { stopOrgCountdown(); orgPreview.value.visible = false; return }
+    const remainMs = orgPreviewCache.value.ts + ORG_PREVIEW_CACHE_TTL - Date.now()
+    orgCountdown.value = Math.max(0, Math.ceil(remainMs / 1000))
+    if (remainMs <= 0) {
+      // 10 分钟未响应：自动暂存关闭（结果已在缓存，期内再次点击可直接调出）
+      stopOrgCountdown()
+      orgPreview.value.visible = false
+      toast.info('预览已暂存：缓存有效期内再次点击「运行目录整理」可直接调出，无需重新扫描')
+    }
+  }
+  tick()
+  orgPreviewTimer = setInterval(tick, 1000)
+}
+const stopOrgCountdown = () => {
+  if (orgPreviewTimer) { clearInterval(orgPreviewTimer); orgPreviewTimer = null }
+}
+
 async function runOrganize() {
   if (startingOrganize.value) return
-  // 两段式执行：先 dry-run 预览待整理清单，用户在弹窗确认后才真正发起
+  // 缓存命中：10 分钟内的预览结果直接拉起，不重复消耗 115 扫描请求
+  if (orgPreviewCache.value && Date.now() - orgPreviewCache.value.ts < ORG_PREVIEW_CACHE_TTL) {
+    openOrgPreviewDialog(orgPreviewCache.value.data, true)
+    return
+  }
+  // 两段式执行：先 dry-run 预览待整理清单，用户在弹窗确认后才真正发起。
+  // 扫描期间全屏冻结页面，防止误操作
   startingOrganize.value = true
+  showScanLoading()
+  let data = null
   try {
-    const { data } = await api.post('/api/media/organize/preview', {})
-    if (!data.ok) {
-      toast.error(data.msg || '预览失败')
-      return
-    }
-    if (!data.pending_count) {
-      toast.info(`当前没有需要整理的文件（已符合规范 ${data.total} 条）`)
-      return
-    }
-    orgPreview.value = {
-      visible: true,
-      items: data.items || [],
-      pending: data.pending_count,
-      total: data.total,
-    }
-    orgPage.value = 1
-    orgSearch.value = ''
-    orgGroupFilter.value = ''
-    orgCollapseNames.value = []
-  } catch (e) { toast.error(errMsg(e)) }
-  finally { startingOrganize.value = false }
+    const resp = await api.post('/api/media/organize/preview', {})
+    data = resp.data
+  } catch (e) {
+    closeScanLoading()
+    toast.error(errMsg(e))
+    return
+  } finally {
+    closeScanLoading()
+    startingOrganize.value = false
+  }
+  if (!data.ok) {
+    toast.error(data.msg || '预览失败')
+    return
+  }
+  if (!data.pending_count) {
+    toast.info(`当前没有需要整理的文件（已符合规范 ${data.total} 条）`)
+    return
+  }
+  orgPreviewCache.value = { ts: Date.now(), data }
+  openOrgPreviewDialog(data, false)
+}
+
+const orgRescan = async () => {
+  orgPreview.value.visible = false
+  orgPreviewCache.value = null
+  stopOrgCountdown()
+  await runOrganize()
 }
 
 // ---- 整理预览确认弹窗（分层应对大清单：汇总 → 分组摘要 → 搜索/筛选 + 前端分页） ----
@@ -1623,6 +1705,8 @@ const confirmRunOrganize = async () => {
   try {
     const { data } = await api.post('/api/media/organize/run', {})
     orgPreview.value.visible = false
+    orgPreviewCache.value = null  // 执行会改变网盘状态，缓存预览已过时
+    stopOrgCountdown()
     toast.success(data.msg || '目录整理已发起')
     await Promise.all([loadStatus(), loadRecords()])
   } catch (e) { toast.error(errMsg(e)) }
@@ -1847,15 +1931,17 @@ const previewDrawer = ref({ open: false, total: 0, pending_count: 0, items: [] }
 
 async function openPreview() {
   previewing.value = true
+  showScanLoading()
   try {
     const { data } = await api.post('/api/media/organize/preview', {})
     if (!data.ok) {
       toast.error(data.msg || '预览失败')
       return
     }
-    previewDrawer.value = { open: true, total: data.total, pending_count: data.pending_count, items: data.items || [] }
+    previewDrawer.value = { open: true, total: data.total, pending_count: data.pending_count,
+                            items: data.items || [], scan_stats: data.scan_stats || null }
   } catch (e) { toast.error(errMsg(e)) }
-  finally { previewing.value = false }
+  finally { closeScanLoading(); previewing.value = false }
 }
 
 // ---------- 手动搜索 TMDB ----------
@@ -1957,6 +2043,7 @@ onMounted(async () => {
   }, 2500)
 })
 
+onUnmounted(stopOrgCountdown)
 onUnmounted(() => {
   if (typeof window !== 'undefined') {
     window.removeEventListener('resize', onResize)
@@ -1997,7 +2084,7 @@ onUnmounted(() => {
   align-items: center;
   justify-content: center;
   padding: 3px 10px;
-  border-radius: 999px;
+  border-radius: var(--r-pill);
   background: var(--grad-brand);
   color: #fff;
   font-size: var(--fs-caption);
@@ -2030,7 +2117,7 @@ onUnmounted(() => {
 .running-banner {
   margin-top: 12px;
   padding: 12px 14px;
-  border-radius: 10px;
+  border-radius: var(--r-md);
   background: var(--glass-bg-strong);
   border: 1px solid var(--saas-line);
   display: flex;
@@ -2068,13 +2155,13 @@ onUnmounted(() => {
 .commit-bar {
   display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap;
   padding: 10px 12px; background: var(--subcard-bg); border: 1px solid var(--saas-line);
-  border-radius: 10px; margin-bottom: 14px;
+  border-radius: var(--r-md); margin-bottom: 14px;
 }
 .cb-stats { display: flex; align-items: center; flex-wrap: wrap; }
 .cb-stats :deep(.el-radio-group) { display: flex; flex-wrap: wrap; gap: 8px; }
 .cb-stats :deep(.el-radio-button__inner) {
   height: 30px; line-height: 28px; padding: 0 14px;
-  border-radius: 999px !important;
+  border-radius: var(--r-pill) !important;
   border: 1px solid var(--saas-line) !important;
   box-shadow: none !important;
   background: var(--glass-bg-strong);
@@ -2116,7 +2203,7 @@ html.dark .cb-stats :deep(.el-radio-button__original-radio:checked + .el-radio-b
 /* ---- 任务卡片列表 ---- */
 .task-list { display: flex; flex-direction: column; gap: 12px; }
 .task-card {
-  border: 1px solid var(--saas-line); border-radius: 10px; padding: 12px 14px;
+  border: 1px solid var(--saas-line); border-radius: var(--r-md); padding: 12px 14px;
   background: var(--subcard-bg); transition: border-color 0.2s;
 }
 .task-card.is-staged { border-color: rgba(245, 158, 11, .55); background: rgba(245, 158, 11, .07); }
@@ -2148,12 +2235,12 @@ html.dark .staged-banner { color: #fbbf24; }
 /* ---- TMDB 候选卡片 ---- */
 .cand-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(275px, 1fr)); gap: 10px; margin-top: 10px; }
 .cand-item {
-  display: flex; gap: 10px; padding: 9px; border: 1px solid var(--saas-line); border-radius: 10px;
+  display: flex; gap: 10px; padding: 9px; border: 1px solid var(--saas-line); border-radius: var(--r-md);
   cursor: pointer; transition: all 0.15s; background: var(--glass-bg-strong); align-items: flex-start;
 }
 .cand-item:hover { border-color: var(--el-color-primary); box-shadow: 0 2px 10px rgba(79, 107, 255, .18); }
 .cand-item.selected { border: 2px solid #f59e0b; background: rgba(245, 158, 11, .08); }
-.cand-poster { width: 48px; height: 72px; object-fit: cover; border-radius: 6px; flex-shrink: 0; background: var(--saas-hover); }
+.cand-poster { width: 48px; height: 72px; object-fit: cover; border-radius: var(--r-sm); flex-shrink: 0; background: var(--saas-hover); }
 .cand-no-poster { display: flex; align-items: center; justify-content: center; font-size: var(--fs-caption); color: var(--saas-text-sub); }
 .cand-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
 .cand-top { display: flex; align-items: center; gap: 5px; }
@@ -2199,7 +2286,7 @@ html.dark .rule-dialog-hint {
   border-color: rgba(245, 158, 11, 0.35);
   color: #fbbf24;
 }
-.rdh-icon { font-size: 16px; flex-shrink: 0; }
+.rdh-icon { font-size: var(--fs-title); flex-shrink: 0; }
 .red { color: var(--el-color-danger, #ef4444); font-weight: 700; }
 .required-warn {
   font-size: var(--fs-caption);
@@ -2211,7 +2298,7 @@ html.dark .rule-dialog-hint {
   line-height: 1.5;
   background: var(--glass-bg-strong);
   border: 1px solid var(--saas-line);
-  border-radius: 6px;
+  border-radius: var(--r-sm);
   padding: 8px 10px;
 }
 
@@ -2227,7 +2314,7 @@ html.dark .rule-dialog-hint {
   width: 100%;
   min-height: 40px;
 }
-.dir-icon { font-size: 16px; flex-shrink: 0; }
+.dir-icon { font-size: var(--fs-title); flex-shrink: 0; }
 .dir-path-text {
   flex: 1;
   min-width: 0;
@@ -2327,7 +2414,7 @@ html.dark .rule-dialog-hint {
 .manual-results { max-height: 380px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
 .mr-row {
   display: flex; align-items: center; gap: 10px; padding: 8px;
-  border: 1px solid var(--saas-line); border-radius: 10px; background: var(--glass-bg-strong);
+  border: 1px solid var(--saas-line); border-radius: var(--r-md); background: var(--glass-bg-strong);
 }
 .mr-info { flex: 1; min-width: 0; }
 .mr-over {
@@ -2458,7 +2545,7 @@ html.dark .rule-dialog-hint {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 14px;
+  font-size: var(--fs-body);
   font-weight: 600;
   color: var(--el-text-color-primary);
 }
@@ -2466,19 +2553,19 @@ html.dark .rule-dialog-hint {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  font-size: 11px;
+  font-size: var(--fs-caption);
   font-weight: 500;
   color: #d97706;
   background: rgba(217, 119, 6, 0.08);
   padding: 2px 8px;
-  border-radius: 10px;
+  border-radius: var(--r-md);
   border: 1px solid rgba(217, 119, 6, 0.2);
 }
 .schedule-risk-note {
-  font-size: 11px;
+  font-size: var(--fs-caption);
   color: var(--el-text-color-secondary);
   background: rgba(217, 119, 6, 0.04);
-  border-radius: 6px;
+  border-radius: var(--r-sm);
   padding: 6px 10px;
   margin-top: 4px;
   margin-bottom: 12px;
@@ -2489,7 +2576,7 @@ html.dark .rule-dialog-hint {
   color: #2563eb;
   background: rgba(37, 99, 235, 0.06);
   border: 1px solid rgba(37, 99, 235, 0.18);
-  border-radius: 6px;
+  border-radius: var(--r-sm);
   padding: 6px 10px;
   line-height: 1.45;
 }
@@ -2504,7 +2591,7 @@ html.dark .schedule-mutex-note {
   gap: 10px;
 }
 .config-label {
-  font-size: 13px;
+  font-size: var(--fs-caption);
   font-weight: 600;
   color: var(--saas-text-main);
   min-width: 78px;
@@ -2533,7 +2620,7 @@ html.dark .schedule-mutex-note {
   display: inline-flex;
   align-items: center;
   height: 32px;
-  border-radius: 999px;
+  border-radius: var(--r-pill);
   border: 1px solid rgba(126, 146, 196, 0.40);
   background: rgba(255, 255, 255, 0.70);
   box-shadow: 0 1px 3px rgba(31, 45, 90, 0.05);
@@ -2554,7 +2641,7 @@ html.dark .capsule-toggle {
   align-items: center;
   justify-content: center;
   padding: 0 16px;
-  font-size: 13px;
+  font-size: var(--fs-caption);
   font-weight: 500;
   color: var(--saas-text-main, #303133);
   white-space: nowrap;
@@ -2599,13 +2686,13 @@ html.dark .capsule-divider {
   flex-wrap: wrap;
 }
 .fixed-time-tag {
-  font-size: 12px;
+  font-size: var(--fs-caption);
   font-weight: 600;
   padding: 2px 8px;
   height: 26px;
 }
 .empty-tag-tip {
-  font-size: 12px;
+  font-size: var(--fs-caption);
   color: var(--el-text-color-secondary, #909399);
 }
 .time-select-row {
@@ -2625,7 +2712,7 @@ html.dark .capsule-divider {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 12px;
+  font-size: var(--fs-caption);
   font-weight: 600;
   color: var(--el-text-color-regular);
   margin-bottom: 8px;
@@ -2637,7 +2724,7 @@ html.dark .capsule-divider {
   flex-wrap: wrap;
 }
 .prediction-chip {
-  font-size: 11px;
+  font-size: var(--fs-caption);
   font-weight: 500;
 }
 </style>

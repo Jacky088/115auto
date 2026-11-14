@@ -1,4 +1,4 @@
-"""TG Bot 远程指令：通过你配置的 Bot 发送 /status /pause /resume /retry 等指令远程控制系统。
+"""TG Bot 远程指令：通过你配置的 Bot 发送 /status /archive /start /stop /retry 等指令远程控制系统。
 
 实现方式：long polling Telegram getUpdates（不需要公网回调地址），每 3 秒一次。
 只有配置的 Chat ID 发来的指令会被执行（防止陌生人控制）。
@@ -186,13 +186,15 @@ HELP = (
     "/menu — 快捷操作菜单（按钮面板）\n"
     "/add <频道名或链接> on|off — 添加监控频道（on=仅订阅，off=全盘转存；on/off 必填）\n"
     "/sub — 查看订阅；/sub <片名> 搜索 TMDB 点选订阅；/sub del <关键词> 删除\n"
-    "/pause — 暂停转存（暂停处理队列中的任务）\n"
-    "/resume — 恢复转存\n"
+    "/archive — 归档状态；/archive run 立即排队归档（按钮确认）\n"
+    "/start — 启动系统（自动就绪校验）\n"
+    "/stop — 停止系统（两步确认，归档联动关闭）\n"
     "/retry — 重试全部失败任务\n"
     "/backfill [剧名] — 向前补全早期分集（如从 E03 开始追，补全 E01/E02）\n"
     "/backup — 导出并发送当前完整数据备份文件（.json 或 .json.gz）\n"
     "/restore — 发送备份文件后回复 /restore confirm 恢复数据\n"
-    "/help — 显示本帮助"
+    "/help — 显示本帮助\n"
+    "直接发送分享/磁力/电驴链接即可入队转存（无需指令，串行队列执行）"
 )
 
 # 注册到 Telegram 的指令菜单：输入框左侧「菜单」按钮 / 输入 / 时可见
@@ -203,8 +205,9 @@ BOT_MENU_COMMANDS = [
     {"command": "menu", "description": "快捷操作菜单（按钮面板）"},
     {"command": "add", "description": "添加频道：/add @频道 on|off"},
     {"command": "sub", "description": "追剧订阅：查看/添加/删除"},
-    {"command": "pause", "description": "暂停转存"},
-    {"command": "resume", "description": "恢复转存"},
+    {"command": "archive", "description": "归档状态；/archive run 立即归档"},
+    {"command": "start", "description": "启动系统"},
+    {"command": "stop", "description": "停止系统（两步确认）"},
     {"command": "retry", "description": "重试全部失败任务"},
     {"command": "backfill", "description": "向前补全剧集（查找早期分集）"},
     {"command": "backup", "description": "导出完整数据备份文件"},
@@ -290,8 +293,16 @@ def _handle_command(text: str, chat_id: str) -> str:
         return "Bot 暂不支持修改每日限额，请在网页「系统设置」中调整（默认 50）"
     if cmd == "/sub":
         return _handle_sub(args)
-    if cmd in ("/pause", "/resume"):
-        return _do_pause() if cmd == "/pause" else _do_resume()
+    if cmd == "/archive":
+        return _archive_status()
+    if cmd == "/archive run":
+        return "将立即排队执行归档（等待转存/云下载队列排空后自动移动）。确认请点按钮"
+    if cmd == "/start":
+        return _system_start()
+    if cmd == "/stop":
+        return "⚠️ 将停止系统运行：暂停监听与转存，归档功能联动关闭。确认请点按钮，或直接忽略"
+    if cmd == "/stop confirm":
+        return _system_stop()
     if cmd == "/retry":
         n = db.execute(
             "UPDATE transfers SET status='queued', attempts=0, error='', next_retry_at=NULL"
@@ -309,18 +320,51 @@ def _handle_command(text: str, chat_id: str) -> str:
     return f"未知指令 {cmd}\n\n{HELP}"
 
 
-def _do_pause() -> str:
-    db.set_setting("paused", True)
-    logstream.warn("transfer", "已通过 TG 指令暂停转存（/pause）")
-    return "⏸ 已暂停转存（队列保留）。发送 /resume 恢复"
+def _archive_status() -> str:
+    """/archive：归档（定时文件整理）状态一览。"""
+    from ..core import transfer_gate
+    on = bool(db.get_setting("auto_move_enabled", False))
+    gate = transfer_gate.get_exclusive_status()
+    gate_line = "空闲" if not gate.get("busy") else f"{gate.get('mode_label', '任务')}执行中"
+    lines = [f"📦 归档（定时文件整理）", "",
+             f"• 功能：{'已开启' if on else '未开启'}｜门闸：{gate_line}"]
+    if on:
+        lr = db.query("SELECT source_dir, last_run_at, last_moved_count FROM auto_move_rules"
+                      " WHERE last_run_at IS NOT NULL ORDER BY last_run_at DESC LIMIT 1", one=True)
+        if lr:
+            t = time.strftime("%m-%d %H:%M", time.localtime(lr["last_run_at"]))
+            lines.append(f"• 上次执行：{t} · 移动 {lr['last_moved_count']} 个文件（{lr['source_dir']}）")
+        else:
+            lines.append("• 上次执行：尚未执行")
+        nxt = jobs.compute_next_runs()
+        if nxt:
+            lines.append(f"• 下次触发：{nxt[0]}")
+        in_win = transfer_gate.is_in_schedule_window()
+        if not in_win:
+            lines.append("• 当前处于防风控静默时段外，触发将自动顺延")
+    lines.append("")
+    lines.append("发送 /archive run 立即排队归档（按钮确认）")
+    return "\n".join(lines)
 
 
-def _do_resume() -> str:
-    if not db.get_setting("running", False):
-        return "⏹ 系统尚未启动，请先在网页顶栏点「开始运行」"
-    db.set_setting("paused", False)
-    logstream.info("transfer", "已通过 TG 指令恢复转存（/resume）")
-    return "▶ 已恢复转存"
+def _system_start() -> str:
+    """/start：启动系统（复用网页的就绪校验与启动逻辑，行为完全一致）。"""
+    from ..api.manage import system_start
+    try:
+        system_start()
+    except Exception as e:
+        detail = getattr(e, "detail", None) or str(e)
+        return f"无法启动：{detail}"
+    logstream.info("system", "▶ 已通过 TG 指令启动系统（/start）")
+    return "▶ 系统已启动（监控与转存运行中）"
+
+
+def _system_stop() -> str:
+    """/stop：停止系统（与网页停止完全一致：归档功能联动关闭）。"""
+    from ..api.manage import system_stop
+    system_stop()
+    logstream.warn("system", "⏹ 已通过 TG 指令停止系统（/stop）")
+    return "⏹ 系统已停止（归档功能已联动关闭）。发送 /start 可重新启动"
 
 
 def _menu_keyboard() -> dict:
@@ -330,8 +374,8 @@ def _menu_keyboard() -> dict:
          {"text": "💾 115 空间", "callback_data": "c:space"}],
         [{"text": "🕘 最近转存", "callback_data": "c:ls"},
          {"text": "🔄 重试失败任务", "callback_data": "c:retry"}],
-        [{"text": "⏸ 暂停转存" if not db.get_setting("paused", False) else "▶ 恢复转存",
-          "callback_data": "c:toggle_pause"}],
+        [{"text": "▶ 启动系统" if str(db.get_setting("running", False)).lower() != "true"
+                  else "⏹ 停止系统", "callback_data": "c:toggle_running"}],
         [{"text": "🎬 订阅列表", "callback_data": "c:sub"},
          {"text": "📺 频道订阅模式", "callback_data": "c:submode"}],
         [{"text": "🗄 立即导出备份", "callback_data": "c:backup"},
@@ -356,12 +400,45 @@ def _submode_text() -> str:
     return "\n".join(lines)
 
 
+def _bot_enqueue_links(text: str, message_id: int) -> str:
+    """管理员直接发送分享/云下载链接：复用转存管线入队（分类路由/去重/黑名单全量继承）。
+
+    任务进入与网页完全相同的串行队列（单工作器 + 全局 115 串行门闸），不存在并发。
+    来源标记为 tgbot，在「转存归档」记录与 /ls 中可区分。
+    """
+    from ..core import pipeline
+    try:
+        res = pipeline.process_message(channel="tgbot", message_id=int(message_id or 0), text=text)
+    except Exception as e:
+        logstream.error("transfer", f"TG Bot 链接入队失败: {logstream.exc(e)}")
+        return f"入队失败: {str(e)[:120]}"
+    if not res.get("links"):
+        return "未识别到可转存的链接（支持 115 分享 / 磁力 / 电驴 / 迅雷）"
+    parts = []
+    if res.get("queued"):
+        parts.append(f"✅ 已入队 {res['queued']} 个转存任务（串行队列，自动排队执行）")
+    if res.get("duplicates"):
+        parts.append(f"🔁 重复跳过 {res['duplicates']} 个")
+    if res.get("skipped"):
+        parts.append(f"⏭ 未入队 {res['skipped']} 个（未分类或分类路由为跳过，可在消息里附标题帮助分类）")
+    if res.get("blocked"):
+        parts.append("⛔ 命中黑名单拦截")
+    return "\n".join(parts)
+
+
 def _handle_callback(data: str) -> tuple[str, dict]:
     """处理菜单按钮点击，返回 (回复文本, 键盘)。动作执行后菜单会原位刷新。"""
     data = (data or "").strip()
-    if data == "toggle_pause":
-        text = _do_resume() if db.get_setting("paused", False) else _do_pause()
-        return text, _menu_keyboard()
+    if data == "c:toggle_running":
+        running = str(db.get_setting("running", False)).lower() == "true"
+        if not running:
+            return _system_start(), _menu_keyboard()
+        return "⚠️ 确认停止系统？（监听与转存暂停，归档功能联动关闭）",                {"inline_keyboard": [[{"text": "⏹ 确认停止", "callback_data": "s:stopgo"}],
+                                    [{"text": "❌ 取消", "callback_data": "c:status"}]]}
+    if data == "s:stopgo":
+        return _system_stop(), _menu_keyboard()
+    if data == "a:cancel":
+        return "已取消归档", {}
     if data == "c:submode":
         return _submode_text(), _menu_keyboard()
     if data == "c:restore":
@@ -898,6 +975,30 @@ async def bot_command_loop():
                                 except Exception:
                                     pass
                                 continue
+                            # 归档确认：a:run 异步执行（可能耗时数分钟），a:cancel 原位改回执
+                            if (cq.get("data") or "") == "a:cancel":
+                                try:
+                                    await client.post(
+                                        f"https://api.telegram.org/bot{token}/editMessageText",
+                                        json={"chat_id": chat_id,
+                                              "message_id": cq.get("message", {}).get("message_id"),
+                                              "text": "已取消归档"})
+                                except Exception:
+                                    pass
+                                continue
+                            if (cq.get("data") or "") == "a:run":
+                                res = await jobs.execute_auto_move(trigger="manual")
+                                reply = ("✅ 已发起排队归档：等待转存/云下载队列排空后自动移动，"
+                                         "完成后推送明细") if res.get("ok") else (res.get("msg") or "归档发起失败")
+                                try:
+                                    await client.post(
+                                        f"https://api.telegram.org/bot{token}/editMessageText",
+                                        json={"chat_id": chat_id,
+                                              "message_id": cq.get("message", {}).get("message_id"),
+                                              "text": reply})
+                                except Exception:
+                                    pass
+                                continue
                             try:
                                 reply, kb = await asyncio.to_thread(
                                     _handle_callback, cq.get("data") or "")
@@ -974,6 +1075,21 @@ async def bot_command_loop():
                             continue
                         text = (msg.get("text") or "").strip()
                         if not text.startswith("/"):
+                            # 管理员直接发送链接（115 分享/磁力/电驴/迅雷）：自动入队转存。
+                            # 复用转存管线与串行队列，不引入任何并发；无链接的消息维持静默
+                            from ..core import extractor as _ext
+                            if _ext.extract(text):
+                                try:
+                                    reply = await asyncio.to_thread(
+                                        _bot_enqueue_links, text, msg.get("message_id") or 0)
+                                except Exception as e:
+                                    reply = f"入队失败: {e}"
+                                try:
+                                    await client.post(
+                                        f"https://api.telegram.org/bot{token}/sendMessage",
+                                        json={"chat_id": chat_id, "text": reply})
+                                except Exception:
+                                    pass
                             continue
                         try:
                             if text.lower().startswith("/backup"):
@@ -1003,6 +1119,23 @@ async def bot_command_loop():
                                 # /add 需要异步做频道可访问性校验，单独处理
                                 reply = await add_channel_flow(text.split(None, 1)[1]) \
                                     if len(text.split(None, 1)) > 1 else USAGE_ADD
+                            elif text.lower().startswith("/archive"):
+                                parts_a = text.split()
+                                if len(parts_a) > 1 and parts_a[1].lower() == "run":
+                                    reply = ("将立即排队执行归档：等待转存/云下载队列排空后自动移动。"
+                                             "确认请点按钮")
+                                    kb = {"inline_keyboard": [
+                                        [{"text": "✅ 确认归档", "callback_data": "a:run"}],
+                                        [{"text": "❌ 取消", "callback_data": "a:cancel"}]]}
+                                    try:
+                                        await client.post(
+                                            f"https://api.telegram.org/bot{token}/sendMessage",
+                                            json={"chat_id": chat_id, "text": reply,
+                                                  "reply_markup": kb})
+                                    except Exception:
+                                        pass
+                                    continue
+                                reply = await asyncio.to_thread(_handle_command, "/archive", chat_id)
                             elif text.lower().startswith("/backfill"):
                                 arg = text.split(None, 1)[1].strip() if len(text.split(None, 1)) > 1 else ""
                                 reply, kb = await asyncio.to_thread(_backfill_candidates, arg)

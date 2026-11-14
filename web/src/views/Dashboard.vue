@@ -388,7 +388,7 @@ const onResize = () => { if (pieChart) pieChart.resize(); if (spaceChart) spaceC
 }
 .module-chips { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
 .m-chip {
-  padding: 3px 14px; border-radius: 999px; font-size: var(--fs-caption); cursor: pointer; user-select: none;
+  padding: 3px 14px; border-radius: var(--r-pill); font-size: var(--fs-caption); cursor: pointer; user-select: none;
   border: 1px solid var(--saas-line); color: var(--saas-text-sub);
   background: var(--glass-bg-strong); transition: all .15s ease;
 }

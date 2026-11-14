@@ -21,6 +21,7 @@ from backend import database as db
 from backend.core import transfer_gate
 from backend.pan115 import client as pan
 from backend.worker import jobs
+from backend.api import manage
 
 PASS, FAIL = [], []
 
@@ -478,6 +479,318 @@ def test_old_db_migration_adds_media_type():
     db.init()
 
 
+def test_dir_match_movie_via_parent_name():
+    """云下载电影：中文标题在任务目录名上、文件纯英文 → 按目录名匹配认领真媒体，广告垃圾全部拦截。"""
+    mock_client = MagicMock()
+    moved: list = []
+    task_dir_name = ("【更多高清影视请访问 www.5BT0.com】 奥德赛[简繁英字幕]."
+                     "The.Odyssey.2026.2160p.UHD.BluRay.x265.10bit-QuickIO")
+
+    def fake_list_entries(cid, limit=2000):
+        if cid == 100:  # /云下载 根：任务目录
+            return [{"id": "150", "name": task_dir_name, "is_dir": True}]
+        if cid == 150:  # 任务目录内
+            return [
+                {"id": "mv", "name": "The.Odyssey.2026.2160p.UHD.BluRay.x265.10bit.HEVC.HDR.DTS-HD.MA.5.1-QuickIO.mkv",
+                 "is_dir": False, "size": 21 * 1024 * 1024 * 1024},
+                {"id": "j1", "name": "【更多无水印高品质资源请访问 www.Butailing.com】 .MKV",
+                 "is_dir": False, "size": 637000},
+                {"id": "j2", "name": "【更多无水印高品质资源请访问 www.Butailing.com】 .MP4",
+                 "is_dir": False, "size": 296000},
+                {"id": "j3", "name": "【更多无水印高品质资源请访问 www.Butailing.com】 .DOC",
+                 "is_dir": False, "size": 296000},
+            ]
+        if cid == 300:  # /电影 总库
+            return [{"id": "301", "name": "奥德赛", "is_dir": True}]
+        return []
+
+    with patch.object(pan, "_get_client", return_value=mock_client), \
+         patch.object(pan, "mkdirs", side_effect=lambda p: {"/云下载": 100, "/电影": 300}.get(p, 0)), \
+         patch.object(pan, "list_file_names", return_value=set()), \
+         patch("time.sleep", return_value=None), \
+         patch.object(pan, "list_entries", side_effect=fake_list_entries):
+        cnt, samples = pan.move_matched_files_for_rule(
+            "/云下载", "/电影", mode="library", scan_subdirs=True,
+            dedup_by_episode=False, moved_out=moved,
+            rule_media_type="movie", match_by_dir=True)
+        called = mock_client.fs_move.call_args
+    check("按目录名匹配认领真媒体电影", cnt == 1, f"cnt={cnt}")
+    check("广告垃圾文件全部拦截", called[0][0] == ["mv"], str(called))
+    check("归档目标为电影库对应目录", moved and moved[0]["dest_path"] == "/电影/奥德赛", str(moved))
+    check("账本源路径含任务目录名", "奥德赛" in moved[0]["from_path"], str(moved))
+
+
+def test_dir_match_tv_season_routing():
+    """云下载电视剧：目录名匹配剧名，内层文件按 S01E05 定季进已存在的 Season 1。"""
+    mock_client = MagicMock()
+    moved: list = []
+    task_dir_name = ("【高清剧集网发布 www.BPHDTV.com】 小城良方[全29集][国语音轨+简繁英字幕]."
+                     "Small.Town.Remedy.S01.2026.2160p.IQiyi-ColorWEB")
+
+    def fake_list_entries(cid, limit=2000):
+        if cid == 100:
+            return [{"id": "150", "name": task_dir_name, "is_dir": True}]
+        if cid == 150:
+            return [
+                {"id": f"e{n}", "name": f"Small.Town.Remedy.S01E{n:02d}.2026.2160p.IQ.WEB-DL.H265.DDP5.1-ColorWEB.mkv",
+                 "is_dir": False, "size": 1024 * 1024 * 1024}
+                for n in (1, 3, 5)
+            ]
+        if cid == 200:  # /电视剧 总库
+            return [{"id": "201", "name": "小城良方", "is_dir": True}]
+        if cid == 201:  # 剧目目录（已有 Season 1）
+            return [{"id": "210", "name": "Season 1", "is_dir": True}]
+        return []
+
+    with patch.object(pan, "_get_client", return_value=mock_client), \
+         patch.object(pan, "mkdirs", side_effect=lambda p: {"/云下载": 100, "/电视剧": 200}.get(p, 0)), \
+         patch.object(pan, "list_file_names", return_value=set()), \
+         patch("time.sleep", return_value=None), \
+         patch.object(pan, "list_entries", side_effect=fake_list_entries):
+        cnt, samples = pan.move_matched_files_for_rule(
+            "/云下载", "/电视剧", mode="library", scan_subdirs=True,
+            dedup_by_episode=True, moved_out=moved,
+            rule_media_type="tv", match_by_dir=True, season_folder=True)
+        called = mock_client.fs_move.call_args
+    check("按目录名匹配认领剧集 3 个文件", cnt == 3, f"cnt={cnt}")
+    check("按文件名 S01E0x 进已存在的 Season 1", called and called[1].get("pid") == 210, str(called))
+    check("账本目标路径含 Season 1", moved and all("Season 1" in m["dest_path"] for m in moved), str(moved))
+
+
+def test_dir_match_movie_guard_skips_marked_dir():
+    """目录名或目录内文件带集数标识 → movie 规则整组跳过（剧集交给剧集规则）。"""
+    mock_client = MagicMock()
+
+    def fake_list_entries(cid, limit=2000):
+        if cid == 100:
+            return [{"id": "150", "name": "某剧名.S01.2026.2160p", "is_dir": True}]
+        if cid == 150:
+            return [{"id": "e1", "name": "Some.Show.S01E01.2026.2160p.mkv", "is_dir": False,
+                     "size": 1024 * 1024 * 1024}]
+        if cid == 300:
+            return [{"id": "301", "name": "某剧名", "is_dir": True}]
+        return []
+
+    with patch.object(pan, "_get_client", return_value=mock_client), \
+         patch.object(pan, "mkdirs", side_effect=lambda p: {"/云下载": 100, "/电影": 300}.get(p, 0)), \
+         patch.object(pan, "list_file_names", return_value=set()), \
+         patch("time.sleep", return_value=None), \
+         patch.object(pan, "list_entries", side_effect=fake_list_entries):
+        cnt, plan = pan.move_matched_files_for_rule(
+            "/云下载", "/电影", mode="library", scan_subdirs=True,
+            dedup_by_episode=False, dry_run=True,
+            rule_media_type="movie", match_by_dir=True)
+    check("带集数标识的任务目录被 movie 规则整组跳过", cnt == 0 and mock_client.fs_move.call_count == 0, str(plan))
+
+
+def test_dir_match_skips_root_files_and_ambiguous():
+    """源目录根部散落的文件不参与目录匹配；两库同名的裸目录按歧义拦截。"""
+    mock_client = MagicMock()
+
+    def fake_list_entries(cid, limit=2000):
+        if cid == 100:
+            # 根部散落文件三种形态：有中文名 / 纯英文无标识 / 纯英文带集数标识——一律不参与
+            return [
+                {"id": "root1", "name": "斗罗大陆.mkv", "is_dir": False, "size": 1024 * 1024 * 1024},
+                {"id": "root2", "name": "a.mp4", "is_dir": False, "size": 1024 * 1024 * 1024},
+                {"id": "root3", "name": "aS1E01.mp4", "is_dir": False, "size": 1024 * 1024 * 1024},
+                {"id": "150", "name": "斗罗大陆", "is_dir": True},
+            ]
+        if cid == 150:
+            return [{"id": "in1", "name": "斗罗大陆.mkv", "is_dir": False, "size": 1024 * 1024 * 1024}]
+        if cid == 300:
+            return [{"id": "301", "name": "斗罗大陆", "is_dir": True}]
+        return []
+
+    with patch.object(pan, "_get_client", return_value=mock_client), \
+         patch.object(pan, "mkdirs", side_effect=lambda p: {"/云下载": 100, "/电影": 300}.get(p, 0)), \
+         patch.object(pan, "list_file_names", return_value=set()), \
+         patch("time.sleep", return_value=None), \
+         patch.object(pan, "list_entries", side_effect=fake_list_entries):
+        cnt, plan = pan.move_matched_files_for_rule(
+            "/云下载", "/电影", mode="library", scan_subdirs=True,
+            dedup_by_episode=False, dry_run=True, match_by_dir=True,
+            ambiguous_kws={"斗罗大陆"})
+    check("根部散落文件不参与目录匹配", plan["items"] == [], str(plan))
+    check("两库同名裸目录按歧义拦截", plan["skip_ambiguous"] == 1
+          and plan["skip_ambiguous_samples"] == ["斗罗大陆.mkv"], str(plan))
+
+
+def test_cloud_download_dirs_from_routes():
+    """云下载目录集合：offline_dir 优先，未设置回落 target_dir，skip/空排除并归一化。"""
+    db.execute("DELETE FROM routes")
+    db.execute("INSERT INTO routes(category,target_dir,offline_dir) VALUES('电视剧','/电视剧','/云下载')")
+    db.execute("INSERT INTO routes(category,target_dir,offline_dir) VALUES('电影','/电影','')")
+    db.execute("INSERT INTO routes(category,target_dir,offline_dir) VALUES('少儿','skip','')")
+    dirs = jobs.cloud_download_dirs()
+    check("offline_dir 优先", "/云下载" in dirs, str(dirs))
+    check("未设置 offline_dir 回落 target_dir", "/电影" in dirs, str(dirs))
+    check("skip 分类被排除", "/少儿" not in dirs and len(dirs) == 2, str(dirs))
+    db.execute("DELETE FROM routes")
+
+
+def test_execute_skips_stale_dir_match_rule():
+    """云下载目录配置漂移：dir_match 规则源目录失效 → 本轮跳过并标注，不带着错误语义执行。"""
+    db.execute("DELETE FROM auto_move_rules")
+    db.execute("DELETE FROM organized_records WHERE action='auto_move'")
+    db.insert("INSERT INTO auto_move_rules(source_dir,target_dir,keyword,mode,dir_match,enabled,created_at,last_run_at,last_moved_count)"
+              " VALUES('/某电影目录','/电影','','library',1,1,?,NULL,0)", (time.time(),))
+    db.set_setting("running", True)
+    db.set_setting("auto_move_enabled", True)
+    db.set_setting("auto_move_notify", False)
+
+    async def scenario():
+        with patch.object(transfer_gate, "try_begin_exclusive", return_value=(True, "")), \
+             patch.object(transfer_gate, "prepare_and_drain_transfers", fake_drain), \
+             patch.object(pan, "move_matched_files_for_rule", side_effect=AssertionError("不应调用移动")), \
+             patch.object(jobs, "notify", new=lambda *a, **k: None):
+            return await jobs.execute_auto_move(trigger="manual")
+
+    res = asyncio.run(scenario())
+    d = (res.get("details") or [{}])[0]
+    check("失效规则本轮跳过且不触发移动", res.get("total_moved") == 0
+          and "云下载模式未生效" in (d.get("error") or ""), str(res))
+    db.set_setting("running", False)
+    db.set_setting("auto_move_enabled", False)
+    db.execute("DELETE FROM auto_move_rules")
+
+
+def test_save_dir_match_requires_cloud_dir():
+    """save 端点校验：dir_match 开启时源目录必须是配置的云下载目录。"""
+    db.execute("DELETE FROM routes")
+    db.execute("INSERT INTO routes(category,target_dir,offline_dir) VALUES('电视剧','/电视剧','/云下载')")
+    from fastapi import HTTPException
+    # 源目录不是云下载目录 → 拒绝
+    try:
+        manage.save_auto_move_rule({"source_dir": "/最近接收", "target_dir": "/电视剧",
+                                    "dir_match": 1})
+        raise AssertionError("应当拒绝")
+    except HTTPException as e:
+        check("非云下载目录被拒绝并给出指引", e.status_code == 400 and "云下载目录" in e.detail, str(e.detail))
+    # 源目录是云下载目录 → 通过
+    res = manage.save_auto_move_rule({"source_dir": "/云下载", "target_dir": "/电视剧",
+                                      "mode": "library", "dir_match": 1})
+    check("云下载目录允许开启", res.get("ok") is True)
+    row = db.query("SELECT dir_match FROM auto_move_rules ORDER BY id DESC", one=True)
+    check("dir_match 落库", row["dir_match"] == 1)
+    db.execute("DELETE FROM auto_move_rules")
+    db.execute("DELETE FROM routes")
+
+
+def test_dir_match_dedup_same_name_and_sha1():
+    """云下载目录模式查重：同名跳过；目标库被刮削改名后按 sha1 内容级跳过；全新文件正常认领。"""
+    mock_client = MagicMock()
+    moved: list = []
+
+    def fake_list_entries(cid, limit=2000):
+        if cid == 100:
+            return [{"id": "150", "name": "【广告www..】 奥德赛[简繁英字幕].The.Odyssey.2026", "is_dir": True}]
+        if cid == 150:
+            return [
+                {"id": "dup", "name": "The.Odyssey.2026.2160p.mkv", "is_dir": False,
+                 "size": 1024 * 1024 * 1024, "sha1": "shaA"},
+                {"id": "renamed", "name": "The.Odyssey.2026.REPACK.2160p.mkv", "is_dir": False,
+                 "size": 1024 * 1024 * 1024, "sha1": "shaB"},
+                {"id": "fresh", "name": "The.Odyssey.2026.NEWROUND.2160p.mkv", "is_dir": False,
+                 "size": 1024 * 1024 * 1024, "sha1": "shaC"},
+            ]
+        if cid == 300:
+            return [{"id": "301", "name": "奥德赛", "is_dir": True}]
+        if cid == 301:  # 目标剧目目录：已有同名旧文件 + 已被刮削改名的同内容文件
+            return [
+                {"id": "x1", "name": "The.Odyssey.2026.2160p.mkv", "is_dir": False, "sha1": "shaA"},
+                {"id": "x2", "name": "奥德赛 (2026) [tmdbid=12345].mkv", "is_dir": False, "sha1": "shaB"},
+            ]
+        return []
+
+    def fake_list_file_names(cid, limit=2000):
+        if cid == 301:
+            return {"The.Odyssey.2026.2160p.mkv"}  # 名称查重命中的同名文件
+        return set()
+
+    with patch.object(pan, "_get_client", return_value=mock_client),          patch.object(pan, "mkdirs", side_effect=lambda p: {"/云下载": 100, "/电影": 300}.get(p, 0)),          patch.object(pan, "list_file_names", side_effect=fake_list_file_names),          patch("time.sleep", return_value=None),          patch.object(pan, "list_entries", side_effect=fake_list_entries):
+        cnt, samples = pan.move_matched_files_for_rule(
+            "/云下载", "/电影", mode="library", scan_subdirs=True,
+            dedup_by_episode=False, moved_out=moved, match_by_dir=True,
+            rule_media_type="movie")
+        called = mock_client.fs_move.call_args
+    check("同名文件按名称查重跳过", cnt == 1, f"cnt={cnt}")
+    check("被刮削改名的同内容文件按 sha1 跳过", called and called[0][0] == ["fresh"], str(called))
+    check("仅全新文件被归档", moved and moved[0]["name"].endswith("NEWROUND.2160p.mkv"), str(moved))
+
+def test_dry_run_stats_always_dict_including_dedup():
+    """dry_run 任何路径（含早退与查重）都必须返回统计 dict——回归：dedup 计数未初始化导致预览全挂。"""
+    mock_client = MagicMock()
+
+    # 场景 1：目录匹配 + 查重（同名 + sha1 各一）→ skip_dedup=2，且不抛 UnboundLocalError
+    def fake_list_entries(cid, limit=2000):
+        if cid == 100:
+            return [{"id": "150", "name": "【广告www..】 奥德赛[简繁英字幕].The.Odyssey.2026", "is_dir": True}]
+        if cid == 150:
+            return [
+                {"id": "dup", "name": "The.Odyssey.2026.2160p.mkv", "is_dir": False,
+                 "size": 1024 * 1024 * 1024, "sha1": "shaA"},
+                {"id": "renamed", "name": "The.Odyssey.2026.REPACK.mkv", "is_dir": False,
+                 "size": 1024 * 1024 * 1024, "sha1": "shaB"},
+            ]
+        if cid == 300:
+            return [{"id": "301", "name": "奥德赛", "is_dir": True}]
+        if cid == 301:
+            return [
+                {"id": "x1", "name": "The.Odyssey.2026.2160p.mkv", "is_dir": False, "sha1": "shaA"},
+                {"id": "x2", "name": "奥德赛 (2026) [tmdbid=1].mkv", "is_dir": False, "sha1": "shaB"},
+            ]
+        return []
+
+    def fake_lfn(cid, limit=2000):
+        if cid == 301:
+            return {"The.Odyssey.2026.2160p.mkv"}
+        return set()
+
+    with patch.object(pan, "_get_client", return_value=mock_client),          patch.object(pan, "mkdirs", side_effect=lambda p: {"/云下载": 100, "/电影": 300}.get(p, 0)),          patch.object(pan, "list_file_names", side_effect=fake_lfn),          patch("time.sleep", return_value=None),          patch.object(pan, "list_entries", side_effect=fake_list_entries):
+        cnt, plan = pan.move_matched_files_for_rule(
+            "/云下载", "/电影", mode="library", scan_subdirs=True,
+            dedup_by_episode=False, dry_run=True, match_by_dir=True,
+            rule_media_type="movie")
+    check("dry_run 查重路径返回统计 dict", isinstance(plan, dict), str(type(plan)))
+    check("查重跳过计数 correct", plan.get("skip_dedup") == 2, str(plan))
+
+    # 场景 2：早退路径（总库无任何中文子目录）→ 仍返回统计 dict 且全 0
+    with patch.object(pan, "_get_client", return_value=mock_client),          patch.object(pan, "mkdirs", side_effect=lambda p: {"/云下载": 100, "/电影": 300}.get(p, 0)),          patch("time.sleep", return_value=None),          patch.object(pan, "list_entries", side_effect=lambda cid, limit=2000: (
+             [{"id": "150", "name": "【广告www..】 奥德赛.2026", "is_dir": True}] if cid == 100 else
+             [{"id": "301", "name": "English.Only.2026", "is_dir": True}] if cid == 300 else [])):
+        cnt2, plan2 = pan.move_matched_files_for_rule(
+            "/云下载", "/电影", mode="library", scan_subdirs=True,
+            dedup_by_episode=False, dry_run=True, match_by_dir=True,
+            rule_media_type="movie")
+    check("dry_run 早退路径返回统计 dict", isinstance(plan2, dict), str(type(plan2)))
+    check("早退路径统计全 0", plan2.get("items") == [] and plan2.get("skip_dedup") == 0
+          and plan2.get("skip_movie") == 0, str(plan2))
+
+
+def test_collect_conflicts_dedupes_targets():
+    """回归：同一总库被两条规则指向（目标重复）时，不得把整库剧名误判为两库同名。"""
+    def fake_list_entries(cid, limit=2000):
+        if cid == 201:  # /电视剧：斗罗大陆 + 折月亮
+            return [{"id": "a1", "name": "斗罗大陆", "is_dir": True},
+                    {"id": "a2", "name": "折月亮 (2026)", "is_dir": True}]
+        if cid == 300:  # /电影：奥德赛 + 斗罗大陆剧场版（kw 不同）
+            return [{"id": "b1", "name": "奥德赛 (2026)", "is_dir": True},
+                    {"id": "b2", "name": "斗罗大陆", "is_dir": True}]
+        return []
+
+    with patch.object(pan, "mkdirs", side_effect=lambda p: {"/电视剧": 201, "/电影": 300}.get(p, 0)),          patch.object(pan, "list_entries", side_effect=fake_list_entries):
+        # 目标列表含重复（电视剧/电影/电视剧/电影——四条规则的真实形态）
+        amb = pan.collect_library_keyword_conflicts(
+            ["/电视剧", "/电影", "/电视剧", "/电影"], fuzzy_t2s=False)
+        check("真两库同名照常进歧义集", "斗罗大陆" in amb, str(amb))
+        check("单库独有的名字不被误判", "奥德赛" not in amb and "折月亮(2026)" not in amb
+              and "折月亮2026" not in amb, str(amb))
+        # 去重后仅剩一个库 → 无歧义
+        check("单库重复列出不再产生歧义",
+              pan.collect_library_keyword_conflicts(["/电视剧", "/电视剧"], fuzzy_t2s=False) == set())
+
+
 print("\n=== 整理账本与预览功能测试 ===")
 test_migration_undo_note_column()
 test_old_db_migration_adds_undo_note()
@@ -494,6 +807,16 @@ test_dry_run_reports_movie_and_ambiguous_skips()
 test_collect_library_keyword_conflicts()
 test_execute_passes_media_type_and_ambiguous()
 test_old_db_migration_adds_media_type()
+test_dir_match_movie_via_parent_name()
+test_dir_match_tv_season_routing()
+test_dir_match_movie_guard_skips_marked_dir()
+test_dir_match_skips_root_files_and_ambiguous()
+test_cloud_download_dirs_from_routes()
+test_execute_skips_stale_dir_match_rule()
+test_save_dir_match_requires_cloud_dir()
+test_dir_match_dedup_same_name_and_sha1()
+test_dry_run_stats_always_dict_including_dedup()
+test_collect_conflicts_dedupes_targets()
 
 print(f"\n通过 {len(PASS)} 项，失败 {len(FAIL)} 项")
 if FAIL:

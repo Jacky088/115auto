@@ -26,6 +26,25 @@
   --fs-page: 18px;
   --fs-stat: 26px;
 
+  /* 控件高度阶梯（全站唯一来源）：sm=紧凑/表格内  md=small 按钮/工具栏  btn=标准按钮  lg=移动端触控 */
+  --ctl-h-sm: 24px;
+  --ctl-h-md: 28px;
+  --ctl-h-btn: 32px;
+  --ctl-h-lg: 34px;
+
+  /* 圆角阶梯：sm=小元素  md=按钮/输入（默认）  lg=卡片  pill=胶囊标签 */
+  --r-sm: 6px;
+  --r-md: 10px;
+  --r-lg: 14px;
+  --r-pill: 999px;
+
+  /* 间距阶梯：1=元素内  2=相关元素间  3=块内行距  4=块间  5=区块间 */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+
   /* 品牌渐变（logo/主按钮/激活菜单/强调元素共用） */
   --grad-brand: linear-gradient(135deg, #4f6bff 0%, #8b5cf6 100%);
   --grad-brand-hover: linear-gradient(135deg, #607aff 0%, #9d70f8 100%);
@@ -137,8 +156,24 @@ html.dark .saas-hero-bg .el-card { background: var(--glass-bg) !important; }
   flex-shrink: 0;
   vertical-align: middle;
 }
+/* 按钮图标与文字统一留 8px 间距：兼容「裸文本」与「span 包裹」两种写法、
+   前置/后置图标均覆盖（EP 官方规则只覆盖 span 包裹写法，裸文本会贴死）；
+   目录胶囊 dir-btn 的贴左样式由其 scoped 规则覆盖回 0 */
+.el-button .el-icon:not(:last-child) { margin-right: var(--sp-2); }
+.el-button span + .el-icon { margin-left: var(--sp-2); }
+.el-button .el-icon + span { margin-left: 0; }
+/* 扫描冻结遮罩（composables/scanLoading）：深底白字，任何主题背景下都可读 */
+.scan-loading-mask.el-loading-mask { background: rgba(15, 18, 34, 0.72); }
+.scan-loading-mask .el-loading-spinner .el-loading-text {
+  color: #fff;
+  font-size: 15px;
+  letter-spacing: 1px;
+  margin-top: 12px;
+}
+.scan-loading-mask .el-loading-spinner .path { stroke: #fff; }
+
 /* small 变体默认 12px，与正文/表格不一致 → 统一到 body，并相应加高保持呼吸感 */
-.el-button--small { --el-button-size: 28px; height: 28px; font-size: var(--fs-body); }
+.el-button--small { --el-button-size: var(--ctl-h-md); height: var(--ctl-h-md); font-size: var(--fs-body); }
 .el-table { font-size: var(--fs-body); }
 .el-table--small { font-size: var(--fs-body); }
 /* 辅助文字工具类：替代模板里散落的 style="font-size:12px" */
@@ -1298,7 +1333,7 @@ html.dark .dp-radio { border-color: #4c5b7d; }
 @media (max-width: 768px) {
   /* 提高点击目标：text 按钮（删除/详情/放行/重试等）最小 36px 高，带背景便于辨识 */
   .el-table .el-button.is-text { min-height: 34px; padding: 6px 9px; }
-  .el-button--small { height: 34px; padding: 8px 12px; }
+  .el-button--small { height: var(--ctl-h-lg); padding: 8px 12px; }
   .el-button.is-text { min-height: 34px; }
   .el-table .el-button + .el-button { margin-left: 4px; }
   /* 抽屉菜单项加高（手指点击） */
@@ -1359,4 +1394,43 @@ html.dark .dp-radio { border-color: #4c5b7d; }
 }
 .highlight-pulse {
   animation: pulse-item-highlight 1.6s ease-out;
+}
+
+
+/* ================== 公共组件类（设计语言：视图只调用，不再各自定义） ==================
+   注：.toolbar 已在上方 L896 定义（含移动端变体），此处不重复 */
+
+/* 统计/说明行：过滤统计、倒计时、来源等辅助信息 */
+.stat-line {
+  font-size: var(--fs-caption);
+  color: var(--saas-text-sub);
+  line-height: 1.6;
+  margin-bottom: var(--sp-2);
+}
+/* 表单内说明行（不换行场景用 line-height 收紧） */
+.hint-line {
+  font-size: var(--fs-caption);
+  color: var(--saas-text-sub);
+  line-height: 1.4;
+}
+/* 过滤统计块（预览弹窗：解释哪些文件被哪层拦截） */
+.skip-stats {
+  font-size: var(--fs-caption);
+  color: var(--saas-text-sub);
+  margin-bottom: var(--sp-2);
+}
+
+/* 目录胶囊按钮（转存目录页与规则弹窗共用）：标准按钮高度 + 输入框圆角 */
+.dir-btn {
+  width: 100%;
+  height: var(--ctl-h-btn);
+  justify-content: flex-start;
+  text-align: left;
+  font-family: inherit;
+  font-size: var(--fs-body);
+  border-radius: var(--r-md);
+  padding: 0 var(--sp-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }

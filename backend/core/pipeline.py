@@ -21,7 +21,7 @@ def process_message(channel: str, message_id: int, text: str,
     与目标目录（同剧不同帖标题格式不一，各自分类会漂移），并绕过订阅过滤。
     """
     result = {"channel": channel, "message_id": message_id, "links": 0, "queued": 0,
-              "duplicates": 0, "blocked": False}
+              "duplicates": 0, "blocked": False, "skipped": 0}
 
     # 1. 消息去重
     cur = db.execute(
@@ -191,6 +191,7 @@ def process_message(channel: str, message_id: int, text: str,
                            f"[{channel}] {label}: {code} → {cat_i or '未分类'} → {target}{suffix}")
         else:
             reason = "未分类，且动作设为「跳过」" if not cat_i else f"「{cat_i}」的目录设为「跳过」"
+            result["skipped"] += 1
             logstream.info("pipeline", f"[{channel}] 跳过 {code}（{reason}）")
 
     # 4.7 订阅进度：命中即更新「最近命中」；只有本次真实处理（入队/重复记录）才推进

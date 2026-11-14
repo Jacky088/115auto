@@ -62,7 +62,7 @@
               </el-tag>
               <span class="tip">{{ ub.connected
                 ? 'TG 账号监听运行中（实时接收私密频道消息）'
-                : '尚未登录：请到「账号管理」完成 Userbot 登录，否则接入方式为 Userbot 的频道无法收到消息' }}</span>
+                : '未登录 Userbot，相关频道无法收消息' }}</span>
             </div>
           </el-form-item>
 
@@ -862,8 +862,8 @@ const loadUb = async () => {
 watch(() => f.value.tg_mode, (v) => { if (v && v !== 'polling') loadUb() })
 
 const tgModeTip = computed(() => ({
-  polling: '当前模式：网页轮询——只抓取接入方式为「网页轮询」的频道（公开频道，免 TG 账号）',
-  userbot: '当前模式：Userbot——用 TG 小号实时监听接入方式为「Userbot」的频道（含私密频道）',
+  polling: '网页轮询：仅抓取公开频道，免 TG 账号',
+  userbot: 'Userbot：TG 小号实时监听，支持私密频道',
   both: '当前模式：两者——按每个频道自身的接入方式分流处理，互不影响',
 }[f.value.tg_mode] || ''))
 
@@ -926,7 +926,7 @@ const validateForm = () => {
   // 2. 分享体积下限 (>= 0)
   const ms = Number(f.value.min_size_gb)
   if (isNaN(ms) || ms < 0 || ms > 1000) {
-    ElMessage.warning('分享体积下限必须是大于等于 0 的有效数字（GB）')
+    ElMessage.warning('分享体积下限需为 ≥0 的数字')
     return false
   }
 
@@ -939,12 +939,12 @@ const validateForm = () => {
       return false
     }
     if (sStart === sEnd) {
-      ElMessage.warning('定时计划的开始时间与结束时间不能相同（如需全天候运行请关闭定时计划开关）')
+      ElMessage.warning('计划起止时间不能相同')
       return false
     }
     const jm = Number(f.value.schedule_jitter_min)
     if (!Number.isInteger(jm) || jm < 0 || jm > 30) {
-      ElMessage.warning('开工随机扰动必须是 0 ~ 30 之间的整数（分钟）')
+      ElMessage.warning('随机扰动需为 0~30 的整数')
       return false
     }
   }
@@ -1105,7 +1105,7 @@ onMounted(load)
   padding: 11px 18px;
   background: var(--subcard-head-bg);
   border-bottom: 1px solid var(--saas-line);
-  font-weight: 700; font-size: 15px; line-height: 1.35; color: var(--saas-text-main);
+  font-weight: 700; font-size: var(--fs-body); line-height: 1.35; color: var(--saas-text-main);
   display: flex; align-items: center; gap: 9px;
 }
 .section-title::before {
@@ -1183,10 +1183,10 @@ onMounted(load)
   .range-row :deep(.el-input-number) { width: 140px; }
   .input-btn-row :deep(.el-input) { flex: 1 1 160px; }
 }
-.bundle-est-box { width: 100%; background: #f8f9fb; border: 1px solid #ebeef5; border-radius: 6px; padding: 8px 12px; }
-.bundle-est-metrics { font-size: 13px; color: #303133; line-height: 1.6; }
+.bundle-est-box { width: 100%; background: #f8f9fb; border: 1px solid #ebeef5; border-radius: var(--r-sm); padding: 8px 12px; }
+.bundle-est-metrics { font-size: var(--fs-caption); color: #303133; line-height: 1.6; }
 .bundle-opts { width: 100%; display: flex; flex-direction: column; gap: 8px; }
-.bundle-label { font-size: 13px; color: var(--label-secondary, #606266); }
+.bundle-label { font-size: var(--fs-caption); color: var(--label-secondary, #606266); }
 .bundle-capsule-radios {
   display: inline-flex;
   align-items: center;
@@ -1230,7 +1230,7 @@ html.dark .bundle-capsule-radios :deep(.el-radio-button__original-radio:checked 
   color: #ffffff !important;
 }
 .bundle-switch-group { display: flex; flex-direction: column; gap: 6px; }
-.bundle-check { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: #606266; cursor: pointer; }
+.bundle-check { display: inline-flex; align-items: center; gap: 8px; font-size: var(--fs-caption); color: #606266; cursor: pointer; }
 .bundle-progress-wrap { width: 100%; max-width: 460px; display: flex; flex-direction: column; gap: 4px; }
 .sep { color: #999; }
 </style>

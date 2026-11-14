@@ -513,7 +513,7 @@ onMounted(load)
 .home-btn { padding: 4px 6px; height: 28px; color: var(--el-color-primary); }
 .crumb {
   border: 0; background: none; color: var(--saas-text-sub); font-size: var(--fs-body);
-  padding: 4px 7px; border-radius: 6px; cursor: pointer; max-width: 220px;
+  padding: 4px 7px; border-radius: var(--r-sm); cursor: pointer; max-width: 220px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .crumb:hover { color: var(--el-color-primary); background: var(--el-color-primary-light-9); }
@@ -524,7 +524,7 @@ onMounted(load)
 .search-input { width: 280px; }
 .files-toolbar {
   display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 14px;
-  padding: 10px 12px; background: var(--glass-bg-strong); border: 1px solid var(--saas-line); border-radius: 10px;
+  padding: 10px 12px; background: var(--glass-bg-strong); border: 1px solid var(--saas-line); border-radius: var(--r-md);
   transition: all .2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 .selected-count { font-size: var(--fs-body); color: var(--saas-text-main); font-weight: 600; }
@@ -541,7 +541,7 @@ onMounted(load)
 .hint { font-size: var(--fs-caption); color: #8a97b3; }
 .detail-head { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
 .detail-icon {
-  width: 42px; height: 42px; border-radius: 10px; flex: none;
+  width: 42px; height: 42px; border-radius: var(--r-md); flex: none;
   display: flex; align-items: center; justify-content: center;
 }
 .folder-bg { background: rgba(240, 160, 32, .12); color: #f0a020; }

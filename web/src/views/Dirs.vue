@@ -76,7 +76,7 @@
             <span class="organize-main-title">定时文件整理（自动归档与分流）</span>
             <el-tooltip
               :disabled="systemRunning"
-              content="系统当前处于停止状态（不可操作）。请先在顶栏点击「运行」启动系统后，方可开启自动归档！"
+              content="系统未运行，请先点击顶栏「运行」"
               placement="top"
             >
               <span>
@@ -121,7 +121,7 @@
         :closable="false"
         style="margin-bottom: 14px"
         :title="`互斥锁定中：当前正在执行「${activeMode === 'organize' ? '目录整理' : '媒体刮削'}」`"
-        description="为防止多个 115 目录写任务并发冲突，定时分流归档暂不可同时运行；待整理/刮削任务完成或安全中断后将自动解除锁定。"
+        description="整理或刮削执行中，结束后自动解除"
       />
 
       <!-- 规则说明与风控隔离保护 -->
@@ -154,8 +154,8 @@
             <div class="config-control">
               <el-tooltip
                 :content="moveSettings.auto_move_mode === 'library'
-                  ? '当前为【总库智能分流（推荐）】：目标目录指定为媒体总库（如 /电视剧），系统自动识别库内所有剧集文件夹并分发'
-                  : '当前为【一对一精确匹配】：目标目录作为指定剧目（如 /电视剧/折月亮 (2026)），仅移动匹配此剧名的文件'"
+                  ? '总库智能分流（推荐）：自动分发到库内同名剧目文件夹'
+                  : '精确匹配：仅移动匹配此剧名的文件'"
                 placement="top"
               >
                 <div class="capsule-toggle">
@@ -244,7 +244,7 @@
             <div class="config-control">
               <el-tooltip
                 :content="moveSettings.auto_move_schedule_type === 'interval'
-                  ? '当前为【固定间隔轮询】：按设定的间隔时长（如每 12 小时）周期性排队扫描并整理'
+                  ? '固定间隔：按设定间隔周期性整理'
                   : '当前为【每天固定时间点】：在每天设定的指定整点准时排队扫描并整理'"
                 placement="top"
               >
@@ -349,7 +349,7 @@
 
       <!-- 动态排空/整理状态条（强点或定时触发时实时跟踪队列终点） -->
       <div v-if="gateState === 'draining'" class="drain-banner">
-        <el-icon class="is-loading" style="color: #e6a23c; font-size: 16px; flex-shrink: 0"><Loading /></el-icon>
+        <el-icon class="is-loading" style="color: #e6a23c; font-size: var(--fs-title); flex-shrink: 0"><Loading /></el-icon>
         <span>
           <strong>转存与云下载队列排空中（正在等待所有队列任务到达终点）：</strong>
           当前剩余 <strong>{{ drainStatus.unfinished }}</strong> 个任务处理中
@@ -362,7 +362,7 @@
       </div>
 
       <div v-else-if="gateState === 'organizing'" class="organizing-banner">
-        <el-icon class="is-loading" style="color: #409eff; font-size: 16px; flex-shrink: 0"><Loading /></el-icon>
+        <el-icon class="is-loading" style="color: #409eff; font-size: var(--fs-title); flex-shrink: 0"><Loading /></el-icon>
         <span>
           <strong>队列已全部终态，正在独占执行文件整理移动中：</strong>转存工作器已挂起（零并发保护 115 账号安全），正在扫描各源目录并智能归类...
         </span>
@@ -434,7 +434,21 @@
             </span>
           </template>
         </el-table-column>
-        <el-table-column label="媒体类型" width="120">
+        <el-table-column width="120">
+          <template #header>
+            <span>媒体类型
+              <el-tooltip placement="top" effect="dark">
+                <template #content>
+                  按标题匹配时的文件归属判别（配合两库同名场景）：&lt;br/&gt;
+                  · 电影库：跳过带集数标识（S01E01/第1集）的文件，剧集交给剧集规则；&lt;br/&gt;
+                  · 剧集库：正常认领（含剧场版/特别篇）；&lt;br/&gt;
+                  · 自动：不区分，与历史行为一致。&lt;br/&gt;
+                  与规则顺序无关，无论哪条规则先执行结果一致。
+                </template>
+                <el-icon class="q-icon"><QuestionFilled /></el-icon>
+              </el-tooltip>
+            </span>
+          </template>
           <template #default="{ row }">
             <el-tooltip placement="top" :disabled="row.media_type !== 'movie'"
                         content="电影库规则会跳过带集数标识（S01E01/第1集）的文件，避免重名影片错位归档">
@@ -444,6 +458,34 @@
                 <el-option label="电影库" value="movie" />
                 <el-option label="剧集库" value="tv" />
               </el-select>
+            </el-tooltip>
+          </template>
+        </el-table-column>
+        <el-table-column width="88">
+          <template #header>
+            <span>云下载
+              <el-tooltip placement="top" effect="dark">
+                <template #content>
+                  云下载目录专用模式：&lt;br/&gt;
+                  115 云下载的中文标题只在任务目录名上，目录内文件多为纯英文名——开启后按&lt;b&gt;任务子目录名&lt;/b&gt;匹配（自动剥除含网址的广告括号段），目录内文件继承归属。&lt;br/&gt;
+                  电影/剧集按集数标识自动判别；广告域名/微小体积文件自动过滤不入库；&lt;br/&gt;
+                  仅当源目录是分类路由配置的云下载目录时可开启，配置变更后失效会自动拦下并告警。
+                </template>
+                <el-icon class="q-icon"><QuestionFilled /></el-icon>
+              </el-tooltip>
+            </span>
+          </template>
+          <template #default="{ row }">
+            <el-tooltip placement="top" :disabled="!(row.dir_match && !cloudValid(row))"
+                        content="源目录已不是当前配置的云下载目录，云下载模式不会生效，请修改源目录或关闭此开关">
+              <div style="display: flex; align-items: center; gap: 4px">
+                <el-switch v-model="row.dir_match" :active-value="1" :inactive-value="0"
+                           :disabled="!row.dir_match && !cloudValid(row)"
+                           @change="toggleDirMatch(row)" />
+                <el-icon v-if="row.dir_match && !cloudValid(row)" style="color: var(--el-color-warning)">
+                  <WarningFilled />
+                </el-icon>
+              </div>
             </el-tooltip>
           </template>
         </el-table-column>
@@ -457,12 +499,18 @@
         </el-table-column>
         <el-table-column label="启用" width="70">
           <template #default="{ row }">
-            <el-switch
-              v-model="row.enabled"
-              :active-value="1"
-              :inactive-value="0"
-              @change="saveMoveRule(row)"
-            />
+            <el-tooltip placement="top" :disabled="!(row.dir_match && !cloudValid(row))"
+                        content="云下载模式未生效（源目录已不是云下载目录）：请改回云下载目录，或关闭云下载开关回落基本规则后再启用">
+              <span>
+                <el-switch
+                  v-model="row.enabled"
+                  :active-value="1"
+                  :inactive-value="0"
+                  :disabled="!!(row.dir_match && !cloudValid(row))"
+                  @change="saveMoveRule(row)"
+                />
+              </span>
+            </el-tooltip>
           </template>
         </el-table-column>
         <el-table-column label="操作" width="84" fixed="right">
@@ -483,7 +531,7 @@
 
     <!-- 添加整理规则弹窗 -->
     <el-dialog v-model="dialogVisible" title="添加文件整理规则" :width="'min(540px, 94vw)'" destroy-on-close>
-      <el-form :model="newRuleForm" label-width="100px" size="small">
+      <el-form class="add-rule-form" :model="newRuleForm" label-width="100px" size="small">
         <el-form-item label="整理模式">
           <el-radio-group v-model="newRuleForm.mode">
             <el-radio label="default">跟随默认 ({{ moveSettings.auto_move_mode === 'library' ? '总库分流' : '一对一精确' }})</el-radio>
@@ -494,24 +542,56 @@
         <el-form-item label="媒体类型">
           <div style="display: flex; flex-direction: column; gap: 4px; width: 100%">
             <el-radio-group v-model="newRuleForm.media_type">
-              <el-radio label="auto">自动（按标题匹配）</el-radio>
+              <el-radio label="auto">自动</el-radio>
               <el-radio label="movie">电影库</el-radio>
               <el-radio label="tv">剧集库</el-radio>
             </el-radio-group>
             <span style="color: var(--saas-text-sub); font-size: var(--fs-caption); line-height: 1.4">
-              设为「电影库」后，带集数标识（S01E01/第1集）的文件将被跳过、留给剧集规则——两库同名影片不会错位归档
+              电影库跳过带集数标识的文件，避免两库同名错位
+            </span>
+          </div>
+        </el-form-item>
+        <el-form-item label="云下载模式">
+          <div style="display: flex; flex-direction: column; gap: 4px; width: 100%">
+            <el-checkbox v-model="newRuleForm.dir_match" :disabled="!sourceIsCloudDir">
+              按父目录名匹配
+              <el-tooltip placement="top" effect="dark">
+                <template #content>
+                  适用场景：115 云下载的中文标题只在任务目录名上（如「【广告www..】奥德赛[简繁英字幕].The.Odyssey.2026…」），&lt;br/&gt;
+                  目录内文件多为纯英文名（The.Odyssey.2026….mkv）。&lt;br/&gt;&lt;br/&gt;
+                  开启后的行为变化：&lt;br/&gt;
+                  · 匹配对象从文件名换成任务子目录名（自动剥除含网址的广告括号段）；&lt;br/&gt;
+                  · 目录内纯英文文件继承目录归属，电影/剧集按集数标识自动判别；&lt;br/&gt;
+                  · 广告域名/微小体积（&lt;10MB）文件自动过滤，不入媒体库；&lt;br/&gt;
+                  · 源目录根部散落的单文件（如 a.mp4）不参与，留待手动处理；&lt;br/&gt;
+                  · 字幕不跟移（留给整理刮削配对）。&lt;br/&gt;&lt;br/&gt;
+                  仅当源目录 = 分类路由配置的云下载目录时可开启；配置变更后自动失效并告警。
+                </template>
+                <el-icon class="q-icon"><QuestionFilled /></el-icon>
+              </el-tooltip>
+            </el-checkbox>
+            <span v-if="sourceIsCloudDir" style="color: var(--el-color-success); font-size: var(--fs-caption)">
+              已匹配云下载目录 {{ normPath(newRuleForm.source_dir) }}
+            </span>
+            <span v-else style="color: var(--el-color-warning); font-size: var(--fs-caption); line-height: 1.4">
+              源目录不是云下载目录 {{ cloudDirs.join('、') || '尚未配置' }}，此模式不可用
+            </span>
+            <span v-if="newRuleForm.dir_match" class="hint-line" style="color: var(--el-color-warning)">
+              ⚠ 开启后本规则按<b>任务子目录名</b>匹配（子目录内文件可为纯英文名），不再按文件名匹配；
+              源目录根部散落的文件不参与整理；目录内广告/微小体积文件自动过滤。
+              若日后源目录不再是云下载目录，本模式会自动失效并告警
             </span>
           </div>
         </el-form-item>
         <el-form-item label="源目录" required>
-          <el-button class="dir-btn" style="width: 100%" @click="openDialogPicker('dialog_source')">
+          <el-button class="dir-btn" size="small" style="width: 100%" @click="openDialogPicker('dialog_source')">
             <el-icon><FolderOpened /></el-icon>
             <span>{{ newRuleForm.source_dir || '点击选择源目录（如 /自动转存）' }}</span>
           </el-button>
         </el-form-item>
         <el-form-item label="目标目录" required>
           <div style="display: flex; flex-direction: column; gap: 4px; width: 100%">
-            <el-button class="dir-btn" style="width: 100%" @click="openDialogPicker('dialog_target')">
+            <el-button class="dir-btn" size="small" style="width: 100%" @click="openDialogPicker('dialog_target')">
               <el-icon><FolderOpened /></el-icon>
               <span>{{ newRuleForm.target_dir || (isDialogLibraryMode ? '选择影视总库（如 /电视剧）' : '选择具体剧集目录（如 /电视剧/折月亮 (2026)）') }}</span>
             </el-button>
@@ -539,10 +619,17 @@
 
     <!-- 整理预览弹窗（两段式执行第一步）：确认后才真正排队执行 -->
     <el-dialog v-model="previewVisible" title="整理预览 — 将移动以下文件" :width="'min(860px, 96vw)'" top="6vh">
-      <el-alert type="info" :closable="false" show-icon style="margin-bottom: 10px"
-                title="以下为当前时刻的扫描快照（本次预览未移动任何文件）。确认后将重新扫描并执行，期间新增或手动移走的文件与预览可能存在差异。" />
+      <el-alert v-if="previewFromCache" type="warning" :closable="false" show-icon style="margin-bottom: 10px"
+                title="暂存的预览缓存，确认后重新扫描执行" />
+      <el-alert v-else type="info" :closable="false" show-icon style="margin-bottom: 10px"
+                title="预览快照，确认后重新扫描执行" />
       <el-alert v-if="previewData?.risk_aborted" type="error" :closable="false" show-icon style="margin-bottom: 10px"
                 title="预览过程触发 115 风控信号，已中止剩余规则的预览，以下仅为部分结果。" />
+      <el-alert v-if="!previewRows.length" type="success" :closable="false" show-icon style="margin-bottom: 10px"
+                title="本次没有需要移动的文件——如有拦截/跳过，原因与样例见下方统计" />
+      <div v-if="previewCountdown > 0" class="stat-line">
+        ⏱ {{ Math.floor(previewCountdown / 60) }} 分 {{ previewCountdown % 60 }} 秒后自动暂存
+      </div>
       <el-table :data="previewRows" size="small" max-height="46vh">
         <el-table-column type="index" label="#" width="50" />
         <el-table-column prop="name" label="文件名" min-width="220" show-overflow-tooltip />
@@ -554,19 +641,20 @@
         <el-table-column prop="matched" label="命中词" width="120" show-overflow-tooltip />
         <el-table-column prop="rule_label" label="规则" width="170" show-overflow-tooltip />
       </el-table>
-      <div v-if="previewData?.rules?.some((r) => r.skip_ep > 0 || r.skip_movie > 0 || r.skip_ambiguous > 0 || r.error)" style="margin-top: 10px">
+      <div v-if="previewData?.rules?.some((r) => r.skip_ep > 0 || r.skip_movie > 0 || r.skip_ambiguous > 0 || r.skip_junk > 0 || r.error)" style="margin-top: 10px">
         <div v-for="r in previewData.rules" :key="r.rule_id" style="font-size: var(--fs-caption); color: var(--saas-text-sub); line-height: 1.7">
           <span v-if="r.skip_ep > 0">「{{ r.target_dir }}」按季集防重将跳过 {{ r.skip_ep }} 个文件{{ r.skip_ep_samples?.length ? `（如 ${r.skip_ep_samples.slice(0, 2).join('、')}）` : '' }}；</span>
           <span v-if="r.skip_movie > 0">「{{ r.target_dir }}」电影库规则跳过 {{ r.skip_movie }} 个带集数标识的文件（留给剧集规则）；</span>
           <span v-if="r.skip_ambiguous > 0" style="color: var(--el-color-warning)">
             「{{ r.target_dir }}」同名歧义跳过 {{ r.skip_ambiguous }} 个文件（多库同名且无集数标识，留源目录待手动处理）{{ r.skip_ambiguous_samples?.length ? `（如 ${r.skip_ambiguous_samples.slice(0, 2).join('、')}）` : '' }}；
           </span>
+          <span v-if="r.skip_junk > 0">「{{ r.target_dir }}」云下载垃圾过滤跳过 {{ r.skip_junk }} 个文件（广告域名/微小体积）；</span>
           <span v-if="r.error" style="color: var(--el-color-danger)">「{{ r.target_dir }}」{{ r.error }}；</span>
         </div>
       </div>
       <template #footer>
-        <el-button @click="previewVisible = false">取消</el-button>
-        <el-button type="primary" :loading="previewConfirming" @click="confirmRunAfterPreview">
+        <el-button @click="previewVisible = false">关闭</el-button>
+        <el-button v-if="previewRows.length" type="primary" :loading="previewConfirming" @click="confirmRunAfterPreview">
           确认执行（共 {{ previewRows.length }} 个文件）
         </el-button>
       </template>
@@ -576,7 +664,8 @@
 
 <script setup>
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { showScanLoading, closeScanLoading } from '../composables/scanLoading'
 import { api, errMsg, fmtSize, saveOk } from '../api'
 import { useUnsavedGuard } from '../composables/unsavedGuard'
 import DirPicker from '../components/DirPicker.vue'
@@ -679,13 +768,30 @@ const newRuleForm = ref({
   keyword: '',
   mode: 'default',
   media_type: 'auto',
+  dir_match: false,
 })
 
-// 选完目标目录后按路径名自动预选媒体类型（可手动改）
+// 云下载目录集合与归一化比对（后端在 rules 接口下发 cloud_dirs）
+const cloudDirs = ref([])
+const normPath = (p) => {
+  const t = String(p || '').trim()
+  return t ? '/' + t.replace(/^\/+|\/+$/g, '') : ''
+}
+const sourceIsCloudDir = computed(() =>
+  !!newRuleForm.value.source_dir && cloudDirs.value.includes(normPath(newRuleForm.value.source_dir)))
+
+// 选完目录后联动：目标路径预选媒体类型；源目录为云下载目录时自动开启按父目录名匹配（均可手动改）
 watch(() => newRuleForm.value.target_dir, (t) => {
   if (!t) return
   if (/电影|影片/.test(t)) newRuleForm.value.media_type = 'movie'
   else if (/电视剧|剧集|短剧|动漫|综艺|纪录片/.test(t)) newRuleForm.value.media_type = 'tv'
+})
+watch(() => newRuleForm.value.source_dir, (t) => {
+  if (sourceIsCloudDir.value) {
+    newRuleForm.value.dir_match = true
+  } else {
+    newRuleForm.value.dir_match = false
+  }
 })
 
 const isDialogLibraryMode = computed(() => {
@@ -743,6 +849,7 @@ const loadAutoMove = async () => {
       }
     }
     moveRules.value = data.rules || []
+    cloudDirs.value = data.cloud_dirs || []
     if (data.settings) {
       moveSettings.value = { ...moveSettings.value, ...data.settings }
     }
@@ -837,8 +944,24 @@ const onPickDir = (val) => {
     dirtyRoutes.value = true
   } else if (pickerKind.value === 'move_source') {
     if (pickerRow) {
+      const oldSource = pickerRow.source_dir
       pickerRow.source_dir = val
-      saveMoveRule(pickerRow)
+      // 云下载模式规则改到非云下载目录：确认后自动关闭云下载模式，回落按文件名匹配的基本规则
+      if (pickerRow.dir_match && !cloudDirs.value.includes(normPath(val))) {
+        ElMessageBox.confirm(
+          '新源目录不是云下载目录，云下载模式将自动关闭，' +
+          '回落为按文件名匹配的基本规则并保持启用。确认修改？',
+          '云下载模式将自动关闭',
+          { type: 'warning', confirmButtonText: '修改并关闭云下载模式', cancelButtonText: '取消' }
+        ).then(() => {
+          pickerRow.dir_match = 0
+          saveMoveRule(pickerRow)
+        }).catch(() => {
+          pickerRow.source_dir = oldSource  // 取消：还原目录，不保存
+        })
+      } else {
+        saveMoveRule(pickerRow)
+      }
     }
   } else if (pickerKind.value === 'move_target') {
     if (pickerRow) {
@@ -942,7 +1065,28 @@ const saveMoveRule = async (rule) => {
     await loadAutoMove()
   } catch (e) {
     ElMessage.error(errMsg(e))
+    await loadAutoMove()  // 保存失败：以服务端为准还原本地行状态（防止 UI 与库不一致）
   }
+}
+
+// 云下载模式内联开关（非对称）：开 = 校验源目录 + 确认弹窗；关 = 直接生效
+const cloudValid = (row) => cloudDirs.value.includes(normPath(row.source_dir))
+const toggleDirMatch = async (row) => {
+  if (!row.dir_match) {
+    await saveMoveRule(row)
+    return
+  }
+  try {
+    await ElMessageBox.confirm(
+      '开启后本规则按任务子目录名匹配（子目录内文件可为纯英文名），不再按文件名匹配；' +
+      '源目录根部散落的文件不参与整理；目录内广告/微小体积文件自动过滤。确认开启？',
+      '开启云下载目录模式',
+      { type: 'warning', confirmButtonText: '确认开启', cancelButtonText: '取消' })
+  } catch {
+    row.dir_match = 0
+    return
+  }
+  await saveMoveRule(row)
 }
 
 const deleteMoveRule = async (id) => {
@@ -956,7 +1100,7 @@ const deleteMoveRule = async (id) => {
 }
 
 const openAddMoveRule = () => {
-  newRuleForm.value = { source_dir: '', target_dir: '', keyword: '', mode: 'default' }
+  newRuleForm.value = { source_dir: '', target_dir: '', keyword: '', mode: 'default', media_type: 'auto', dir_match: false }
   dialogVisible.value = true
 }
 
@@ -969,6 +1113,7 @@ const confirmAddMoveRule = async () => {
       keyword: newRuleForm.value.keyword || extractKeyword(newRuleForm.value.target_dir),
       mode: newRuleForm.value.mode || 'default',
       media_type: newRuleForm.value.media_type || 'auto',
+      dir_match: !!newRuleForm.value.dir_match,
     })
     dialogVisible.value = false
     ElMessage.success('整理规则已添加')
@@ -983,35 +1128,88 @@ const runAutoMoveNow = async () => {
     ElMessage.warning('定时文件整理功能尚未开启，请先打开功能总开关！')
     return
   }
-  // 两段式执行：先 dry-run 预览将移动的文件，用户确认后才真正排队执行
+  // 缓存命中：10 分钟内的预览结果直接拉起，不重复消耗 115 扫描请求
+  if (previewCache.value && Date.now() - previewCache.value.ts < PREVIEW_CACHE_TTL) {
+    openPreviewDialog(previewCache.value.data, true)
+    return
+  }
+  // 两段式执行：扫描期间全屏冻结页面，防止误操作
   runningMove.value = true
+  showScanLoading()
+  let pv = null
   try {
-    const { data: pv } = await api.post('/api/auto-move/preview')
-    if (!pv.ok) {
-      ElMessage.warning(pv.msg || '预览失败')
-      return
-    }
-    if (!pv.total_planned) {
-      const skipInfo = (pv.rules || [])
-        .filter((r) => r.skip_ep > 0)
-        .map((r) => `防重跳过 ${r.skip_ep} 个`)
-        .join('；')
-      ElMessage.info(`当前没有需要移动的文件${skipInfo ? `（${skipInfo}）` : ''}`)
-      return
-    }
-    previewData.value = pv
-    previewVisible.value = true
+    const { data } = await api.post('/api/auto-move/preview')
+    pv = data
   } catch (e) {
+    closeScanLoading()
     ElMessage.error(errMsg(e))
+    return
   } finally {
+    closeScanLoading()
     runningMove.value = false
   }
+  if (!pv || !pv.ok) {
+    ElMessage.warning((pv && pv.msg) || '预览失败')
+    return
+  }
+  previewCache.value = { ts: Date.now(), data: pv }
+  if (!pv.total_planned) {
+    // 0 计划但存在拦截/跳过时仍然弹窗展示统计——帮助定位“为什么没分流”
+    const hasSkips = (pv.rules || []).some((r) =>
+      r.skip_ep > 0 || r.skip_movie > 0 || r.skip_ambiguous > 0 || r.skip_junk > 0 || r.skip_dedup > 0)
+    if (hasSkips) {
+      openPreviewDialog(pv, false)
+    } else {
+      ElMessage.info('当前没有需要移动的文件')
+    }
+    return
+  }
+  openPreviewDialog(pv, false)
 }
 
 // 预览弹窗数据：按规则分组的计划明细与跳过统计
 const previewVisible = ref(false)
 const previewData = ref(null)
 const previewConfirming = ref(false)
+
+// 预览缓存与自动暂存：扫描结果缓存 10 分钟，期内再次点击直接调出（确认执行仍会重新扫描，文件有变动按最新状态整理）
+const PREVIEW_CACHE_TTL = 10 * 60 * 1000
+const previewCache = ref(null)      // { ts, data }
+const previewFromCache = ref(false)
+const previewCountdown = ref(0)     // 弹窗自动暂存倒计时（秒）= 缓存剩余寿命
+let previewTimer = null
+
+const openPreviewDialog = (data, fromCache) => {
+  previewData.value = data
+  previewFromCache.value = !!fromCache
+  previewVisible.value = true
+  startPreviewCountdown()
+}
+const startPreviewCountdown = () => {
+  stopPreviewCountdown()
+  const tick = () => {
+    if (!previewCache.value) { stopPreviewCountdown(); previewVisible.value = false; return }
+    const remainMs = previewCache.value.ts + PREVIEW_CACHE_TTL - Date.now()
+    previewCountdown.value = Math.max(0, Math.ceil(remainMs / 1000))
+    if (remainMs <= 0) {
+      // 10 分钟未响应：自动暂存关闭（结果已在缓存，期内再次点击可直接调出）
+      stopPreviewCountdown()
+      previewVisible.value = false
+      ElMessage.info('预览已暂存，期内点击「立即排队执行」可直接调出')
+    }
+  }
+  tick()
+  previewTimer = setInterval(tick, 1000)
+}
+const stopPreviewCountdown = () => {
+  if (previewTimer) { clearInterval(previewTimer); previewTimer = null }
+}
+const previewRescan = async () => {
+  previewVisible.value = false
+  previewCache.value = null
+  stopPreviewCountdown()
+  await runAutoMoveNow()
+}
 const previewRows = computed(() => {
   const rows = []
   for (const r of (previewData.value?.rules || [])) {
@@ -1028,6 +1226,8 @@ const confirmRunAfterPreview = async () => {
     const { data } = await api.post('/api/auto-move/run')
     if (data.ok) {
       previewVisible.value = false
+      previewCache.value = null
+      stopPreviewCountdown()
       ElMessage.info(data.msg || '已发起排队整理，正在等待转存/云下载队列终点...')
       gateState.value = data.gate_state || 'draining'
       if (data.drain_status) drainStatus.value = data.drain_status
@@ -1044,6 +1244,7 @@ const confirmRunAfterPreview = async () => {
 
 useUnsavedGuard(dirtyRoutes)  // 有未保存更改时，离开页面弹窗确认
 
+onUnmounted(stopPreviewCountdown)
 onMounted(() => {
   load()
   loadAutoMove()
@@ -1064,18 +1265,10 @@ onUnmounted(() => {
   margin: 0 0 12px;
   color: var(--saas-text-sub);
   line-height: 1.6;
-  font-size: 13px;
+  font-size: var(--fs-caption);
 }
-.dir-btn {
-  width: 100%;
-  justify-content: flex-start;
-  text-align: left;
-  font-family: inherit;
-  font-size: 13px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
+.q-icon { color: var(--saas-text-sub); cursor: help; margin-left: 2px; font-size: var(--fs-caption); }
+/* 弹窗内目录选择按钮：与表单输入框同高同圆角，保持整体主题一致（覆盖主题对 small 按钮的统一加高） */
 .dir-btn .el-icon {
   margin-right: 0;
   color: var(--el-color-primary);
@@ -1128,7 +1321,7 @@ onUnmounted(() => {
   box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
 }
 .organize-master-switch :deep(.el-switch__core .el-switch__inner) {
-  font-size: 13px !important;
+  font-size: var(--fs-caption) !important;
   font-weight: 600 !important;
   height: 30px !important;
   line-height: 30px !important;
@@ -1161,7 +1354,7 @@ onUnmounted(() => {
 }
 .notice-icon {
   color: var(--el-color-primary);
-  font-size: 18px;
+  font-size: var(--fs-page);
   margin-top: 1px;
   flex-shrink: 0;
 }
@@ -1171,7 +1364,7 @@ onUnmounted(() => {
 }
 .notice-title {
   font-weight: 600;
-  font-size: 13px;
+  font-size: var(--fs-caption);
   color: var(--el-color-primary-dark-2, #2b73af);
   margin-bottom: 4px;
 }
@@ -1212,7 +1405,7 @@ onUnmounted(() => {
   align-items: center;
   gap: 8px;
   font-weight: 700;
-  font-size: 15px;
+  font-size: var(--fs-body);
   line-height: 1.35;
   color: var(--saas-text-main);
 }
@@ -1220,26 +1413,26 @@ onUnmounted(() => {
   color: var(--el-color-primary);
 }
 .last-run-chip {
-  font-size: 11px;
+  font-size: var(--fs-caption);
   color: var(--el-text-color-secondary, #909399);
 }
 .schedule-risk-badge {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  font-size: 11px;
+  font-size: var(--fs-caption);
   font-weight: 500;
   color: #d97706;
   background: rgba(217, 119, 6, 0.08);
   padding: 2px 8px;
-  border-radius: 10px;
+  border-radius: var(--r-md);
   border: 1px solid rgba(217, 119, 6, 0.2);
 }
 .schedule-risk-note {
-  font-size: 11px;
+  font-size: var(--fs-caption);
   color: var(--el-text-color-secondary);
   background: rgba(217, 119, 6, 0.04);
-  border-radius: 6px;
+  border-radius: var(--r-sm);
   padding: 5px 8px;
   margin-top: 4px;
   margin-bottom: 8px;
@@ -1252,7 +1445,7 @@ onUnmounted(() => {
   gap: 10px;
 }
 .config-label {
-  font-size: 13px;
+  font-size: var(--fs-caption);
   font-weight: 600;
   color: var(--saas-text-main);
   min-width: 78px;
@@ -1280,9 +1473,9 @@ onUnmounted(() => {
 
 /* 胶囊单选按钮统一视觉规范 */
 .capsule-radio-group :deep(.el-radio-button__inner) {
-  border-radius: 6px;
+  border-radius: var(--r-sm);
   padding: 7px 14px;
-  font-size: 12px;
+  font-size: var(--fs-caption);
   height: 32px;
   line-height: 16px;
 }
@@ -1346,12 +1539,12 @@ onUnmounted(() => {
   min-width: 0;
 }
 .feature-name {
-  font-size: 12px;
+  font-size: var(--fs-caption);
   font-weight: 600;
   color: var(--el-text-color-primary);
 }
 .feature-hint {
-  font-size: 11px;
+  font-size: var(--fs-caption);
   color: var(--el-text-color-secondary, #909399);
   white-space: nowrap;
   overflow: hidden;
@@ -1371,13 +1564,13 @@ onUnmounted(() => {
   flex-wrap: wrap;
 }
 .fixed-time-tag {
-  font-size: 12px;
+  font-size: var(--fs-caption);
   font-weight: 600;
   padding: 2px 8px;
   height: 26px;
 }
 .empty-tag-tip {
-  font-size: 12px;
+  font-size: var(--fs-caption);
   color: var(--el-text-color-secondary, #909399);
 }
 .time-select-row {
@@ -1399,7 +1592,7 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 12px;
+  font-size: var(--fs-caption);
   font-weight: 600;
   color: var(--el-text-color-regular);
   margin-bottom: 8px;
@@ -1411,7 +1604,7 @@ onUnmounted(() => {
   flex-wrap: wrap;
 }
 .prediction-chip {
-  font-size: 11px;
+  font-size: var(--fs-caption);
   font-weight: 500;
 }
 
@@ -1426,7 +1619,7 @@ onUnmounted(() => {
   padding: 10px 14px;
   margin-bottom: 12px;
   color: #b88230;
-  font-size: 13px;
+  font-size: var(--fs-caption);
   line-height: 1.5;
 }
 
@@ -1440,7 +1633,7 @@ onUnmounted(() => {
   padding: 10px 14px;
   margin-bottom: 12px;
   color: #2b73af;
-  font-size: 13px;
+  font-size: var(--fs-caption);
   line-height: 1.5;
 }
 
@@ -1456,7 +1649,7 @@ onUnmounted(() => {
   padding: 10px 14px;
   background: var(--subcard-head-bg);
   border: 1px solid var(--saas-line);
-  border-radius: 10px;
+  border-radius: var(--r-md);
 }
 .rules-toolbar-left {
   display: flex;
@@ -1466,11 +1659,11 @@ onUnmounted(() => {
 }
 .rules-toolbar-title {
   font-weight: 700;
-  font-size: 15px;
+  font-size: var(--fs-body);
   color: var(--saas-text-main);
 }
 .rules-toolbar-tip {
-  font-size: 12px;
+  font-size: var(--fs-caption);
   color: var(--el-text-color-secondary, #909399);
 }
 .rules-toolbar-right {
@@ -1486,7 +1679,7 @@ onUnmounted(() => {
   justify-content: center;
   gap: 6px;
   color: var(--el-text-color-secondary, #909399);
-  font-size: 13px;
+  font-size: var(--fs-caption);
 }
 
 /* 顶部「分类 → 目录 映射」工具栏分组 */
@@ -1619,7 +1812,7 @@ onUnmounted(() => {
   display: inline-flex;
   align-items: center;
   height: 32px;
-  border-radius: 999px;
+  border-radius: var(--r-pill);
   border: 1px solid rgba(126, 146, 196, 0.40);
   background: rgba(255, 255, 255, 0.70);
   box-shadow: 0 1px 3px rgba(31, 45, 90, 0.05);
@@ -1646,7 +1839,7 @@ html.dark .capsule-toggle {
   align-items: center;
   justify-content: center;
   padding: 0 16px;
-  font-size: 13px;
+  font-size: var(--fs-caption);
   font-weight: 500;
   color: var(--saas-text-main);
   white-space: nowrap;

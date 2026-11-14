@@ -257,6 +257,11 @@ def _split_rel_and_name(full_target_dir: str, rel_dir: str, fname: str) -> tuple
 
 
 def _should_skip_extra(file_name: str, size_bytes: int, pm: ParsedMedia, settings: dict) -> bool:
+    # 广告域名垃圾：文件名内嵌网址（如「【…www.xxx.com】 xxx.mkv」）——不是正片，
+    # 无论 media_skip_extras 开关如何都不入库（否则会被解析成一部"广告电影"组织进媒体库）
+    low = (file_name or "").lower()
+    if "www." in low or "http" in low:
+        return True
     if not settings.get("media_skip_extras", True):
         return False
     if pm.is_extra:
@@ -282,10 +287,13 @@ def _scan_rules_sync(
     mode_col: str,
     settings: dict,
     include_tmdb_hint_only: bool = False,
+    stats_out: dict | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """同步扫描启用中的 `media_rules` 在 115 上的媒体条目，在 `run_pan_thread` 中调用。
 
     返回 `(rules, items)`；每个 item 已完成三层 `parse_media_context` 与配套字幕配对。
+    stats_out 传入 dict 时累计扫描层跳过计数（非视频/类型互斥/花絮广告过滤/跨规则去重），
+    供预览接口向用户解释「为什么某些文件不在清单里」。
     """
     sql = f"SELECT * FROM media_rules WHERE enabled=1 AND {mode_col}=1"
     params: list = []
@@ -336,8 +344,12 @@ def _scan_rules_sync(
 
             # 规则类型精准互斥过滤：剧集规则严格跳过电影原盘，电影规则严格跳过剧集原盘
             if rmt == "tv" and pm.media_type != "tv":
+                if stats_out is not None:
+                    stats_out["media_type_skip"] = stats_out.get("media_type_skip", 0) + 1
                 continue
             if rmt == "movie" and pm.media_type != "movie":
+                if stats_out is not None:
+                    stats_out["media_type_skip"] = stats_out.get("media_type_skip", 0) + 1
                 continue
 
             seen_file_ids.add(bid)
@@ -366,10 +378,14 @@ def _scan_rules_sync(
         for f in tree.get("files") or []:
             fid = str(f["id"])
             if fid in seen_file_ids:
+                if stats_out is not None:
+                    stats_out["dedup_seen"] = stats_out.get("dedup_seen", 0) + 1
                 continue
             fname = f["name"]
             _, ext = os.path.splitext(strip_duplicate_suffix(fname)[0])
             if ext.lower() not in VIDEO_EXTENSIONS:
+                if stats_out is not None:
+                    stats_out["non_video"] = stats_out.get("non_video", 0) + 1
                 continue
             pdirs = f.get("parent_dirs") or []
             pm = parse_media_context(fname, parent_dirs=pdirs, is_dir=False)
@@ -379,11 +395,17 @@ def _scan_rules_sync(
 
             # 规则类型精准互斥过滤：剧集规则严格跳过电影（留给电影规则），电影规则严格跳过剧集（留给剧集规则）
             if rmt == "tv" and pm.media_type != "tv":
+                if stats_out is not None:
+                    stats_out["media_type_skip"] = stats_out.get("media_type_skip", 0) + 1
                 continue
             if rmt == "movie" and pm.media_type != "movie":
+                if stats_out is not None:
+                    stats_out["media_type_skip"] = stats_out.get("media_type_skip", 0) + 1
                 continue
 
             if _should_skip_extra(fname, int(f.get("size") or 0), pm, settings):
+                if stats_out is not None:
+                    stats_out["extra_skip"] = stats_out.get("extra_skip", 0) + 1
                 continue
 
             seen_file_ids.add(fid)
@@ -692,7 +714,9 @@ async def preview_organize(rule_ids: list[int] | None = None) -> dict:
     if transfer_gate.is_exclusive_busy():
         return {"ok": False, "msg": "当前有独占写任务正在执行，请待结束后再预览", "items": []}
     settings = await asyncio.to_thread(get_media_settings)
-    rules, items = await client.run_pan_thread(_scan_rules_sync, rule_ids, "organize_enabled", settings)
+    scan_stats: dict = {}
+    rules, items = await client.run_pan_thread(
+        _scan_rules_sync, rule_ids, "organize_enabled", settings, False, scan_stats)
     preview_rows = []
     for it in items:
         pm: ParsedMedia = it["parsed"]
@@ -724,6 +748,7 @@ async def preview_organize(rule_ids: list[int] | None = None) -> dict:
         "total": len(preview_rows),
         "pending_count": sum(1 for r in preview_rows if not r["already_ok"]),
         "items": preview_rows,
+        "scan_stats": scan_stats,
     }
 
 
@@ -830,6 +855,7 @@ def _build_organize_tg_report(
     fail_cnt: int,
     removed_dirs: int,
     done_items: list[dict],
+    scan_stats: dict | None = None,
     fail_items: list[tuple[str, str]],
     error_msg: str = "",
     system_running: bool = True,
@@ -875,12 +901,21 @@ def _build_organize_tg_report(
             resume_line,
         ])
 
+    scan_filter_parts = []
+    for key, label in (("non_video", "非视频"), ("media_type_skip", "类型互斥"),
+                       ("extra_skip", "花絮/广告/微小体积"), ("dedup_seen", "其他规则已认领")):
+        v = int((scan_stats or {}).get(key) or 0)
+        if v > 0:
+            scan_filter_parts.append(f"{label} {v}")
+
     lines = [
         head,
         "",
         f"• 触发方式：{trig_zh}{dur_zh}",
         f"• 整理统计：成功 {done_cnt} 项｜跳过 {skip_cnt} 项｜失败 {fail_cnt} 项",
     ]
+    if scan_filter_parts:
+        lines.append(f"• 扫描过滤：{'｜'.join(scan_filter_parts)}（不计入整理统计）")
     if removed_dirs > 0:
         lines.append(f"• 空目录清理：已清理 {removed_dirs} 个搬空目录")
     if error_msg and outcome in ("risk_aborted", "cancelled", "error"):
@@ -1064,6 +1099,7 @@ async def execute_organize_queue(rule_ids: list[int] | None = None, trigger: str
     rule_cnt = 0
     total = 0
     removed_dirs = 0
+    organize_scan_stats: dict = {}
     done_items: list[dict] = []
     fail_items: list[tuple[str, str]] = []
     outcome = "done"
@@ -1080,7 +1116,8 @@ async def execute_organize_queue(rule_ids: list[int] | None = None, trigger: str
             _check_not_cancelled()
 
             transfer_gate.set_media_progress({"mode": "organize", "phase": "scanning", "current": 0, "total": 0, "label": "正在扫描待整理目录"})
-            rules, items = await client.run_pan_thread(_scan_rules_sync, rule_ids, "organize_enabled", settings)
+            rules, items = await client.run_pan_thread(
+                _scan_rules_sync, rule_ids, "organize_enabled", settings, False, organize_scan_stats)
             rule_cnt = len(rules)
             total = len(items)
             if not rules:
@@ -1223,6 +1260,7 @@ async def execute_organize_queue(rule_ids: list[int] | None = None, trigger: str
     elapsed_sec = int(round(time.monotonic() - started_at))
     tg_text = _build_organize_tg_report(
         outcome=outcome,
+        scan_stats=organize_scan_stats,
         trigger=trigger,
         batch_id=batch_id,
         elapsed_sec=elapsed_sec,

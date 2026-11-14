@@ -1260,6 +1260,7 @@ async def execute_auto_move(trigger: str = "scheduled") -> dict:
                 em = rm if rm in ("library", "exact") else global_mode
                 if em == "library" and r.get("target_dir", "").strip():
                     lib_targets.append(r["target_dir"].strip())
+            lib_targets = list(dict.fromkeys(lib_targets))  # 同一总库被多条规则指向只算一个
             ambiguous_kws: set[str] = set()
             if len(lib_targets) >= 2:
                 ambiguous_kws = await pan.run_pan_thread(
@@ -1269,6 +1270,9 @@ async def execute_auto_move(trigger: str = "scheduled") -> dict:
                         "auto_move",
                         f"同名歧义预检：{len(lib_targets)} 个总库存在同名剧名 "
                         f"{sorted(ambiguous_kws)[:5]}，无集数标识的裸文件名将留源目录交用户手动处理")
+
+            # 云下载目录模式运行时兜底：配置漂移（路由里的云下载目录后来改了）则跳过并告警
+            cd_dirs = await asyncio.to_thread(cloud_download_dirs)
 
             for r in rules:
                 s_dir = r.get("source_dir", "").strip()
@@ -1284,8 +1288,20 @@ async def execute_auto_move(trigger: str = "scheduled") -> dict:
                                     "keyword": "", "mode": effective_mode, "moved": 0, "error": "目标文件夹名为空，跳过执行"})
                     continue
 
+                # 按父目录名匹配（云下载模式）的运行时校验：源目录必须仍是配置的云下载目录
+                if r.get("dir_match") and s_dir not in cd_dirs:
+                    msg = (f"规则 #{r['id']} 源目录 {s_dir} 不是当前配置的云下载目录"
+                           f"（{'、'.join(cd_dirs) or '未配置'}），云下载模式未生效，本轮跳过。"
+                           "请检查规则配置或更新分类路由的云下载目录")
+                    logstream.warn("auto_move", msg)
+                    details.append({"id": r["id"], "source_dir": s_dir, "target_dir": t_dir,
+                                    "keyword": kw, "mode": effective_mode, "moved": 0,
+                                    "error": "源目录不是云下载目录，云下载模式未生效"})
+                    continue
+
                 try:
                     moved_items: list = []
+                    moved_skip: dict = {}
                     moved_count, sample_names = await pan.run_pan_thread(
                         pan.move_matched_files_for_rule,
                         s_dir, t_dir, kw,
@@ -1299,6 +1315,8 @@ async def execute_auto_move(trigger: str = "scheduled") -> dict:
                         moved_out=moved_items,
                         rule_media_type=str(r.get("media_type") or "auto"),
                         ambiguous_kws=ambiguous_kws,
+                        match_by_dir=bool(r.get("dir_match")),
+                        skip_stats_out=moved_skip,
                     )
                     await asyncio.to_thread(
                         db.execute,
@@ -1329,7 +1347,8 @@ async def execute_auto_move(trigger: str = "scheduled") -> dict:
                     mode_label = "总库分流" if effective_mode == "library" else f"精确匹配({kw})"
                     details.append({
                         "id": r["id"], "source_dir": s_dir, "target_dir": t_dir,
-                        "keyword": kw, "mode": effective_mode, "moved": moved_count, "sample_names": sample_names
+                        "keyword": kw, "mode": effective_mode, "moved": moved_count, "sample_names": sample_names,
+                        "skips": moved_skip,
                     })
                     if moved_count > 0:
                         logstream.info("auto_move",
@@ -1358,9 +1377,11 @@ async def execute_auto_move(trigger: str = "scheduled") -> dict:
             total_moved = sum(d.get("moved", 0) for d in details)
             await asyncio.to_thread(db.set_setting, "auto_move_last_run", time.time())
 
-            # 移动完成推送通知
+            # 移动完成推送通知。触发门槛：有移动/手动执行/风控熔断，或出现同名歧义——
+            # 歧义=需要用户手动判断的信号（两库同名且无集数标识），必须提醒
+            amb_total = sum(int((d.get("skips") or {}).get("ambiguous") or 0) for d in details)
             if await asyncio.to_thread(db.get_setting, "auto_move_notify", True) and (
-                    total_moved > 0 or trigger == "manual" or risk_aborted):
+                    total_moved > 0 or trigger == "manual" or risk_aborted or amb_total > 0):
                 trig_desc = "手动排队执行" if trigger == "manual" else "定时计划执行"
                 now_str = time.strftime("%Y-%m-%d %H:%M:%S")
                 lines = [
@@ -1369,21 +1390,46 @@ async def execute_auto_move(trigger: str = "scheduled") -> dict:
                     f"• 完成时间：{now_str}",
                     f"• 规则统计：共处理 {len(rules)} 条规则，成功移动 {total_moved} 个文件",
                 ]
+                if amb_total > 0:
+                    lines.append(f"⚠️ 有 {amb_total} 个文件因两库同名且无集数标识未自动处理"
+                                 "（留在源目录），请手动判断归档")
                 if risk_aborted:
                     lines.append("⚠️ 注意：任务因触发 115 接口风控而提前中断，部分规则未执行")
                 lines.append("")
                 lines.append("明细：")
                 for d in details:
+                    sk = d.get("skips") or {}
+                    skip_parts = []
+                    if sk.get("ep"):
+                        skip_parts.append(f"按季集防重跳过 {sk['ep']}")
+                    if sk.get("ambiguous"):
+                        skip_parts.append(f"同名歧义跳过 {sk['ambiguous']}")
+                    if sk.get("movie"):
+                        skip_parts.append(f"电影库守卫跳过 {sk['movie']}")
+                    if sk.get("junk"):
+                        skip_parts.append(f"垃圾过滤 {sk['junk']}")
+                    if sk.get("dedup"):
+                        skip_parts.append(f"同名同内容查重 {sk['dedup']}")
+                    skip_txt = ("；" + "、".join(skip_parts)) if skip_parts else ""
                     if d.get("error"):
                         lines.append(f"• {d['target_dir']}：❌ 执行失败（{d['error'][:50]}）")
                     elif d.get("moved", 0) > 0:
                         samples = "、".join(d.get("sample_names", [])[:2])
                         extra = f"（如 {samples} 等）" if samples else ""
-                        lines.append(f"• {d['target_dir']}（关键词: {d['keyword']}）：移动 {d['moved']} 个文件{extra}")
+                        lines.append(f"• {d['target_dir']}（关键词: {d['keyword']}）："
+                                     f"移动 {d['moved']} 个文件{extra}{skip_txt}")
+                    elif skip_parts:
+                        lines.append(f"• {d['target_dir']}（关键词: {d['keyword']}）："
+                                     f"无新移动（{'、'.join(skip_parts)}）")
                     else:
                         lines.append(f"• {d['target_dir']}（关键词: {d['keyword']}）：无新文件")
                 lines.append("")
-                lines.append("💡 提示：文件夹均保持原地，仅移动含中文且含目标名称的正片文件。")
+                # 提示行按规则形态区分：云下载模式按任务目录名匹配，与普通规则口径不同
+                if any(r.get("dir_match") for r in rules):
+                    lines.append("💡 提示：文件夹均保持原地；普通规则按文件名匹配，"
+                                 "云下载模式规则按任务目录名匹配（英文名文件认领后保持原名）。")
+                else:
+                    lines.append("💡 提示：文件夹均保持原地，仅移动含中文且含目标名称的正片文件。")
                 full_msg = chr(10).join(lines)
                 await pan.run_pan_thread(notify, full_msg)
 
@@ -1393,6 +1439,23 @@ async def execute_auto_move(trigger: str = "scheduled") -> dict:
         finally:
             # 整理完成或异常中止，停止移动任务并恢复新任务接收与转存工作器
             transfer_gate.resume_all()
+
+
+def cloud_download_dirs() -> list[str]:
+    """当前配置的云下载目录集合（归一化为 /开头）。
+
+    权威来源=分类路由：每个分类取 offline_dir，未设置时回落该分类的 target_dir；
+    空值与 'skip' 排除。供「按父目录名匹配」规则的保存校验与运行时兜底校验使用。
+    """
+    dirs = set()
+    for r in db.query("SELECT target_dir, offline_dir FROM routes"):
+        od = str(r["offline_dir"] or "").strip()
+        if not od or od.lower() == "skip":
+            od = str(r["target_dir"] or "").strip()
+        if not od or od.lower() == "skip":
+            continue
+        dirs.add("/" + od.strip("/"))
+    return sorted(dirs)
 
 
 async def preview_auto_move(rule_ids: list[int] | None = None) -> dict:
@@ -1448,10 +1511,12 @@ async def preview_auto_move(rule_ids: list[int] | None = None) -> dict:
             em = rm if rm in ("library", "exact") else global_mode
             if em == "library" and r.get("target_dir", "").strip():
                 lib_targets.append(r["target_dir"].strip())
+        lib_targets = list(dict.fromkeys(lib_targets))  # 同一总库被多条规则指向只算一个
         ambiguous_kws: set[str] = set()
         if len(lib_targets) >= 2:
             ambiguous_kws = await pan.run_pan_thread(
                 pan.collect_library_keyword_conflicts, lib_targets, fuzzy_t2s, scan_cache)
+        cd_dirs = await asyncio.to_thread(cloud_download_dirs)
 
         out_rules: list[dict] = []
         total_planned = 0
@@ -1472,6 +1537,11 @@ async def preview_auto_move(rule_ids: list[int] | None = None) -> dict:
                 entry["error"] = "目标文件夹名为空，无法提取匹配关键词"
                 out_rules.append(entry)
                 continue
+            if r.get("dir_match") and s_dir not in cd_dirs:
+                entry["error"] = (f"源目录 {s_dir} 不是当前配置的云下载目录"
+                                  f"（{'、'.join(cd_dirs) or '未配置'}），云下载模式未生效")
+                out_rules.append(entry)
+                continue
             try:
                 planned_cnt, plan = await pan.run_pan_thread(
                     pan.move_matched_files_for_rule,
@@ -1486,6 +1556,7 @@ async def preview_auto_move(rule_ids: list[int] | None = None) -> dict:
                     dry_run=True,
                     rule_media_type=str(r.get("media_type") or "auto"),
                     ambiguous_kws=ambiguous_kws,
+                    match_by_dir=bool(r.get("dir_match")),
                 )
                 if isinstance(plan, dict):
                     entry["planned"] = plan.get("items", [])
@@ -1494,10 +1565,22 @@ async def preview_auto_move(rule_ids: list[int] | None = None) -> dict:
                     entry["skip_movie"] = int(plan.get("skip_movie") or 0)
                     entry["skip_ambiguous"] = int(plan.get("skip_ambiguous") or 0)
                     entry["skip_ambiguous_samples"] = list(plan.get("skip_ambiguous_samples") or [])
+                    entry["skip_junk"] = int(plan.get("skip_junk") or 0)
+                    entry["skip_dedup"] = int(plan.get("skip_dedup") or 0)
                 total_planned += len(entry["planned"])
-                logstream.info("auto_move",
-                               f"预览 [{s_dir} ➔ {t_dir}]：计划移动 {len(entry['planned'])} 个文件"
-                               + (f"，按季集防重将跳过 {entry['skip_ep']} 个" if entry["skip_ep"] else ""))
+                log_parts = [f"计划移动 {len(entry['planned'])} 个文件"]
+                if entry["skip_ep"]:
+                    log_parts.append(f"按季集防重将跳过 {entry['skip_ep']} 个")
+                if entry["skip_movie"]:
+                    log_parts.append(f"电影库守卫跳过 {entry['skip_movie']} 个")
+                if entry["skip_ambiguous"]:
+                    log_parts.append(f"同名歧义跳过 {entry['skip_ambiguous']} 个"
+                                     f"（{'、'.join(entry['skip_ambiguous_samples'][:2])}）")
+                if entry["skip_junk"]:
+                    log_parts.append(f"垃圾过滤跳过 {entry['skip_junk']} 个")
+                if entry["skip_dedup"]:
+                    log_parts.append(f"同名/同内容查重跳过 {entry['skip_dedup']} 个")
+                logstream.info("auto_move", f"预览 [{s_dir} ➔ {t_dir}]：" + "，".join(log_parts))
             except Exception as e:
                 entry["error"] = str(e)[:200]
                 logstream.warn("auto_move", f"预览规则 #{r['id']} [{s_dir} ➔ {t_dir}] 异常: {e}")

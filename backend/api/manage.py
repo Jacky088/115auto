@@ -2082,6 +2082,7 @@ def get_auto_move_rules(_=Depends(require_user)):
     return {
         "system_running": str(db.get_setting("running", False)).lower() == "true",
         "rules": rules,
+        "cloud_dirs": jobs.cloud_download_dirs(),
         "settings": {
             "auto_move_enabled": bool(db.get_setting("auto_move_enabled", False)),
             "auto_move_schedule_type": str(db.get_setting("auto_move_schedule_type", "interval") or "interval"),
@@ -2121,6 +2122,17 @@ def save_auto_move_rule(body: dict, _=Depends(require_user)):
     if media_type not in ("auto", "movie", "tv"):
         media_type = "auto"
 
+    # 按父目录名匹配（云下载模式）保存校验：源目录必须是当前配置的云下载目录，
+    # 防止把整目录匹配语义误用在普通目录上（结构性保证，不靠用户自觉）
+    dir_match = 1 if body.get("dir_match") else 0
+    if dir_match:
+        cd_dirs = jobs.cloud_download_dirs()
+        if source_dir not in cd_dirs:
+            raise HTTPException(
+                400,
+                f"源目录 {source_dir} 不是任何分类配置的云下载目录（当前：{'、'.join(cd_dirs) or '未配置'}）。"
+                "请先在「转存目录」页把对应分类的云下载目录设为该目录，或修改源目录后再开启此模式。")
+
     raw_kw = str(body.get("keyword", "")).strip()
     extracted_kw = pan.extract_target_folder_name(target_dir)
     keyword = raw_kw or extracted_kw
@@ -2131,14 +2143,14 @@ def save_auto_move_rule(body: dict, _=Depends(require_user)):
     rule_id = body.get("id")
     if rule_id:
         db.execute(
-            "UPDATE auto_move_rules SET source_dir=?, target_dir=?, keyword=?, mode=?, media_type=?, enabled=? WHERE id=?",
-            (source_dir, target_dir, keyword, mode, media_type, enabled, rule_id)
+            "UPDATE auto_move_rules SET source_dir=?, target_dir=?, keyword=?, mode=?, media_type=?, dir_match=?, enabled=? WHERE id=?",
+            (source_dir, target_dir, keyword, mode, media_type, dir_match, enabled, rule_id)
         )
     else:
         db.execute(
-            "INSERT INTO auto_move_rules(source_dir, target_dir, keyword, mode, media_type, enabled, created_at, last_run_at, last_moved_count) "
-            "VALUES(?,?,?,?,?,?,?,NULL,0)",
-            (source_dir, target_dir, keyword, mode, media_type, enabled, time.time())
+            "INSERT INTO auto_move_rules(source_dir, target_dir, keyword, mode, media_type, dir_match, enabled, created_at, last_run_at, last_moved_count) "
+            "VALUES(?,?,?,?,?,?,?,?,NULL,0)",
+            (source_dir, target_dir, keyword, mode, media_type, dir_match, enabled, time.time())
         )
     mode_desc = "总库分流" if mode == "library" else ("精确匹配" if mode == "exact" else "跟随全局")
     type_desc = {"movie": "，电影库", "tv": "，剧集库"}.get(media_type, "")
