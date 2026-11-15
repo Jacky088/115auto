@@ -6,3 +6,11 @@ __pycache__/
 backend/static/
 web/dist/
 方案.md
+# 安卓壳工程构建产物与签名密钥（密钥绝不入库）
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/app/keystore.keystore
+*.jks
+*.keystore

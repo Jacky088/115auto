@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 启动图标：品牌蓝底 + 白色下载箭头（托盘），纯矢量无位图依赖 -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@color/ic_bg" />
+    <item android:top="18dp" android:left="18dp" android:right="18dp" android:bottom="18dp">
+        <vector
+            android:width="76dp"
+            android:height="76dp"
+            android:viewportWidth="96"
+            android:viewportHeight="96">
+            <!-- 托盘 -->
+            <path
+                android:strokeColor="#FFFFFF"
+                android:strokeWidth="7"
+                android:strokeLineCap="round"
+                android:pathData="M24,62 L24,74 L72,74 L72,62" />
+            <!-- 下载箭头 -->
+            <path
+                android:strokeColor="#FFFFFF"
+                android:strokeWidth="7"
+                android:strokeLineCap="round"
+                android:strokeLineJoin="round"
+                android:pathData="M48,20 L48,52 M34,40 L48,54 L62,40" />
+        </vector>
+    </item>
+</layer-list>

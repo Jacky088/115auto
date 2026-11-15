@@ -135,6 +135,12 @@ docker compose up -d --build
 - 每次发版的数据库结构变更都在启动时自动迁移（`backend/database.py` 的 `_migrate`），
   且升级兼容性有专项测试保护（`tests/test_upgrade_compat.py`）
 
+## 安卓 App
+
+提供 WebView 壳 APK：首次启动输入面板地址即可使用，登录态与浏览器一致。工程在 `android/`，
+GitHub Actions 在 push `v*` 标签时自动构建 APK 挂到 Release（签名配置见 workflow 注释）；
+功能更新只需升级服务端，APK 无需重新安装。
+
 ## 首次使用
 
 登录后进入初始化向导，按提示完成 4 步：
