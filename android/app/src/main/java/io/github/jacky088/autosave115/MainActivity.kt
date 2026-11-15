@@ -11,6 +11,7 @@ import android.os.Bundle
 import android.os.Environment
 import android.text.InputType
 import android.view.Gravity
+import android.view.View
 import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.ValueCallback
@@ -50,6 +51,8 @@ class MainActivity : ComponentActivity() {
     private var webView: WebView? = null
     private var serverUrl: String? = null
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
+
+    private val prefs by lazy { getSharedPreferences(PREFS, Context.MODE_PRIVATE) }
 
     private val fileChooser = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
