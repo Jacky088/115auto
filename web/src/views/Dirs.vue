@@ -1496,6 +1496,7 @@ onUnmounted(() => {
   margin-top: 2px;
 }
 .feature-switch-pill {
+  min-width: 0; /* 网格项可收缩：长说明触发省略号而不是撑爆容器（移动端裁切根因） */
   display: flex;
   align-items: center;
   justify-content: space-between;
