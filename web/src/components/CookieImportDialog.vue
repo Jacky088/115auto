@@ -59,6 +59,6 @@ const submit = async () => {
   font-family: var(--font-family-mono); font-size: var(--fs-caption); color: var(--el-color-primary);
 }
 .ci-input { margin-top: 4px; }
-.ci-tip { font-size: var(--fs-caption); color: #b45309; font-weight: 600; margin: 8px 0 0; }
+.ci-tip { font-size: var(--fs-caption); color: var(--text-warn); font-weight: 600; margin: 8px 0 0; }
 .ci-footer { display: flex; justify-content: flex-end; gap: 10px; }
 </style>

@@ -46,8 +46,10 @@ def check_message(text: str, channel: str | None = None) -> tuple[bool, str, str
             if hit and hit in ch_norm:
                 return True, "channel", ch
     text = (text or "")[:4000]  # 与 classifier 同口径：截断超长文本再匹配
+    low = text.lower()          # 只转一次小写：关键词可能上百条，避免每条重复转换
     for kw in _blacklist()["keyword"]:
-        if kw and kw.lower() in text.lower():
+        hit = kw.strip().lower() if kw else ""
+        if hit and hit in low:  # 空白条目直接跳过，避免误拦所有消息
             return True, "keyword", kw
     return False, "", ""
 

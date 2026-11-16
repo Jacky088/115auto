@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 
 from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from .. import auth, config, database as db
 from ..core import logstream, tmdb_scraper, transfer_gate

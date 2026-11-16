@@ -108,7 +108,7 @@ def _do_restore(chat_id: str) -> str:
     if time.time() - ts > _RESTORE_TTL:
         return "待确认的备份已超时（10 分钟），请重新发送备份文件"
     try:
-        stats = db.restore_payload(data)
+        db.restore_payload(data)
     except ValueError as e:
         logstream.warn("system", f"TG 恢复备份失败（校验未通过）: {e}")
         return f"❌ 恢复失败：{e}\n当前数据未做任何更改，可放心重试"
@@ -178,10 +178,30 @@ USAGE_ADD = (
     "例如：/add @somechannel on"
 )
 
+
+def _usage_add() -> str:
+    """/add 用法回复：先列已添加频道，再接命令用法；没有任何频道时只返回用法。"""
+    rows = db.query("SELECT name, sub_only FROM channels ORDER BY id")
+    if not rows:
+        return USAGE_ADD
+    lines = [f"📺 已添加频道（{len(rows)}）", ""]
+    for r in rows:
+        lines.append(f"· @{r['name']}（{'仅订阅' if r['sub_only'] else '全盘转存'}）")
+    lines.append("")
+    lines.append(USAGE_ADD)
+    return "\n".join(lines)
+
+
+USAGE_SUB = (
+    "用法：\n"
+    "· /sub — 查看订阅\n"
+    "· /sub <片名> — 搜索 TMDB 并点选订阅\n"
+    "· /sub del <关键词> — 删除订阅"
+)
+
 HELP = (
     "可用指令：\n"
-    "/status — 查看运行状态（队列/限额/空间/频道）\n"
-    "/space — 查看 115 剩余空间\n"
+    "/status — 查看运行状态（队列/限额/115 空间）\n"
     "/ls — 最近 5 条转存记录\n"
     "/menu — 快捷操作菜单（按钮面板）\n"
     "/add <频道名或链接> on|off — 添加监控频道（on=仅订阅，off=全盘转存；on/off 必填）\n"
@@ -194,13 +214,15 @@ HELP = (
     "/backup — 导出并发送当前完整数据备份文件（.json 或 .json.gz）\n"
     "/restore — 发送备份文件后回复 /restore confirm 恢复数据\n"
     "/help — 显示本帮助\n"
-    "直接发送分享/磁力/电驴链接即可入队转存（无需指令，串行队列执行）"
+    "直发链接需带指令头（空格不影响，链接可紧贴）：\n"
+    "转存 [分类] <115 分享链接> — 进入分享转存队列\n"
+    "云下载 [分类] <磁力/电驴链接> — 进入云下载队列\n"
+    "分类可省略，省略时按标题规则识别；如「云下载 动漫 magnet:?xt=…」"
 )
 
 # 注册到 Telegram 的指令菜单：输入框左侧「菜单」按钮 / 输入 / 时可见
 BOT_MENU_COMMANDS = [
     {"command": "status", "description": "运行状态（队列/限额/空间）"},
-    {"command": "space", "description": "115 剩余空间"},
     {"command": "ls", "description": "最近 5 条转存记录"},
     {"command": "menu", "description": "快捷操作菜单（按钮面板）"},
     {"command": "add", "description": "添加频道：/add @频道 on|off"},
@@ -229,8 +251,9 @@ async def register_bot_menu(client: "httpx.AsyncClient", token: str) -> None:
         logstream.warn("system", f"TG Bot 菜单注册异常: {logstream.exc(e)}")
 
 
-def _gb(b: float) -> str:
-    return f"{b / (1 << 30):.1f}GB"
+def _tb(b: float) -> str:
+    """115 容量统一以 TB 显示（网盘容量均为 TB 级，GB 数字过长不易读）。"""
+    return f"{b / (1 << 40):.1f}TB"
 
 
 def _handle_command(text: str, chat_id: str) -> str:
@@ -252,7 +275,8 @@ def _handle_command(text: str, chat_id: str) -> str:
             try:
                 from ..pan115 import client as pan
                 sp = pan.space_info()
-                space_line = f"\n💾 115 空间：已用 {_gb(sp['use'])}/{_gb(sp['total'])}（{sp['ratio']}%）"
+                space_line = (f"\n💾 115 空间：已用 {_tb(sp['use'])}/{_tb(sp['total'])}"
+                              f"（{sp['ratio']}%）· 剩余 {_tb(sp.get('free', 0))}")
             except Exception:
                 pass
         running = db.get_setting("running", False)
@@ -262,14 +286,10 @@ def _handle_command(text: str, chat_id: str) -> str:
                 f"📥 队列：{queued} 个待转存\n"
                 f"✅ 近 24 小时成功：{today_s}｜❌ 失败/拦截：{today_f}\n"
                 f"📈 每日限额：{quota}/{limit}{space_line}")
-    if cmd == "/space":
-        try:
-            from ..pan115 import client as pan
-            sp = pan.space_info()
-            return (f"💾 115 空间\n\n已用 {_gb(sp['use'])} / {_gb(sp['total'])}"
-                    f"（{sp['ratio']}%）\n剩余 {_gb(sp.get('free', 0))}")
-        except Exception as e:
-            return f"查询空间失败: {str(e)[:120]}"
+    if cmd == "/add":
+        # 真正的添加流程由 bot_command_loop 的异步分支执行（需 await 频道校验），
+        # 同步路径仅做用法提示兜底
+        return _usage_add()
     if cmd == "/ls":
         rows = db.query("SELECT title, status, kind, increment, target_dir, created_at FROM transfers"
                         " ORDER BY id DESC LIMIT 5")
@@ -282,13 +302,9 @@ def _handle_command(text: str, chat_id: str) -> str:
             title = (r["title"] or "-")[:40]
             mark = label.get(r["status"], "·")
             kind_mark = ("☁️" if r["kind"] == "offline"
-                     else "🔁" if r["increment"] else "")
-        lines.append(f"{mark} {kind_mark}{title}")
+                         else "🔁" if r["increment"] else "")
+            lines.append(f"{mark} {kind_mark}{title}")
         return "\n".join(lines)
-    if cmd == "/add":
-        # 真正的添加流程由 bot_command_loop 的异步分支执行（需 await 频道校验），
-        # 同步路径仅做用法提示兜底
-        return USAGE_ADD
     if cmd == "/quota":
         return "Bot 暂不支持修改每日限额，请在网页「系统设置」中调整（默认 50）"
     if cmd == "/sub":
@@ -326,7 +342,7 @@ def _archive_status() -> str:
     on = bool(db.get_setting("auto_move_enabled", False))
     gate = transfer_gate.get_exclusive_status()
     gate_line = "空闲" if not gate.get("busy") else f"{gate.get('mode_label', '任务')}执行中"
-    lines = [f"📦 归档（定时文件整理）", "",
+    lines = ["📦 归档（定时文件整理）", "",
              f"• 功能：{'已开启' if on else '未开启'}｜门闸：{gate_line}"]
     if on:
         lr = db.query("SELECT source_dir, last_run_at, last_moved_count FROM auto_move_rules"
@@ -371,9 +387,8 @@ def _menu_keyboard() -> dict:
     """快捷操作菜单：按钮随当前状态变化（暂停/恢复）。订阅模式按频道独立设置。"""
     return {"inline_keyboard": [
         [{"text": "📊 运行状态", "callback_data": "c:status"},
-         {"text": "💾 115 空间", "callback_data": "c:space"}],
-        [{"text": "🕘 最近转存", "callback_data": "c:ls"},
-         {"text": "🔄 重试失败任务", "callback_data": "c:retry"}],
+         {"text": "🕘 最近转存", "callback_data": "c:ls"}],
+        [{"text": "🔄 重试失败任务", "callback_data": "c:retry"}],
         [{"text": "▶ 启动系统" if str(db.get_setting("running", False)).lower() != "true"
                   else "⏹ 停止系统", "callback_data": "c:toggle_running"}],
         [{"text": "🎬 订阅列表", "callback_data": "c:sub"},
@@ -400,30 +415,160 @@ def _submode_text() -> str:
     return "\n".join(lines)
 
 
-def _bot_enqueue_links(text: str, message_id: int) -> str:
-    """管理员直接发送分享/云下载链接：复用转存管线入队（分类路由/去重/黑名单全量继承）。
+# 直发链接的指令头：只需要「转存」或「云下载」两个词，决定这条链接进哪个队列。
+# 空格不作为有效信息：指令头可以紧贴链接（如「云下载magnet:?xt=…」）。
+# 指令头后可再写一个「分类 → 目录映射」里的分类名；写了就用该分类目录，
+# 不写则按标题规则识别、识别不出用「未分类动作」；写了不存在的分类名会直接报错。
+_LINK_HEADERS = (
+    ("云下载", "offline"), ("离线", "offline"),
+    ("转存", "share"), ("保存", "share"),
+)
+_LINK_PREFIXES = ("http://", "https://", "magnet:", "ed2k:", "thunder://", "ftp://")
+_TRIM_CHARS = " \t\r\n\u3000:：,，"
 
-    任务进入与网页完全相同的串行队列（单工作器 + 全局 115 串行门闸），不存在并发。
-    来源标记为 tgbot，在「转存归档」记录与 /ls 中可区分。
-    """
-    from ..core import pipeline
+
+def _parse_link_header(text: str) -> tuple[str, str]:
+    """解析直发链接的指令头，返回 (intent, 指令头之后的正文)；未带指令头返回 ("", 原文)。"""
+    s = (text or "").lstrip(_TRIM_CHARS)
+    for word, intent in _LINK_HEADERS:
+        if s.startswith(word):
+            return intent, s[len(word):].strip(_TRIM_CHARS)
+    return "", s
+
+
+def _route_categories() -> list[str]:
+    """「分类 → 目录映射」里的分类名（直发消息可选的分类前缀）。"""
     try:
-        res = pipeline.process_message(channel="tgbot", message_id=int(message_id or 0), text=text)
+        return [str(r["category"]) for r in db.query("SELECT category FROM routes ORDER BY category")]
+    except Exception:
+        return []
+
+
+def _starts_link(s: str) -> bool:
+    """正文是否直接以链接开头（说明没写分类）。"""
+    return s.lower().startswith(_LINK_PREFIXES)
+
+
+def _link_index(s: str) -> int:
+    """正文中第一个链接的起始位置；没有链接返回 -1（用于截出紧贴链接的分类名）。"""
+    low = s.lower()
+    hits = [i for i in (low.find(p) for p in _LINK_PREFIXES) if i >= 0]
+    return min(hits) if hits else -1
+
+
+def _split_category(body: str) -> tuple[str, str, str]:
+    """取出正文开头的分类名，返回 (category, 去掉分类名后的正文, 写错的分类名)。
+
+    分类名必须与「分类 → 目录映射」完全一致：
+    - 不写分类（正文直接是链接）→ ("", 原文, "")，由标题规则/未分类动作决定目录；
+    - 写了已配置的分类名 → 返回该分类，并从正文中去掉，避免污染标题；
+    - 写了不存在的分类名 → 第三项回传该词，由调用方报错并列出可选分类（不入队）。
+    """
+    s = (body or "").strip(_TRIM_CHARS)
+    if not s:
+        return "", s, ""
+    if _starts_link(s):
+        return "", s, ""
+    cats = _route_categories()
+    token = s.split()[0] if s.split() else ""
+    if token in cats:
+        return token, s[len(token):].strip(_TRIM_CHARS), ""
+    # 中文常不带空格（如「动漫magnet:?xt=…」）：按分类名做前缀匹配，长名优先
+    for cat in sorted(cats, key=len, reverse=True):
+        if len(cat) >= 2 and s.startswith(cat):
+            return cat, s[len(cat):].strip(_TRIM_CHARS), ""
+    # 开头是文字却不是已配置分类名：视为分类名写错，截到链接前作为错误提示
+    pos = _link_index(s)
+    return "", s, (s[:pos] if pos > 0 else token).strip(_TRIM_CHARS)[:30]
+
+
+def _link_usage(reason: str = "") -> str:
+    """直发链接格式说明（缺指令头 / 链接类型不符 / 无法确定目录时统一回复）。"""
+    cats = " / ".join(_route_categories())
+    lines = [f"❌ {reason}", ""] if reason else []
+    lines += [
+        "直发链接需以指令头开头，程序据此判断进哪个队列：",
+        "",
+        "转存 [分类] <115 分享链接>",
+        "云下载 [分类] <磁力 / 电驴 / 迅雷链接>",
+        "",
+        "示例（空格不影响识别，链接可紧贴指令头）：",
+        "云下载 magnet:?xt=urn:btih:xxxxxxxx",
+        "云下载 动漫 magnet:?xt=urn:btih:xxxxxxxx",
+        "转存 电影 https://115.com/s/xxxx?password=yyyy",
+        "",
+        "[分类] 可选，须与「分类 → 目录映射」的分类名完全一致：" + (cats or "（尚未配置分类）"),
+        "分类名写错会拒绝入队并列出现有分类；不写分类时按标题规则识别，识别不出则用「未分类动作」。",
+    ]
+    return "\n".join(lines)
+
+
+def _bot_enqueue_links(text: str, message_id: int) -> str:
+    """管理员直发链接：带「转存 / 云下载」指令头即可入队，目录读「分类 → 目录映射」。
+
+    指令头只决定队列（分享转存 / 云下载）；指令头后可再写一个分类名（如「云下载 动漫」），
+    写了就按该分类的目录存放，不写则按标题规则识别、识别不出用「未分类动作」。
+    任务进入与网页完全相同的串行队列，来源标记 tgbot，在「转存归档」与 /ls 中可区分。
+    """
+    from ..core import classifier, extractor, pipeline
+
+    intent, body = _parse_link_header(text)
+    if not intent:
+        return _link_usage("未识别到指令头（消息需以「转存」或「云下载」开头）")
+    links = extractor.extract(body)
+    if not links:
+        return _link_usage("指令头之后没有识别到链接")
+    kinds = {l.get("kind", "share") for l in links}
+    if len(kinds) > 1:
+        return _link_usage("同一条消息混有分享链接和磁力/电驴链接，请分开两条发送")
+    kind = kinds.pop()
+    if kind != intent:
+        is_offline = kind == "offline"
+        return _link_usage(
+            f"这条消息里是{'磁力/电驴（云下载）' if is_offline else '115 分享（转存）'}链接，"
+            f"请用「{'云下载' if is_offline else '转存'}」开头")
+    category, body, unknown = _split_category(body)
+    if unknown:
+        cats = " / ".join(_route_categories()) or "（尚未配置分类）"
+        return ("⚠️ 分类「" + unknown + "」不存在，本次未入队。\n\n"
+                "现有分类（须与「分类 → 目录映射」完全一致）：\n" + cats + "\n\n"
+                "请修正分类名后重发，例如：\n"
+                "云下载 动漫 <磁力链接>\n"
+                "转存 电影 <115 分享链接>\n\n"
+                "也可以不写分类：云下载 <链接>（按标题规则识别，识别不出用「未分类动作」）")
+    if category and not classifier.resolve_target(category, kind=kind):
+        label = "云下载" if kind == "offline" else "转存"
+        return (f"⚠️ 分类「{category}」没有可用的{label}目录（未配置或设为跳过）。\n"
+                "请到「分类 → 目录映射」为该分类设置目录，或不写分类后重发。")
+    mid = int(message_id or 0)
+    try:
+        res = pipeline.process_message(channel="tgbot", message_id=mid,
+                                       text=body or text, force_category=category)
     except Exception as e:
         logstream.error("transfer", f"TG Bot 链接入队失败: {logstream.exc(e)}")
         return f"入队失败: {str(e)[:120]}"
     if not res.get("links"):
         return "未识别到可转存的链接（支持 115 分享 / 磁力 / 电驴 / 迅雷）"
+    label = "云下载" if kind == "offline" else "转存"
     parts = []
     if res.get("queued"):
-        parts.append(f"✅ 已入队 {res['queued']} 个转存任务（串行队列，自动排队执行）")
+        parts.append(f"✅ 已入队 {res['queued']} 个{label}任务（串行队列自动执行）")
     if res.get("duplicates"):
         parts.append(f"🔁 重复跳过 {res['duplicates']} 个")
-    if res.get("skipped"):
-        parts.append(f"⏭ 未入队 {res['skipped']} 个（未分类或分类路由为跳过，可在消息里附标题帮助分类）")
     if res.get("blocked"):
         parts.append("⛔ 命中黑名单拦截")
-    return "\n".join(parts)
+    if res.get("skipped") and not res.get("queued") and not res.get("duplicates"):
+        # 取出管线写入的跳过原因，直接把「该去哪里改目录」告诉用户
+        row = db.query(
+            "SELECT error FROM transfers WHERE channel='tgbot' AND message_id=?"
+            " AND status='skipped' ORDER BY id DESC LIMIT 1", (mid,), one=True)
+        reason = str((row["error"] if row else "") or "未分类，且没有可用的目标目录")
+        parts.append(f"⏭ 未入队：{reason}")
+        if "未分类" in reason:
+            parts.append("可在「分类 → 目录映射」把「未分类动作」设为目录（如 /待整理）后重发。")
+    elif res.get("skipped"):
+        parts.append(f"⏭ 另有 {res['skipped']} 个未入队（原因见「转存归档」记录）")
+    return "\n".join(parts) or "未入队（原因见日志）"
 
 
 def _handle_callback(data: str) -> tuple[str, dict]:
@@ -446,7 +591,7 @@ def _handle_callback(data: str) -> tuple[str, dict]:
     if data.startswith("c:"):
         cmd = data[2:].split()[0] if data[2:].strip() else ""
         args = data[2:].split()[1:]
-        if cmd in ("status", "space", "ls", "sub", "retry", "help"):
+        if cmd in ("status", "ls", "sub", "retry", "help"):
             text = _handle_command(f"/{cmd} {' '.join(args)}".strip(), "")
             return text, (_menu_keyboard() if cmd != "help" else {})
     return "未知操作", _menu_keyboard()
@@ -460,12 +605,12 @@ async def add_channel_flow(raw: str) -> str:
     import re as _re
     tokens = str(raw or "").split()
     if len(tokens) != 2 or tokens[1].lower() not in ("on", "off"):
-        return USAGE_ADD
+        return _usage_add()
     name, mode = tokens[0], tokens[1].lower()
     m = _re.search(r"t\.me/(?:s/)?@?([0-9A-Za-z_]+)", name)
     name = (m.group(1) if m else name).lstrip("@").strip()
     if not name:
-        return USAGE_ADD
+        return _usage_add()
     if len(name) > 64:
         return "频道名过长（最多 64 字符）"
     if not _re.fullmatch(r"[0-9A-Za-z_]{1,64}", name):
@@ -515,14 +660,14 @@ def _handle_sub(args: list[str]) -> str:
         return "添加订阅请发送 /sub <片名>，我会搜索 TMDB 返回海报供你点选订阅"
     rows = db.query("SELECT keyword, enabled, last_ep, last_title FROM subscriptions ORDER BY id")
     if not rows:
-        return "暂无订阅。发送 /sub <片名> 搜索并点选订阅"
+        return USAGE_SUB
     lines = ["🎬 追剧订阅", ""]
     for r in rows:
         ep = f"（{r['last_ep']}）" if r["last_ep"] else ""
         mark = "" if r["enabled"] else "⏸ "
         lines.append(f"· {mark}{r['keyword']}{ep}")
     lines.append("")
-    lines.append("ℹ️ 仅订阅/全盘转存按频道独立设置：网页「账号管理」或菜单「📺 频道订阅模式」查看")
+    lines.append(USAGE_SUB)
     return "\n".join(lines)
 
 
@@ -1075,10 +1220,10 @@ async def bot_command_loop():
                             continue
                         text = (msg.get("text") or "").strip()
                         if not text.startswith("/"):
-                            # 管理员直接发送链接（115 分享/磁力/电驴/迅雷）：自动入队转存。
-                            # 复用转存管线与串行队列，不引入任何并发；无链接的消息维持静默
+                            # 管理员直接发送链接：必须带「转存 / 云下载」指令头。
+                            # 缺指令头但含链接 → 回复格式说明；无链接且无指令头 → 静默
                             from ..core import extractor as _ext
-                            if _ext.extract(text):
+                            if _ext.extract(text) or _parse_link_header(text)[0]:
                                 try:
                                     reply = await asyncio.to_thread(
                                         _bot_enqueue_links, text, msg.get("message_id") or 0)
@@ -1118,7 +1263,8 @@ async def bot_command_loop():
                             elif text.lower().startswith("/add"):
                                 # /add 需要异步做频道可访问性校验，单独处理
                                 reply = await add_channel_flow(text.split(None, 1)[1]) \
-                                    if len(text.split(None, 1)) > 1 else USAGE_ADD
+                                    if len(text.split(None, 1)) > 1 \
+                                    else await asyncio.to_thread(_usage_add)
                             elif text.lower().startswith("/archive"):
                                 parts_a = text.split()
                                 if len(parts_a) > 1 and parts_a[1].lower() == "run":

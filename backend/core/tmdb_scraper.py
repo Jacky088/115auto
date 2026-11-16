@@ -376,7 +376,6 @@ def score_candidate(
     if kind == "tv":
         season_num = parsed.season if parsed.season is not None else 1
         max_ep = int((ep_stats or {}).get("max_ep") or parsed.episode or 0)
-        ep_count = int((ep_stats or {}).get("video_count") or (1 if parsed.episode else 0))
         season_info = next((s for s in seasons_raw if int(s.get("season_number") or 0) == season_num), None)
         if season_info is not None:
             tmdb_cnt = int(season_info.get("episode_count") or 0)

@@ -172,7 +172,7 @@
                        @current-change="loadLedger" @size-change="onLedgerSizeChange" />
 
         <!-- 撤销确认弹窗：说明「再移走」后果，可选停用涉及规则 -->
-        <el-dialog v-model="undoDialog.visible" title="撤销整理" width="480px">
+        <el-dialog v-model="undoDialog.visible" title="撤销整理" width="min(480px, 94vw)">
           <p style="margin: 0 0 8px">
             将撤销 <b>{{ undoDialog.label }}</b>，文件会被移回整理前的源目录。
           </p>

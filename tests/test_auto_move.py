@@ -1,11 +1,10 @@
 """自动文件整理（按目录映射移动中文文件）功能与三阶段门禁测试集"""
 import asyncio
 import os
-import re
 import sys
 import tempfile
 import time
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ["DATA_DIR"] = tempfile.mkdtemp(prefix="autosave_test_move_")

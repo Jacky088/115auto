@@ -6,7 +6,7 @@ import threading
 import time
 from ipaddress import ip_address, ip_network
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 
 from .. import auth, config, database as db
 from ..core import classifier, filters, logstream, patguard, pipeline, subscribe as submod, transfer_gate
@@ -153,7 +153,7 @@ def logout(request: Request, response: Response, _=Depends(require_user)):
 
 @router.get("/auth/me")
 def me(request: Request, response: Response, authorization: str = Header(default="")):
-    username = require_user(request, response, authorization)
+    require_user(request, response, authorization)
     if authorization.startswith("Bearer "):
         # 旧会话迁移：token 经 Bearer 头到达时补发 HttpOnly Cookie，后续请求不再依赖前端保存
         token = authorization[7:]
@@ -321,8 +321,181 @@ def system_state(_=Depends(require_user)):
         "setup_completed": bool(db.get_setting("setup_completed", False)),
         "paused": bool(db.get_setting("paused", False)),
         "auto_stop_reason": reason,
+        # 空间门闸：任务仍在排队（不是失败），仅暂停消费，供顶栏醒目提示
+        "space_blocked": bool(db.get_setting("space_blocked", False)),
+        "space_blocked_reason": str(db.get_setting("space_blocked_reason", "") or ""),
         **r,
     }
+
+
+# ---------- dashboard ----------
+@router.get("/system/doctor")
+def system_doctor(_=Depends(require_user)):
+    """一键自检：只读诊断，输出可复制报告。
+
+    安全约束：不返回 Cookie/Token/代理密码等任何凭据原文（只回布尔/掩码/计数），
+    单项检查异常只降级为 fail 项，绝不向调用方抛 500。
+    """
+    import os
+    import shutil
+    from datetime import datetime
+
+    checks: list[dict] = []
+
+    def add(cid: str, name: str, status: str, detail: str, ms: float = 0.0):
+        checks.append({"id": cid, "name": name, "status": status,
+                       "detail": detail, "ms": int(ms)})
+
+    def run(cid: str, name: str, fn):
+        t0 = time.perf_counter()
+        try:
+            status, detail = fn()
+        except Exception as e:  # 单项失败不影响其它检查
+            status, detail = "fail", f"检查异常：{type(e).__name__}: {str(e)[:160]}"
+        add(cid, name, status, detail, (time.perf_counter() - t0) * 1000)
+
+    # 1. 数据库
+    def _db():
+        row = db.query("PRAGMA quick_check", one=True)
+        val = str(next(iter(dict(row).values()))) if row else ""
+        if val.lower() != "ok":
+            return "fail", f"完整性检查未通过：{val[:120]}"
+        size = config.DB_PATH.stat().st_size if config.DB_PATH.exists() else 0
+        return "ok", f"SQLite 完整性正常，数据库 {size / 1048576:.2f}MB，WAL 模式"
+    run("db", "数据库完整性", _db)
+
+    # 2. 数据目录可写
+    def _data_dir():
+        probe = config.DATA_DIR / f".doctor_probe_{os.getpid()}"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+        return "ok", f"数据目录可读写：{config.DATA_DIR}"
+    run("data_dir", "数据目录读写", _data_dir)
+
+    # 3. 磁盘空间
+    def _disk():
+        usage = shutil.disk_usage(str(config.DATA_DIR))
+        free_gb = usage.free / (1 << 30)
+        status = "warn" if free_gb < 2 else "ok"
+        return status, f"剩余 {free_gb:.1f}GB / 共 {usage.total / (1 << 30):.1f}GB"
+    run("disk", "磁盘空间", _disk)
+
+    # 4. 115 登录（复用缓存，不打额外请求）
+    def _login():
+        st = pan.check_login(False)
+        if st.get("ok"):
+            name = str(st.get("name") or st.get("nickname") or "")
+            return "ok", "115 登录态有效" + (f"（{name[:40]}）" if name else "")
+        return "fail", "115 未登录或 Cookie 失效，请到「账号管理」重新扫码/导入 Cookie"
+    run("pan_login", "115 登录态", _login)
+
+    # 5. 115 容量
+    def _space():
+        sp = pan.space_info()
+        total, used = int(sp.get("total") or 0), int(sp.get("use") or 0)
+        if not total:
+            return "warn", "容量接口未返回总空间"
+        pct = used / total * 100
+        status = "warn" if pct >= 95 else "ok"
+        return status, f"已用 {used / (1 << 40):.2f}TB / {total / (1 << 40):.2f}TB（{pct:.1f}%）"
+    run("pan_space", "115 网盘容量", _space)
+
+    # 6. 频道
+    def _channels():
+        rows = db.query("SELECT type, enabled FROM channels")
+        enabled = [r for r in rows if r["enabled"]]
+        if not enabled:
+            return "fail", "没有启用中的频道，无法接收任何消息"
+        polling = sum(1 for r in enabled if r["type"] == "polling")
+        return "ok", f"启用频道 {len(enabled)} 个（轮询 {polling} / Userbot {len(enabled) - polling}）"
+    run("channels", "频道配置", _channels)
+
+    # 7. Telegram 配置（只报是否配置，不回传值）
+    def _tg():
+        token = bool(str(db.get_setting("notify_token", "") or "").strip())
+        chat = bool(str(db.get_setting("notify_chat_id", "") or "").strip())
+        if token and chat:
+            return "ok", "Bot Token 与 Chat ID 均已配置"
+        if token or chat:
+            return "warn", "Bot Token 与 Chat ID 只配置了其中一项，通知可能发送失败"
+        return "warn", "未配置 Telegram 通知（不影响转存，仅影响消息推送）"
+    run("tg", "Telegram 通知", _tg)
+
+    # 8. 运行状态
+    def _running():
+        running = bool(db.get_setting("running", False))
+        paused = bool(db.get_setting("paused", False))
+        reason = str(db.get_setting("auto_stop_reason", "") or "").strip()
+        if reason:
+            return "fail", f"已自动停止：{reason[:120]}"
+        if not running:
+            return "warn", "系统当前未运行，不会监听与转存"
+        if paused:
+            return "warn", "系统运行中但转存已暂停"
+        return "ok", "系统运行中"
+    run("running", "运行状态", _running)
+
+    # 9. 转存队列健康
+    def _queue():
+        timeout = 60
+        try:
+            timeout = max(1, int(float(db.get_setting("running_timeout_min", 60))))
+        except (TypeError, ValueError):
+            pass
+        now = time.time()
+        stale = db.query(
+            "SELECT COUNT(*) AS n FROM transfers WHERE status='running'"
+            " AND running_at IS NOT NULL AND running_at < ?",
+            (now - (timeout * 60 + 300),), one=True)["n"]
+        queued = db.query("SELECT COUNT(*) AS n FROM transfers WHERE status='queued'", one=True)["n"]
+        failed = db.query(
+            "SELECT COUNT(*) AS n FROM transfers WHERE status='failed' AND finished_at > ?",
+            (now - 86400,), one=True)["n"]
+        if stale:
+            return "fail", f"{stale} 个任务长时间 running（超过 {timeout} 分钟未完成），等待看门狗回收"
+        if failed:
+            return "warn", f"排队 {queued} 个；近 24 小时失败 {failed} 个，可到「转存记录」查看原因"
+        return "ok", f"排队 {queued} 个，近 24 小时无失败任务"
+    run("queue", "转存队列", _queue)
+
+    # 10. 通知渠道 / 定时计划 / 质量策略（配置概览）
+    def _features():
+        chans = [n for n, k in (("Bark", "bark_url"), ("PushPlus", "pushplus_token"),
+                                ("ntfy", "ntfy_url")) if str(db.get_setting(k, "") or "").strip()]
+        parts = [f"通知渠道：{'、'.join(chans) if chans else '仅 Telegram/未配置'}"]
+        if db.get_setting("schedule_enabled", False):
+            parts.append(f"定时转存 {db.get_setting('schedule_start', '22:00')}"
+                         f"-{db.get_setting('schedule_end', '08:00')}")
+        if db.get_setting("quality_policy_enabled", False):
+            mq = str(db.get_setting("quality_min_resolution", "") or "") or "不限"
+            parts.append(f"质量策略最低画质 {mq}")
+            if db.get_setting("wash_enabled", False):
+                parts.append(f"洗版归档 {db.get_setting('wash_archive_dir', '') or '未配置'}")
+        return "ok", "；".join(parts)
+    run("features", "功能配置", _features)
+
+    # 11. 日志目录
+    def _logs():
+        if not config.LOG_DIR.exists():
+            return "warn", "日志目录不存在（启动后会自动重建）"
+        size = sum(f.stat().st_size for f in config.LOG_DIR.glob("*") if f.is_file())
+        return "ok", f"日志目录正常，占用 {size / 1048576:.1f}MB"
+    run("logs", "日志目录", _logs)
+
+    # ---- 汇总 ----
+    counts = {"ok": 0, "warn": 0, "fail": 0, "skip": 0}
+    for c in checks:
+        counts[c["status"]] = counts.get(c["status"], 0) + 1
+    overall = "fail" if counts["fail"] else ("warn" if counts["warn"] else "ok")
+    rank = {"fail": "FAIL", "warn": "WARN", "ok": "OK", "skip": "SKIP"}
+    lines = [f"115AutoSave {config.APP_VERSION} 自检报告",
+             f"时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+             f"结论：{rank.get(overall, overall)}"
+             f"（正常 {counts['ok']} / 警告 {counts['warn']} / 失败 {counts['fail']}）"]
+    lines += [f"[{rank.get(c['status'], c['status'])}] {c['name']}：{c['detail']}" for c in checks]
+    return {"overall": overall, "version": config.APP_VERSION, "checks": checks,
+            "counts": counts, "report": "\n".join(lines),
+            "generated_at": time.time()}
 
 
 # ---------- dashboard ----------
@@ -573,6 +746,14 @@ def _clean_aliases(value) -> list[str]:
     return out
 
 
+def _clean_min_quality(value) -> str:
+    """订阅级最低画质：空串=跟随全局设置。"""
+    s = str(value or "").strip().lower()
+    if s not in ("", "720p", "1080p", "2160p"):
+        raise HTTPException(400, "订阅最低画质仅支持 跟随全局 / 720p / 1080p / 2160p")
+    return s
+
+
 def _clean_tmdb_meta(body: dict, current_id=None, current_kind="") -> tuple[int | None, str]:
     """校验 TMDB 元数据（仅做记录展示，不参与匹配）。"""
     tmdb_id = current_id
@@ -624,11 +805,12 @@ def add_subscription(body: dict, _=Depends(require_user)):
     if conflict:
         raise HTTPException(400, f"订阅「{kw}」与现有订阅「{conflict['keyword']}」重复")
     tmdb_id, kind = _clean_tmdb_meta(body)
+    min_quality = _clean_min_quality(body.get("min_quality"))
     db.execute(
-        "INSERT INTO subscriptions(keyword,note,aliases,tmdb_id,kind,created_at)"
-        " VALUES(?,?,?,?,?,?)",
+        "INSERT INTO subscriptions(keyword,note,aliases,tmdb_id,kind,min_quality,created_at)"
+        " VALUES(?,?,?,?,?,?,?)",
         (kw, (body.get("note") or "")[:200],
-         json.dumps(aliases, ensure_ascii=False), tmdb_id, kind, time.time()))
+         json.dumps(aliases, ensure_ascii=False), tmdb_id, kind, min_quality, time.time()))
     logstream.info("subscribe", f"添加追剧订阅：{kw}（别名 {len(aliases)} 个）")
     return {"ok": True}
 
@@ -672,6 +854,9 @@ def update_subscription(sub_id: int, body: dict, _=Depends(require_user)):
         db.execute("UPDATE subscriptions SET tmdb_id=? WHERE id=?", (tmdb_id, sub_id))
     if "kind" in body:
         db.execute("UPDATE subscriptions SET kind=? WHERE id=?", (kind, sub_id))
+    if "min_quality" in body:
+        db.execute("UPDATE subscriptions SET min_quality=? WHERE id=?",
+                   (_clean_min_quality(body.get("min_quality")), sub_id))
     # 关键词变更后旧剧的进度不再适用；reset_progress 显式重置也可
     if body.get("reset_progress") or kw_changed:
         _reset_progress_sql(sub_id)
@@ -697,15 +882,12 @@ def _tmdb_lang() -> str:
 
 
 def _tmdb_get(path: str, params: dict, timeout: float = 10):
-    """带代理请求 TMDB，返回响应对象；调用方自行处理异常。"""
-    import httpx
-    proxy = None
-    try:
-        proxy = jobs._tg_proxy()
-    except Exception:
-        pass
-    return httpx.get(f"https://api.themoviedb.org/3{path}",
-                     params=params, proxy=proxy, timeout=timeout)
+    """带代理请求 TMDB，返回响应对象；调用方自行处理异常。
+
+    统一走 core.tmdb_scraper.tmdb_get：与刮削/订阅共用「代理优先、失败直连」的同一套逻辑，
+    避免两处客户端行为漂移（此前这里只取代理，代理不可用时直接抛错）。"""
+    from ..core.tmdb_scraper import tmdb_get
+    return tmdb_get(path, params, timeout=timeout)
 
 
 def _tmdb_item(it: dict, kind: str) -> dict | None:
@@ -1149,7 +1331,7 @@ def save_rules(body: dict, _=Depends(require_user)):
         saved_routes = len(categories)
 
     if "unclassified_action" in body:
-        db.set_setting("unclassified_action", body["unclassified_action"])
+        db.set_setting("unclassified_action", _clean_dir_action(body["unclassified_action"]))
 
     classifier.invalidate()
     parts = []
@@ -1399,8 +1581,23 @@ _INT_SETTINGS = {
 _BOOL_SETTINGS = {"enable_share_transfer", "enable_offline_download",
                   "notify_transfer_success", "schedule_enabled",
                   "subscription_only", "dedup_by_name", "organize_enabled",
-                  "share_update_enabled",
+                  "share_update_enabled", "quality_policy_enabled", "wash_enabled",
+                  "space_guard_enabled",
                   "digest_enabled", "auto_backup_enabled"}
+
+
+def _clean_dir_action(v) -> str:
+    """未分类动作：skip，或 / 开头的 115 网盘子目录（拒绝根目录、..、空格）。"""
+    s = str(v or "").strip()
+    if not s or s == "skip":
+        return "skip"
+    if not s.startswith("/") or not s.strip("/"):
+        raise HTTPException(400, "未分类动作需为 skip 或 / 开头的网盘目录（如 /未整理）")
+    if any(p == ".." for p in s.split("/")) or any(ch.isspace() for ch in s):
+        raise HTTPException(400, "未分类目录不能包含 .. 或空格（如 /未整理）")
+    if len(s) > 200:
+        raise HTTPException(400, "未分类目录过长，请控制在 200 个字符以内")
+    return s.rstrip("/")
 
 
 def _norm_setting(k: str, v):
@@ -1461,7 +1658,7 @@ def _norm_setting(k: str, v):
             raise HTTPException(400, "tg_mode 仅支持 polling / userbot / both")
         return s
     if k == "unclassified_action":
-        return str(v).strip() or "skip"
+        return _clean_dir_action(v)
     if k == "proxy":  # 仅接受 http(s)/socks 代理地址：拦截换行/空格等脏值导致后台请求库解析崩溃。
         # 不拦截内网地址——局域网代理（如 http://192.168.x.x:7890）是合法部署场景，
         # 且本设置仅管理员登录后可改，不构成未认证攻击面
@@ -1521,6 +1718,17 @@ def _norm_setting(k: str, v):
             return max(0, min(600, int(float(v))))
         except (TypeError, ValueError):
             return 90
+    if k == "quality_min_resolution":
+        s = str(v or "").strip().lower()
+        if s not in ("", "720p", "1080p", "2160p"):
+            raise HTTPException(400, "最低画质仅支持 不限 / 720p / 1080p / 2160p")
+        return s
+    if k == "wash_archive_dir":
+        # 115 网盘虚拟路径：必须以 / 开头；拒绝 .. 段，防止拼出意外目录
+        s = str(v or "").strip()
+        if s and (not s.startswith("/") or any(p == ".." for p in s.split("/"))):
+            raise HTTPException(400, "洗版归档目录需为以 / 开头的 115 网盘路径（如 /媒体库/云下载）")
+        return s.rstrip("/") if s.strip("/") else ""
     if v is None:
         return ""
     return v if isinstance(v, str) else str(v)
@@ -1541,6 +1749,8 @@ def get_settings(_=Depends(require_user)):
             "tg_api_id", "tg_api_hash", "tg_phone",
             "subscription_only", "dedup_by_name", "organize_enabled",
             "share_update_enabled",
+            "quality_policy_enabled", "quality_min_resolution", "wash_enabled", "wash_archive_dir",
+            "space_guard_enabled",
             "tmdb_api_key",
             "bark_url", "pushplus_token", "pushplus_topic", "ntfy_url", "ntfy_token",
             "digest_enabled", "digest_time",
@@ -1557,6 +1767,9 @@ def get_settings(_=Depends(require_user)):
                 "health_check_interval_min": 10, "dedup_cache_ttl_sec": 90,
                 "subscription_only": False, "dedup_by_name": True,
                 "organize_enabled": False, "share_update_enabled": True,
+                "quality_policy_enabled": False, "quality_min_resolution": "",
+                "wash_enabled": False, "wash_archive_dir": "",
+                "space_guard_enabled": True,
                 "digest_enabled": True, "digest_time": "21:00",
                 "auto_backup_enabled": False, "auto_backup_days": 7, "auto_backup_time": "04:00",
                 "auto_move_enabled": False, "auto_move_dedup_by_episode": True,
@@ -1586,6 +1799,8 @@ def put_settings(body: dict, _=Depends(require_user)):
                "tg_api_id", "tg_api_hash", "tg_phone",
                "subscription_only", "dedup_by_name", "organize_enabled",
                "share_update_enabled",
+               "quality_policy_enabled", "quality_min_resolution", "wash_enabled", "wash_archive_dir",
+            "space_guard_enabled",
                "tmdb_api_key",
                "bark_url", "pushplus_token", "pushplus_topic", "ntfy_url", "ntfy_token",
                "digest_enabled", "digest_time",
@@ -1628,6 +1843,17 @@ def put_settings(body: dict, _=Depends(require_user)):
         tg_chat_id = str(updates.get("notify_chat_id", db.get_setting("notify_chat_id", "")) or "").strip()
         if not tg_token or not tg_chat_id:
             raise HTTPException(400, "开启「定时自动备份」必须先配置并保存 Telegram Bot Token 与 Chat ID，否则备份文件无法送达！")
+
+    # 3. 洗版升级必须指定旧版归档目录：否则只能重复转存、无法安全替换旧版本
+    wash_on = updates.get("wash_enabled")
+    if wash_on is None:
+        wash_on = bool(db.get_setting("wash_enabled", False))
+    if wash_on:
+        archive = str(updates.get("wash_archive_dir", db.get_setting("wash_archive_dir", "")) or "").strip()
+        # 根目录 "/" 归一化后为空：视为未配置，避免"归档到根目录"这种危险默认
+        if not archive.strip("/"):
+            raise HTTPException(400, "开启「洗版升级」必须先填写旧版归档目录（如 /媒体库/洗版归档），"
+                                     "升级后的旧版本会移入该目录而不是被删除")
 
     for k, v in updates.items():
         db.set_setting(k, v)

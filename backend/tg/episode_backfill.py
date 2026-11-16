@@ -39,8 +39,9 @@ def _persist_add(req: dict) -> None:
         pending = db.get_setting(_PENDING_KEY, []) or []
         pending.append(req)
         db.set_setting(_PENDING_KEY, pending)
-    except Exception:
-        pass
+    except Exception as e:
+        # 只影响「重启后自动恢复」，当前请求仍会正常执行；记日志便于排查为何重启后丢失
+        logstream.warn("backfill", f"补全请求持久化失败（重启后不会自动恢复）: {e}")
 
 
 def _persist_done(req: dict) -> None:
@@ -57,8 +58,8 @@ def _persist_done(req: dict) -> None:
         else:
             pending = [p for p in pending if p != req]
         db.set_setting(_PENDING_KEY, pending)
-    except Exception:
-        pass
+    except Exception as e:
+        logstream.warn("backfill", f"补全请求落库清理失败（重启后可能重复处理）: {e}")
 
 _YEAR_PAREN = re.compile(r"[（(]\s*\d{4}\s*[）)]\s*")
 
@@ -180,8 +181,8 @@ async def episode_backfill_loop():
             await _queue.put(req)
         if pending:
             logstream.info("system", f"恢复 {len(pending)} 个待处理的向前补全请求")
-    except Exception:
-        pass
+    except Exception as e:
+        logstream.warn("backfill", f"恢复补全队列失败（本轮从空队列开始）: {e}")
     while True:
         req = await _queue.get()
         try:

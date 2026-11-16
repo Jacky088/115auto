@@ -17,3 +17,11 @@ android/app/keystore.keystore
 
 # 本地临时工作区（脚本/草稿），不入库
 scratch/
+
+# 部署环境变量（含真实密码/代理地址），仅保留模板
+.env
+.env.*
+!.env.example
+
+# 静态检查缓存
+.ruff_cache/

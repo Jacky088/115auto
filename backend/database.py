@@ -1,7 +1,6 @@
 """SQLite 数据层：所有表、设置读写、种子数据。同步 sqlite3 + WAL，小数据量足够。"""
 import json
 import logging
-import os
 import re
 import shutil
 import sqlite3
@@ -76,6 +75,7 @@ CREATE TABLE IF NOT EXISTS subscriptions(
     last_episode INTEGER,              -- 最近命中的集号
     last_title TEXT DEFAULT '',        -- 最近一次命中的标题
     last_match_at REAL,                -- 最近命中时间
+    min_quality TEXT DEFAULT '',       -- 该订阅最低画质（空=跟随全局设置）
     created_at REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS messages(
@@ -107,12 +107,22 @@ CREATE TABLE IF NOT EXISTS transfers(
     increment INTEGER NOT NULL DEFAULT 0,  -- 1=追更任务（同一分享新增集数，只转存新文件）
     priority INTEGER NOT NULL DEFAULT 0,   -- 队列优先级：1=向前补全（额度有限时优先消耗）
     running_at REAL,                       -- 领取时间：看门狗据此回收卡死的转存任务
+    sub_id INTEGER NOT NULL DEFAULT 0,     -- 命中的订阅 id（质量策略按订阅+同一集比较）
+    episode_key TEXT NOT NULL DEFAULT '',  -- 集标识（S01E05 / 第5集），空=无法识别
+    quality_score INTEGER NOT NULL DEFAULT 0, -- 画质分数（0=未知，不参与比较）
+    quality_tag TEXT NOT NULL DEFAULT '',  -- 画质标签（1080p WEB H265）
+    wash INTEGER NOT NULL DEFAULT 0,       -- 1=洗版升级任务
+    wash_from INTEGER NOT NULL DEFAULT 0,  -- 被洗版的旧成功任务 id
+    dest_cid INTEGER NOT NULL DEFAULT 0,   -- 成功后记录落盘目录/顶层条目，供后续洗版定位
+    dest_ids TEXT NOT NULL DEFAULT '',     -- 落盘顶层条目 id（JSON 数组）
     created_at REAL NOT NULL,
     finished_at REAL
 );
 CREATE INDEX IF NOT EXISTS idx_transfers_status ON transfers(status);
 CREATE INDEX IF NOT EXISTS idx_transfers_code ON transfers(share_code);
 CREATE INDEX IF NOT EXISTS idx_transfers_created ON transfers(created_at);
+-- 消息列表页按 (channel, message_id) 关联转存状态（相关子查询），无索引会随记录量线性变慢
+CREATE INDEX IF NOT EXISTS idx_transfers_channel_msg ON transfers(channel, message_id);
 CREATE TABLE IF NOT EXISTS daily_quota(
     day TEXT PRIMARY KEY, count INTEGER NOT NULL DEFAULT 0
 );
@@ -256,6 +266,15 @@ DEFAULT_SETTINGS = {
     "dedup_by_name": True,            # 转存前检查目标目录已有同名内容，命中判重跳过
     "share_update_enabled": True,     # 分享追更：同一分享链接新增集数时自动增量转存（只存新文件）
     "organize_enabled": False,        # 转存后把剧集文件归入 Season N 子目录
+    # ---- 订阅质量策略与洗版（默认全关，空策略时行为与旧版完全一致）----
+    "quality_policy_enabled": False,  # 质量策略总开关：按画质择优/过滤低画质
+    "quality_min_resolution": "",     # 最低画质：'' 不限制 | 720p | 1080p | 2160p
+    "wash_enabled": False,            # 洗版升级：同集出现更高画质时自动升级
+    "wash_archive_dir": "",           # 洗版旧版归档目录（115 路径，留空则洗版不可用）
+    # ---- 空间门闸（空间告急时整队列挂起，任务保持排队、不判失败、不计重试次数）----
+    "space_guard_enabled": True,      # 空间预检/自动暂停总开关（关闭后完全沿用旧行为）
+    "space_blocked": False,           # 内部状态：队列是否因空间不足挂起中
+    "space_blocked_reason": "",       # 内部状态：挂起原因（展示用）
     # ---- TMDB 刮削 ----
     "tmdb_api_key": "",               # TMDB API Key（订阅页搜索/分类浏览用，刮削功能已移除）
     # ---- 通知渠道 ----
@@ -322,27 +341,42 @@ DEFAULT_SETTINGS = {
 }
 
 DEFAULT_RULES = [
+    # 优先级 = 判定顺序（升序，首条命中生效）。原则：
+    #   1) 越明确的特征越靠前（少儿最明确 → 字幕组标签 → 集数 → 年份/画质兜底）；
+    #   2) 兜底规则（画质、裸年份、「电影」二字）放最后，避免抢走剧集/动漫；
+    #   3) 分类名本身（如「电视剧」）也能命中，方便频道正文或直发消息直接写分类。
     # ── 少儿（特征词明确，置于最前，避免被"动画"关键词抢归动漫）──
-    (r"(少儿|儿童|幼儿|亲子|启蒙)", "少儿", 8),
-    # ── 动漫（字幕组标签最可靠，优先级最高）──
-    (r"\[(ANi|LoliHouse|SweetSub|北宇治|桜都|NC-Raws|Kamigami|DMG|Jsum|VARYG|Kirara|幻樱|"
-     r"HS-workshop|天月动字幕组|SubPIG|喵萌|Nekomoe|MingY|B-Global|Baha|baha|AI-Raws|KISSSUB|千夏|MCABC)\]", "动漫", 10),
-    (r"(新番|番剧|季度合集|国创|动画)", "动漫", 11),
-    (r"(OVA|OAD|剧场版)", "动漫", 12),
+    (r"(少儿|儿童|幼儿|亲子|启蒙|幼教|益智|儿歌|童话|动画片|低龄)", "少儿", 8),
+    # ── 动漫（字幕组/压制组标签最可靠，优先级最高）──
+    (r"[\[【](ANi|LoliHouse|SweetSub|北宇治|桜都|NC-Raws|Kamigami|DMG|Jsum|VARYG|Kirara|幻樱|"
+     r"HS-workshop|天月动字幕组|SubPIG|喵萌奶茶屋|喵萌|Nekomoe|MingY|B-Global|Baha|baha|AI-Raws|KISSSUB|千夏|MCABC|"
+     r"Lilith-Raws|Sakurato|Airota|Ohys-Raws|ReinForce|Moozzi2|Snow-Raws|UHA-WINGS|银光|诸神|华盟|澄空|"
+     r"雪飘|轻之国度|极影|动漫国|风之圣殿|悠哈璃羽|幻月|天空树|DHR|HYSUB|JYFanSub|XKsub|Nekomoe kissaten)"
+     r"[\]】]", "动漫", 10),
+    (r"(新番|番剧|国创|国漫|日漫|美漫|连载动画|TV动画|WEB动画|季度合集|动画|动漫)", "动漫", 11),
+    (r"(OVA|OAD|剧场版|动画电影|番外篇)", "动漫", 12),
     # ── 纪录片（特征词明确，放在电视剧"全集/完结"之前，避免"全6集"抢先命中）──
-    (r"(纪录片|documentary|bbc\.|nhk\.|discovery|国家地理|行星地球|蓝色星球)", "纪录片", 15),
+    (r"(纪录片|纪实|documentary|bbc|nhk|pbs|discovery|探索频道|国家地理|历史频道|行星地球|蓝色星球)",
+     "纪录片", 15),
     # ── 电视剧 ──
     (r"[Ss]\d{1,2}\s?[Ee]\d{1,3}", "电视剧", 20),
-    (r"第\s?\d+\s?[集话話]", "电视剧", 21),
-    (r"(全\s?\d+\s?集|全集|完结|更新至(第)?\s?\d+\s?集)", "电视剧", 22),
-    (r"(season\s?\d{1,2}|(?<![a-za-z])EP\d{1,4}|(?<![a-za-z0-9])[Ss]\d{1,2}(?![a-za-z0-9]))", "电视剧", 23),
+    (r"第\s?\d{1,4}\s?[集话話回]", "电视剧", 21),
+    (r"(全\s?\d+\s?集|全集|完结|更新至\s?第?\s?\d+\s?集|连载至\s?第?\s?\d+\s?集|全\s?\d+\s?季)",
+     "电视剧", 22),
+    (r"(season\s?\d{1,2}|(?<![a-z])ep\d{1,4}|(?<![a-z0-9])[Ss]\d{1,2}(?![a-z0-9])|第\s?\d{1,2}\s?季)",
+     "电视剧", 23),
+    (r"(电视剧|连续剧|国剧|美剧|日剧|韩剧|泰剧|港剧|台剧|网剧|短剧|情景喜剧|单元剧)", "电视剧", 24),
+    # 通用的带方括号字幕组标记（不少日剧/韩剧也用，故排在剧集特征之后兜底）
+    (r"[\[【][^\]】]{0,24}(字幕组|字幕社|压制组|[Rr]aws)[^\]】]{0,12}[\]】]", "动漫", 25),
     # ── 综艺（期数 / 年份季格式 S2024E15）──
     (r"第\s?\d+\s?期", "综艺", 30),
     (r"[Ss]\d{4}\s?[Ee]\d{1,3}", "综艺", 31),
-    (r"(综艺|真人秀|演唱会|晚会)", "综艺", 32),
-    # ── 电影（括号/点分隔的年份更准确，画质标识兜底）──
+    (r"(综艺|真人秀|脱口秀|演唱会|晚会|选秀|音综|访谈|喜剧大赛|舞台剧)", "综艺", 32),
+    # ── 电影（括号/点分隔的年份更准确，画质标识与分类名兜底）──
     (r"[（(\.](19|20)\d{2}[）)\.]", "电影", 40),
-    (r"(1080p|2160p|720p|4k|bluray|blu-ray|remux|web-?dl|hdtv|hdr)", "电影", 41),
+    (r"(1080p|2160p|720p|480p|4k|8k|uhd|bluray|blu-ray|bdrip|remux|web-?dl|webrip|hdtv|hdr|"
+     r"dolby|杜比视界|hevc|h\.?265|x265|x264|10bit)", "电影", 41),
+    (r"(电影|院线|影版|电影版|蓝光原盘)", "电影", 42),
 ]
 
 DEFAULT_ROUTES = [
@@ -358,11 +392,15 @@ DEFAULT_ROUTES = [
 # 注意均为子串匹配，措辞避免过短（如不用裸 TS/TC，以免误伤含这些字母的英文片名）
 DEFAULT_BLACKLIST_KEYWORDS = [
     # 预告 / 花絮 / 幕后（非正片内容）
-    "预告", "花絮", "幕后花絮", "制作特辑", "先导片",
-    # 枪版 / 低画质抢先版
-    "枪版", "TS版", "TC版", "CAM版", "屏摄", "抢版",
-    # 广告 / 推广 / 垃圾
-    "广告", "推广", "招商", "招募", "兼职", "刷单", "返利", "优惠券",
+    "预告", "先导片", "花絮", "幕后花絮", "制作特辑", "片花", "探班",
+    # 枪版 / 抢先版（盗摄或低画质）
+    "枪版", "TS版", "TC版", "CAM版", "屏摄", "抢版", "抢先版", "盗摄",
+    # 解说 / 速看 / 混剪（短视频二创，不是完整资源）
+    "影视解说", "速看", "混剪",
+    # 广告 / 推广 / 引流
+    "广告", "推广", "招商", "招募", "兼职", "刷单", "返利", "优惠券", "引流",
+    "加群", "群号", "客服", "私信", "代下", "有偿", "付费进群", "收费资源",
+    "淘宝", "拼多多",
     # 试看 / 样片
     "试看", "样片", "样本",
 ]
@@ -374,6 +412,8 @@ def _init_db():
     _conn.row_factory = sqlite3.Row
     _conn.execute("PRAGMA journal_mode=WAL")
     _conn.execute("PRAGMA synchronous=NORMAL")  # WAL 下的安全档位：高频小事务（写日志）收益明显
+    # 备份/恢复使用独立连接：遇到短暂锁竞争时等待而不是立刻抛 database is locked
+    _conn.execute("PRAGMA busy_timeout=5000")
     # 快速结构完整性校验，拦截损坏页或异常头
     res = _conn.execute("PRAGMA quick_check").fetchone()
     if res and res[0] != "ok":
@@ -452,6 +492,18 @@ def _migrate():
         _conn.execute("ALTER TABLE transfers ADD COLUMN running_at REAL")
     if "kind" not in cols:
         _conn.execute("ALTER TABLE transfers ADD COLUMN kind TEXT NOT NULL DEFAULT 'share'")
+    # 订阅质量策略/洗版所需列（旧库补列，默认值保持旧行为：0/空=不参与比较）
+    for col, ddl in (("sub_id", "INTEGER NOT NULL DEFAULT 0"),
+                     ("episode_key", "TEXT NOT NULL DEFAULT ''"),
+                     ("quality_score", "INTEGER NOT NULL DEFAULT 0"),
+                     ("quality_tag", "TEXT NOT NULL DEFAULT ''"),
+                     ("wash", "INTEGER NOT NULL DEFAULT 0"),
+                     ("wash_from", "INTEGER NOT NULL DEFAULT 0"),
+                     ("dest_cid", "INTEGER NOT NULL DEFAULT 0"),
+                     ("dest_ids", "TEXT NOT NULL DEFAULT ''")):
+        if col not in cols:
+            _conn.execute(f"ALTER TABLE transfers ADD COLUMN {col} {ddl}")
+    _conn.execute("CREATE INDEX IF NOT EXISTS idx_transfers_sub_ep ON transfers(sub_id, episode_key)")
     rcols = {r["name"] for r in _conn.execute("PRAGMA table_info(routes)")}
     if "offline_dir" not in rcols:
         _conn.execute("ALTER TABLE routes ADD COLUMN offline_dir TEXT NOT NULL DEFAULT ''")
@@ -478,7 +530,8 @@ def _migrate():
                      ("tmdb_id", "INTEGER"),
                      ("kind", "TEXT DEFAULT ''"),
                      ("last_season", "INTEGER"),
-                     ("last_episode", "INTEGER")):
+                     ("last_episode", "INTEGER"),
+                     ("min_quality", "TEXT DEFAULT ''")):
         if col not in scols:
             _conn.execute(f"ALTER TABLE subscriptions ADD COLUMN {col} {ddl}")
     # 老库迁移：向导已完成的部署视为已启动，保持原有运行行为
@@ -962,10 +1015,17 @@ def export_db_snapshot(dest_path: Path, exclude_credentials: bool = True, slim_d
     if dest_path.exists():
         dest_path.unlink()
     dst = sqlite3.connect(dest_path)
+    src = None
     try:
         with _lock:
             _conn.commit()
-            _conn.backup(dst)
+        # 用独立连接做 Online Backup：WAL 模式下备份读取不影响主连接写入，
+        # 快照一致性由 SQLite 保证；备份期间转存/日志照常写库（此前全程持有全局锁）。
+        src = sqlite3.connect(config.DB_PATH, timeout=30)
+        src.execute("PRAGMA busy_timeout=30000")
+        src.backup(dst)
+        src.close()
+        src = None
 
         # 以下仅操作临时快照文件，不持有主库锁
         dst.execute("INSERT OR REPLACE INTO settings VALUES('running','false')")
@@ -992,6 +1052,11 @@ def export_db_snapshot(dest_path: Path, exclude_credentials: bool = True, slim_d
         dst.commit()
         return counts
     finally:
+        if src is not None:
+            try:
+                src.close()
+            except Exception:
+                logger.debug("关闭备份源连接失败（不影响已完成快照）", exc_info=True)
         dst.close()
 
 

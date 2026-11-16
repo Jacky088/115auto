@@ -47,11 +47,10 @@ def _find_risky_quantified_group(pattern: str) -> bool:
         if cleaned[i] != "(":
             i += 1
             continue
-        depth, j, nested = 1, i + 1, False
+        depth, j = 1, i + 1
         while j < n and depth:
             if cleaned[j] == "(":
                 depth += 1
-                nested = True
             elif cleaned[j] == ")":
                 depth -= 1
             j += 1

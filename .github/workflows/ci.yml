@@ -3,7 +3,7 @@ name: CI
 on:
   push:
     branches: [main]
-    paths: [backend/**, tests/**, web/src/**, web/package*.json, .github/workflows/ci.yml]
+    paths: [backend/**, tests/**, web/src/**, web/package*.json, pyproject.toml, .github/workflows/ci.yml]
   pull_request:
 
 jobs:
@@ -14,7 +14,9 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
-      - run: pip install -r backend/requirements.txt pytest
+      - run: pip install -r backend/requirements.txt pytest ruff
+      - name: Lint (pyflakes / syntax errors)
+        run: ruff check backend tests
       - run: python -m pytest tests --ignore=tests/test_api_integration.py --ignore=tests/test_worker_mock.py -q
       - run: python tests/test_worker_mock.py
 

@@ -1,3 +1,5 @@
+# 开发/测试环境完整依赖 = requirements.lock（运行时精确版本）+ pytest 系工具。
+# 两者必须同步：升级运行时依赖后先更新 requirements.lock，再把运行时差异合并回本文件。
 annotated-doc==0.0.5
 annotated-types==0.8.0
 anyio==4.15.1
@@ -80,6 +82,7 @@ starlette==1.10.0
 Telethon==1.45.0
 typing-inspection==0.4.4
 typing_extensions==4.16.0
+tzdata==2026.6
 urllib3-future==2.25.904
 urllib3_future_request==0.0.2
 uvicorn==0.54.0

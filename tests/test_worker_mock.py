@@ -501,10 +501,30 @@ cases = [
     ("阿凡达.(2009).2160p.BluRay", "电影"),              # 括号年份
     ("流浪地球2.4K.HDR.国粤双语", "电影"),               # 画质标识
     ("泰坦尼克号.1997. REMUX", "电影"),
+    # ── 扩充后的默认规则：字幕组中文方括号 / 分类名 / 具体剧种 / 兜底顺序 ──
+    ("【喵萌奶茶屋】葬送的芙莉莲 S01E12 1080p", "动漫"),  # 中文方括号字幕组
+    ("[LoliHouse] 某番剧 12 [WebRip 1080p HEVC-10bit]", "动漫"),
+    ("海贼王 国漫 更新至1100集", "动漫"),                 # 国漫关键词优先于集数
+    ("繁花 (2023) 全30集 4K", "电视剧"),                  # 全N集优先于画质/年份
+    ("与凤行 第12集 2160p", "电视剧"),
+    ("Some.Show.S03E05.2160p.WEB-DL", "电视剧"),
+    ("棋魂 真人版 电视剧 全36集", "电视剧"),              # 分类名兜底
+    ("乘风破浪的姐姐 第8期 1080p", "综艺"),
+    ("某脱口秀 2024 第3期", "综艺"),
+    ("奥本海默 (2023) 2160p UHD BluRay", "电影"),
+    ("电影 沙丘2 杜比视界", "电影"),
 ]
 for title, expect in cases:
     got, _ = classifier.classify(title)
     check(f"{title[:26]:<28} → {expect}", got == expect, f"实际 {got!r}")
+
+# 频道标签别名（#美剧 / #国漫 等映射到既有分类，仍需路由里存在该分类）
+for title, expect in [("#美剧 某剧 更新中", "电视剧"),
+                      ("#国漫 某番 连载", "动漫"),
+                      ("#纪实 某片", "纪录片"),
+                      ("#亲子 某动画", "少儿")]:
+    got, _ = classifier.classify(title)
+    check(f"标签 {title[:22]:<24} → {expect}", got == expect, f"实际 {got!r}")
 
 # 用户例子端到端：西游记分享→分享目录，云下载→云下载目录
 db.execute("INSERT INTO routes(category,target_dir,offline_dir) VALUES('电视剧','/媒体库/电视剧','/云下载/电视剧')"
@@ -629,6 +649,30 @@ check("非法链接触发永久失败", raised)
 row = db.query("SELECT status,error FROM transfers WHERE id=?", (bad["id"],), one=True)
 check("状态=failed 且注明原因", row["status"] == "failed" and "不符合" in row["error"])
 check("永久失败发出通知", len(fail_sent) == 1 and "不符合" in fail_sent[0][0][4])
+
+# 17.3b 需要访问码但消息里没有有效提取码：读取分享即失败 → 确定性失败，不进排队重试
+_orig_snap_rc = pan.share_snap_all
+
+
+def _need_receive_code(code, rc, max_files=5000):
+    raise pan.Pan115Error("读取分享失败: {'state': False, 'error': '请输入访问码', "
+                          "'errno': 4100012, 'data': {'is_access': 0}, 'errtype': ''}")
+
+
+pan.share_snap_all = _need_receive_code
+rc_job = mkjob("needrc001")
+try:
+    queue_worker._process_one(rc_job)
+    rc_raised = False
+except queue_worker.PermanentTransferError as e:
+    rc_raised = True
+    db.execute("UPDATE transfers SET status='failed', attempts=?, error=? WHERE id=?",
+               (rc_job["attempts"] + 1, str(e)[:500], rc_job["id"]))
+pan.share_snap_all = _orig_snap_rc
+check("需要访问码→直接永久失败（不进入排队重试）", rc_raised)
+rc_row = db.query("SELECT status,error FROM transfers WHERE id=?", (rc_job["id"],), one=True)
+check("访问码失败状态=failed 且注明原因",
+      rc_row["status"] == "failed" and "访问码" in rc_row["error"], str(dict(rc_row)))
 
 # 17.4 分享双重确认：接口成功但目录无文件 → 可重试失败
 FakePan.files = [{"fid": "1", "fn": "verify.mkv", "fs": 1 << 30}]
@@ -1094,10 +1138,10 @@ db.execute("INSERT OR IGNORE INTO subscriptions(keyword,created_at) VALUES('某�
            (time.time(),))
 try:
     r = pipeline.process_message("test_ch", next_mid(),
-                                 f"别的剧集分享 https://115.com/s/sub0000?password=ab12")
+                                 "别的剧集分享 https://115.com/s/sub0000?password=ab12")
     check("订阅模式下未命中 → 不入队", r.get("sub_skipped") is True and r["queued"] == 0, str(r))
     r = pipeline.process_message("test_ch", next_mid(),
-                                 f"某某电影.2023.1080p https://115.com/s/sub0001?password=ab12")
+                                 "某某电影.2023.1080p https://115.com/s/sub0001?password=ab12")
     check("命中订阅 → 正常入队", r["queued"] == 1, str(r))
     sub_row = dict(db.query("SELECT * FROM subscriptions WHERE keyword='某某电影'", one=True))
     check("订阅命中时间已记录", sub_row["last_match_at"] is not None, str(sub_row))
@@ -1130,13 +1174,13 @@ finally:
 
 print("\n=== 28. （已移除）TMDB 刮削 → 确认模块删除后转存不受影响 ===")
 r = pipeline.process_message("test_ch", next_mid(),
-                             f"某某电影.2023.1080p https://115.com/s/tmdb001?password=ab12")
+                             "某某电影.2023.1080p https://115.com/s/tmdb001?password=ab12")
 row = dict(db.query("SELECT * FROM transfers WHERE share_code='tmdb001'", one=True))
 check("无刮削：标题保留原始解析结果", "某某电影" in row["title"], row["title"])
 check("无刮削：目标目录为分类目录", row["target_dir"] and "(2023)" not in row["target_dir"],
       row["target_dir"])
 
-print("\n=== 29. TG Bot 新指令（/quota /sub /ls /space）===")
+print("\n=== 29. TG Bot 新指令（/quota /sub /ls /status /add）===")
 from backend.worker import bot_commands as bc  # noqa: E402
 
 check("/quota 已移除", "暂不支持" in bc._handle_command("/quota 20", "x"))
@@ -1144,17 +1188,28 @@ check("限额保持默认", db.get_setting("daily_limit") == 50, str(db.get_sett
 check("/sub 搜索提示", "搜索" in bc._handle_command("/sub 权力的游戏", "x")
       and "点选" in bc._handle_command("/sub 权力的游戏", "x"))
 _sub_list_out = bc._handle_command("/sub", "x")
-check("/sub 列表", ("追剧订阅" in _sub_list_out) or ("暂无订阅" in _sub_list_out), _sub_list_out[:80])
+check("/sub 列表：有关键词则列表+用法，无则仅用法",
+      ("追剧订阅" in _sub_list_out and "用法：" in _sub_list_out)
+      or _sub_list_out == bc.USAGE_SUB, _sub_list_out[:80])
 check("/sub 删除未存在", "未找到" in bc._handle_command("/sub del 权力的游戏", "x"))
 check("/ls 列出最近记录", "最近转存" in bc._handle_command("/ls", "x"))
+_add_usage_out = bc._usage_add()
+check("/add 用法：有频道则先列频道再接用法，无则仅用法",
+      ("已添加频道" in _add_usage_out and "/add <频道名或链接>" in _add_usage_out)
+      or _add_usage_out == bc.USAGE_ADD, _add_usage_out[:80])
 _orig_space_info2 = pan.space_info
+_orig_cookie_ok = db.get_setting("cookie_ok", None)
 try:
-    pan.space_info = lambda force=False: {"use": 40 << 30, "total": 100 << 30,
-                                          "free": 60 << 30, "ratio": 40}
-    out = bc._handle_command("/space", "x")
+    db.set_setting("cookie_ok", True)
+    pan.space_info = lambda force=False: {"use": 40 << 40, "total": 100 << 40,
+                                          "free": 60 << 40, "ratio": 40}
+    out = bc._handle_command("/status", "x")
 finally:
     pan.space_info = _orig_space_info2
-check("/space 返回空间信息", "剩余" in out and "60.0GB" in out, out)
+    db.set_setting("cookie_ok", _orig_cookie_ok)
+check("/status 空间以 TB 显示（不再出现 GB）",
+      "40.0TB" in out and "100.0TB" in out and "剩余 60.0TB" in out and "GB" not in out, out)
+check("/space 指令已移除", "未知指令" in bc._handle_command("/space", "x"))
 
 print("\n=== 30. 每日摘要文本 ======")
 from backend.worker import jobs as jobs_mod  # noqa: E402

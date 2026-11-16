@@ -3,7 +3,7 @@ import sqlite3
 import time
 
 from .. import database as db
-from ..core import classifier, extractor, filters, logstream, subscribe
+from ..core import classifier, episode, extractor, filters, logstream, quality, subscribe
 
 # 进程内提示标记：每频道只提示一次"无链接"说明，避免刷屏
 _runtime_flags: dict[str, bool] = {}
@@ -11,7 +11,8 @@ _runtime_flags: dict[str, bool] = {}
 
 def process_message(channel: str, message_id: int, text: str,
                     bypass: bool = False, increment: bool = False,
-                    priority: int = 0, anchor: dict | None = None) -> dict:
+                    priority: int = 0, anchor: dict | None = None,
+                    force_category: str = "") -> dict:
     """处理一条 TG 消息，返回处理摘要（供测试与调试）。
 
     bypass=True 时跳过消息级黑名单；increment=True 时生成的转存任务带增量标记
@@ -19,6 +20,8 @@ def process_message(channel: str, message_id: int, text: str,
     优先领取（向前补全用：额度有限时优先补全剧集）；
     anchor={category, target_dir} 时（向前补全的历史分集帖），沿用锚点任务的分类
     与目标目录（同剧不同帖标题格式不一，各自分类会漂移），并绕过订阅过滤。
+    force_category 仅供「管理员直发链接」使用：指令头后写了分类名时直接采用；
+    默认空串，分类仍由标题规则决定，行为与旧版一致。
     """
     result = {"channel": channel, "message_id": message_id, "links": 0, "queued": 0,
               "duplicates": 0, "blocked": False, "skipped": 0}
@@ -80,6 +83,8 @@ def process_message(channel: str, message_id: int, text: str,
     anchor_dir = str((anchor or {}).get("target_dir") or "")
     if anchor_cat:
         category, matched = anchor_cat, "锚点沿用"
+    elif force_category:
+        category, matched = force_category, "直发分类"
     else:
         category, matched = classifier.classify(text or "")
     display_title = classifier.headline(text or "") or (text or "")[:300]
@@ -99,6 +104,29 @@ def process_message(channel: str, message_id: int, text: str,
                            "仅记录不转存（在「账号管理」或「订阅追剧」页调整）")
         result["sub_skipped"] = True
         return result
+
+    # 4.6 订阅质量策略（默认关闭）：最低画质门槛 + 同订阅同集择优。
+    # 画质只从标题/正文识别；识别不出（score=0）一律放行，绝不因「没写画质」误拦。
+    quality_on = bool(db.get_setting("quality_policy_enabled", False))
+    min_quality = ""
+    if sub_hits:
+        for s in sub_hits:
+            q = str(s.get("min_quality") or "").strip()
+            if q:
+                min_quality = q
+                break
+    if not min_quality:
+        min_quality = str(db.get_setting("quality_min_resolution", "") or "").strip()
+    q_info = quality.parse(f"{display_title}\n{text or ''}")
+    q_season, q_ep, q_kind = episode.parse(display_title)
+    if q_ep is None:
+        q_season, q_ep, q_kind = episode.parse((text or "")[:200])
+    q_ep_key = episode.canonical(q_season, q_ep, q_kind) if q_ep is not None else ""
+    # 仅在「唯一命中订阅」且识别出集标识时做同集比较：
+    # 同一部剧的不同集画质相同很常见，按订阅整体比较会把后续集数全部误判为「已有同画质」
+    q_sub_id = int(sub_hits[0]["id"]) if len(sub_hits) == 1 else 0
+    wash_on = bool(db.get_setting("wash_enabled", False)) and bool(
+        str(db.get_setting("wash_archive_dir", "") or "").strip())
 
     for link in links:
         code = link["share_code"]
@@ -152,16 +180,54 @@ def process_message(channel: str, message_id: int, text: str,
             logstream.info("pipeline", f"[{channel}] 跳过重复链接 {code}：{err}")
             continue
 
-        flag = 1 if (increment or prev_done) else 0
-        status = "queued" if target else "skipped"
+        # 5.2 质量策略：最低画质门槛 + 同订阅同集择优（默认关闭）。
+        # 追更/补全任务不参与：它们按真实文件名增量比对，再判画质会误拦同一分享的新集
+        skip_reason = ""
+        wash_from = 0
+        if quality_on and kind == "share" and not prev_done and not increment:
+            if not quality.min_resolution_allowed(q_info, min_quality):
+                skip_reason = (f"画质低于最低要求（识别为 {q_info['resolution']}，"
+                               f"要求 ≥ {min_quality}）")
+            elif q_sub_id and q_ep_key and q_info["score"] > 0:
+                old = db.query(
+                    "SELECT id, status, quality_score, quality_tag FROM transfers"
+                    " WHERE sub_id=? AND episode_key=? AND kind='share'"
+                    " AND status IN ('queued','running','submitted','success')"
+                    " AND quality_score>0 ORDER BY quality_score DESC, id DESC LIMIT 1",
+                    (q_sub_id, q_ep_key), one=True)
+                if old:
+                    old_tag = f"#{old['id']} {old['quality_tag'] or str(old['quality_score']) + ' 分'}"
+                    if old["quality_score"] >= q_info["score"]:
+                        skip_reason = f"已有同等或更高画质（{old_tag}），按订阅质量策略跳过"
+                    elif old["status"] == "success" and wash_on:
+                        wash_from = int(old["id"])
+                    elif old["status"] == "success":
+                        skip_reason = (f"已有较低画质版本（{old_tag}），"
+                                       "可在设置开启「洗版升级」后自动升级")
+                    elif old["status"] == "queued":
+                        db.execute(
+                            "UPDATE transfers SET status='skipped', error=?"
+                            " WHERE id=? AND status='queued'",
+                            (f"已被更高画质资源替代（{q_info['tag'] or '新版'}，"
+                             f"来源 @{channel.lstrip('@')}）", old["id"]))
+                        logstream.info("pipeline",
+                                       f"[{channel}] 队列任务 #{old['id']} 被更高画质资源替代")
+
+        flag = 0 if wash_from else (1 if (increment or prev_done) else 0)
+        status = "skipped" if skip_reason else ("queued" if target else "skipped")
         try:
             db.execute(
                 "INSERT INTO transfers(kind,share_code,receive_code,share_url,title,channel,message_id,"
-                "category,target_dir,status,bypass_filters,increment,priority,created_at)"
-                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "category,target_dir,status,error,bypass_filters,increment,priority,"
+                "sub_id,episode_key,quality_score,quality_tag,wash,wash_from,created_at)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (kind, code, link["receive_code"], link["share_url"], display_title,
-                 channel, message_id, cat_i, target, status, 1 if bypass else 0,
-                 flag, priority, time.time()),
+                 channel, message_id, cat_i, target, status, skip_reason,
+                 1 if bypass else 0, flag, priority,
+                 q_sub_id if kind == "share" else 0, q_ep_key if kind == "share" else "",
+                 q_info["score"] if kind == "share" else 0,
+                 q_info["tag"] if kind == "share" else "",
+                 1 if wash_from else 0, wash_from, time.time()),
             )
         except sqlite3.IntegrityError:
             # 并发竞态兜底：部分唯一索引保证同分享码同时只有一个活动任务，
@@ -185,12 +251,16 @@ def process_message(channel: str, message_id: int, text: str,
             continue
         if status == "queued":
             result["queued"] += 1
-            label = "追更转存" if prev_done else ("补全转存" if increment else "入队转存")
+            label = "洗版升级" if wash_from else (
+                "追更转存" if prev_done else ("补全转存" if increment else "入队转存"))
             suffix = "（将只转存目标目录里没有的新文件）" if flag else ""
+            if wash_from:
+                suffix = f"（洗版：成功后旧版 #{wash_from} 移入归档目录）"
             logstream.info("pipeline",
                            f"[{channel}] {label}: {code} → {cat_i or '未分类'} → {target}{suffix}")
         else:
-            reason = "未分类，且动作设为「跳过」" if not cat_i else f"「{cat_i}」的目录设为「跳过」"
+            reason = skip_reason or (
+                "未分类，且动作设为「跳过」" if not cat_i else f"「{cat_i}」的目录设为「跳过」")
             result["skipped"] += 1
             logstream.info("pipeline", f"[{channel}] 跳过 {code}（{reason}）")
 

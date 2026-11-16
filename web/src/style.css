@@ -68,10 +68,23 @@
   --saas-line: rgba(126, 146, 196, .26);
   --saas-radius: 18px;
   --saas-shadow: var(--glass-shadow);
+  /* 辅助文字统一色（说明/tip/时间戳）：浅色下保证 4.5:1 以上对比度，深色下单独提亮 */
+  --text-muted: #6b7a99;
+  /* 警示性提示文字（⚠️ 重要提醒）：浅色琥珀，深色提亮到 EP warning 明度 */
+  --text-warn: #b45309;
 }
 
 html, body, #app { height: 100%; margin: 0; overflow-x: hidden; }
 .el-alert.cookie-alert { max-width: calc(100% - 20px); box-sizing: border-box; }
+/* 弹窗宽度兜底：个别弹窗写了固定 px 宽度时，窄屏自动收到 94vw，防止 320px 屏横向溢出 */
+.el-dialog { max-width: 94vw; }
+/* 把 div/span 当按钮用的元素（键盘可达性改造后统一游标与焦点环） */
+[role="button"] { cursor: pointer; }
+[role="button"]:focus-visible {
+  outline: 2px solid var(--el-color-primary);
+  outline-offset: 2px;
+  border-radius: var(--r-sm);
+}
 
 /* 极光页面底层：固定在视口上，滚动不跟随；所有页面自动继承 */
 body {
@@ -106,6 +119,8 @@ html.dark {
   --table-fixed-bg: #151e34;
   --table-fixed-head-bg: #1e2a4a;
   --table-fixed-hover-bg: #1f2d52;
+  --text-muted: #8a97b3;
+  --text-warn: #e6a23c;
 }
 
 /* ---- 玻璃卡片 ---- */
@@ -581,6 +596,23 @@ html.dark .el-tag.run-tag--paused {
   opacity: 0.85;
 }
 
+/* 空间不足：红色呼吸胶囊，比普通暂停更醒目 */
+.el-tag.run-tag--space {
+  background: rgba(239, 68, 68, 0.16) !important;
+  border: 1px solid rgba(239, 68, 68, 0.45) !important;
+  color: #dc2626 !important;
+  animation: tag-breathe-amber 2.2s ease-in-out infinite;
+}
+html.dark .el-tag.run-tag--space {
+  background: rgba(239, 68, 68, 0.26) !important;
+  border-color: rgba(239, 68, 68, 0.55) !important;
+  color: #f87171 !important;
+}
+.el-tag.run-tag--space .space-dot {
+  background: #ef4444;
+  animation: dot-pulse 1.2s ease-in-out infinite;
+}
+
 /* 未就绪：柔和灰蓝胶囊 + 常驻灰点 */
 .el-tag.run-tag--not-ready {
   background: rgba(100, 116, 139, 0.10) !important;
@@ -1006,7 +1038,7 @@ html.dark .el-message-box__headerbtn:hover .el-message-box__close {
    用法：<span class="warn-text">⚠️ 重要提醒…</span>（配合 .tip 使用时字号不变） */
 .warn-text {
   font-weight: 600;
-  color: #b45309;
+  color: var(--text-warn);
 }
 /* 文字按钮（软按钮）：静止为类型色淡底 + 类型色文字（下方各语义变体定义静止色），
    悬停/按下统一加深为同色系实色 + 白字，与 plain/填充按钮同一套"浅色→深色"逻辑
@@ -1090,7 +1122,7 @@ html.dark .el-message-box__headerbtn:hover .el-message-box__close {
 }
 .help-body .eg { background: rgba(226, 233, 252, .6); border-left: 3px solid var(--el-color-primary);
                  padding: 8px 12px; border-radius: 6px; margin: 8px 0; }
-.help-body .tip { color: #999; font-size: var(--fs-caption); }
+.help-body .tip { color: var(--text-muted); font-size: var(--fs-caption); }
 
 /* ---- 滚动条 ---- */
 ::-webkit-scrollbar { width: 8px; height: 8px; }
@@ -1452,4 +1484,24 @@ html.dark .dp-radio { border-color: #4c5b7d; }
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 窄屏（≤360px）：收紧卡片留白与按钮内边距，保证 320px 宽度下不出现挤压/换行错位 */
+@media (max-width: 360px) {
+  .page-card { margin: 8px; }
+  .el-card__body { padding: 12px; }
+  .el-button { padding-left: 10px; padding-right: 10px; }
+  .toolbar { flex-wrap: wrap; row-gap: var(--sp-2); }
+  .el-dialog__header { padding: 12px 12px 6px; }
+  .el-dialog__body { padding: 10px 12px; }
+}
+
+/* 尊重系统「减少动态效果」：关闭装饰性动画与过渡（不影响功能） */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

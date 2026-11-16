@@ -5,7 +5,8 @@
         <div class="files-head">
           <div class="crumbs">
             <el-tooltip :content="isSearching ? '退出搜索' : '返回根目录'">
-              <el-button text class="home-btn" :disabled="!isSearching && cid === '0'" @click="goHome">
+              <el-button text class="home-btn" title="返回根目录" aria-label="返回根目录"
+                         :disabled="!isSearching && cid === '0'" @click="goHome">
                 <el-icon :size="17"><FolderOpened /></el-icon>
               </el-button>
             </el-tooltip>
@@ -93,7 +94,10 @@
         <el-table-column type="selection" width="44" />
         <el-table-column label="名称" min-width="280">
           <template #default="{ row }">
-            <div class="file-name" @click="onNameClick(row)">
+            <div class="file-name" role="button" tabindex="0"
+                 :aria-label="(row.is_dir ? '打开目录 ' : '选择文件 ') + row.name"
+                 @click="onNameClick(row)" @keydown.enter="onNameClick(row)"
+                 @keydown.space.prevent="onNameClick(row)">
               <el-icon :size="17" :class="row.is_dir ? 'folder-icon' : 'file-icon'">
                 <Folder v-if="row.is_dir" />
                 <Document v-else />
@@ -538,7 +542,7 @@ onMounted(load)
 .dir-tag { flex: none; }
 .more-btn { padding: 4px 6px; }
 .pager { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
-.hint { font-size: var(--fs-caption); color: #8a97b3; }
+.hint { font-size: var(--fs-caption); color: var(--text-muted); }
 .detail-head { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
 .detail-icon {
   width: 42px; height: 42px; border-radius: var(--r-md); flex: none;

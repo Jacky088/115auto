@@ -253,8 +253,8 @@ def test_undo_stop_rules_and_master_switch():
     db.execute("DELETE FROM organized_records WHERE action='auto_move'")
     rid_rule = _mk_rule()
     rid_other = _mk_rule()  # 未参与本批的规则，不应被停用
-    rec_id = _mk_record(fid="f9", name="折月亮.S01E09.mkv", rule_id=rid_rule, batch="bu3",
-                        from_cid=100, dest_cid=200)
+    _mk_record(fid="f9", name="折月亮.S01E09.mkv", rule_id=rid_rule, batch="bu3",
+               from_cid=100, dest_cid=200)
     db.set_setting("auto_move_enabled", True)
 
     def fake_list_entries(cid, limit=2000):

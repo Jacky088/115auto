@@ -7,6 +7,7 @@
 - 风控控制：随机间隔、每日限额、指数退避重试、连续失败熔断
 """
 import asyncio
+import json
 import random
 import re
 import time
@@ -18,6 +19,15 @@ from . import jobs
 
 MAX_ATTEMPTS = 5
 
+# ---- 空间门闸参数（空间告急属于账号级环境问题：挂起队列，而不是把任务逐条判失败）----
+SPACE_GUARD_RATIO = 90.0          # 使用率 ≥90% 挂起队列（与网页空间条变红同阈值）
+SPACE_GUARD_RESUME_RATIO = 88.0   # 回落到 <88% 才恢复（2% 回差，防止在阈值附近反复暂停/恢复）
+SPACE_GUARD_MIN_FREE = 10 << 30   # 剩余 <10GB 同样视为告急（任何高清单集都存不下）
+SPACE_PROBE_TTL = 60              # 空间探测结果本地缓存秒数（避免空闲循环反复打 115 接口）
+_SPACE_PROBE = {"ts": 0.0, "blocked": False, "reason": "", "ratio": 0.0, "free": 0}
+_SPACE_MARKERS = ("空间不足", "存储空间不足", "空间已满", "容量不足",
+                  "not enough space", "insufficient storage", "no space left", "storage full")
+
 
 class PermanentTransferError(Exception):
     """确定性失败（如链接格式不支持），不重试，直接失败并通知。"""
@@ -28,6 +38,11 @@ class PermanentTransferError(Exception):
 _DEAD_SHARE_MARKERS = ("链接已失效", "链接已过期", "链接不存在",
                        "分享不存在", "分享已取消", "分享已删除", "分享已过期",
                        "分享已屏蔽", "分享已被取消", "分享链接已失效")
+
+# 需要访问码/提取码但拿不到（消息里没给或给错）的 115 错误特征：
+# 同一链接重试结果完全一致，属于确定性失败，直接判失败，不占用 5 次重试额度
+_NO_RETRY_SHARE_MARKERS = ("请输入访问码", "访问码错误", "提取码错误",
+                           "访问码不正确", "提取码不正确")
 
 
 def validate_link(kind: str, share_code: str, share_url: str) -> str:
@@ -77,23 +92,71 @@ def _interval() -> float:
     return random.uniform(lo, max(hi, lo)) * pan.pace_factor()
 
 
+def _is_space_error(err: str) -> bool:
+    """判断错误是否为 115 空间不足（账号级环境问题，重试必然继续失败）。"""
+    s = (err or "").lower()
+    return any(k in s for k in _SPACE_MARKERS)
+
+
+def _space_gate() -> tuple[bool, str]:
+    """空间门闸：115 使用率过高时挂起整个队列（任务保持 queued，不判失败、不计重试）。
+
+    带 2% 回差（90% 暂停 / 88% 恢复），避免在临界点反复暂停与恢复；
+    探测失败沿用上次状态，不因 115 短暂异常让队列停摆。
+    """
+    if not bool(db.get_setting("space_guard_enabled", True)):
+        # 用户关掉门闸：顺带清掉挂起标记，避免顶栏残留「空间不足」
+        if db.get_setting("space_blocked", False):
+            db.set_setting("space_blocked", False)
+            db.set_setting("space_blocked_reason", "")
+        return False, ""
+    now = time.time()
+    if now - _SPACE_PROBE["ts"] < SPACE_PROBE_TTL:
+        return _SPACE_PROBE["blocked"], _SPACE_PROBE["reason"]
+    blocked, reason, ratio, free = False, "", 0.0, 0
+    try:
+        sp = pan.space_info()
+        total = int(sp.get("total") or 0)
+        use = int(sp.get("use") or 0)
+        free = int(sp.get("free") or 0)
+        if total > 0:
+            ratio = use * 100.0 / total
+            if bool(db.get_setting("space_blocked", False)):
+                # 已挂起：只有同时低于恢复线且剩余空间充足才解除
+                blocked = not (ratio < SPACE_GUARD_RESUME_RATIO
+                               and free >= SPACE_GUARD_MIN_FREE)
+            else:
+                blocked = ratio >= SPACE_GUARD_RATIO or 0 < free < SPACE_GUARD_MIN_FREE
+            if blocked:
+                reason = f"已用 {ratio:.1f}%，剩余 {free / (1 << 30):.2f} GB"
+    except Exception:
+        return (bool(db.get_setting("space_blocked", False)),
+                str(db.get_setting("space_blocked_reason", "") or ""))
+    _SPACE_PROBE.update(ts=now, blocked=blocked, reason=reason, ratio=ratio, free=free)
+    return blocked, reason
+
+
 def _space_preflight(total_size: int, title: str = "") -> bool:
     """空间预检：115 剩余空间不足时跳过任务并告警（转存前拦截，而不是失败后被动发现）。
 
     返回 True = 空间足够（或无法判定，放行）；False = 明显不足，任务打 skipped。
+    多留 2%（最少 1GB）抖动余量：与 115 判定刚好卡满时更容易触发失败。
     """
-    if total_size <= 0:
+    if total_size <= 0 or not bool(db.get_setting("space_guard_enabled", True)):
         return True
     try:
         sp = pan.space_info()
     except Exception:
         return True  # 容量接口失败不阻塞转存
-    free = sp.get("free", 0)
-    if free and total_size > free:
+    free = int(sp.get("free") or 0)
+    if free <= 0:
+        return True
+    reserve = max(1 << 30, total_size // 50)
+    if total_size + reserve > free:
         jobs.notify_failure("share", title, "", "", "",
                             retry_info=f"💡 115 剩余空间不足（剩余 {_fmt_gb(free)}，"
-                                       f"需要 {_fmt_gb(total_size)}），任务已标记为「跳过」，"
-                                       "清理空间后可手动重试")
+                                       f"需要 {_fmt_gb(total_size)} + 预留 {_fmt_gb(reserve)}），"
+                                       "本条已跳过且不重试；清理空间后可重新提交")
         return False
     return True
 
@@ -219,8 +282,8 @@ def _dedup_by_name(cid: int, title: str, snap: dict = None) -> str:
                         for rr in rec_rows:
                             if _norm_entry_name(rr["orig_name"]) == fn_base:
                                 return f"曾转存并整理为「{rr['dest_name']}」（账本去重），如需强制转存请关闭「同名去重」后重试"
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logstream.warn("transfer", f"同名去重账本查询失败（本次跳过账本去重）: {e}")
 
     return ""
 
@@ -287,6 +350,9 @@ def _process_one(job: dict):
         #（否则一批失效补全链接会把普通转存一起拖停 30 分钟）
         if any(m in str(e) for m in _DEAD_SHARE_MARKERS):
             raise PermanentTransferError(f"分享链接已失效（{str(e)[:120]}）") from e
+        # 需要访问码但消息里没带（或带的码不对）：同一链接重试结果不变 → 直接失败
+        if any(m in str(e) for m in _NO_RETRY_SHARE_MARKERS):
+            raise PermanentTransferError("分享需要访问码，消息中未提供有效提取码，无法转存") from e
         raise
 
     # 1.45 超大分享截断透明化：超过 5000 文件的部分不会转存，任务与日志必须留痕
@@ -331,8 +397,8 @@ def _process_one(job: dict):
                     existing_n.add(on_n)
                 if dn_n and len(dn_n) >= 5:
                     existing_n.add(dn_n)
-        except Exception:
-            pass
+        except Exception as e:
+            logstream.warn("transfer", f"追更去重账本查询失败（本次按全量提交，可能产生重复副本）: {e}")
         new_files = [f for f in snap["files"]
                      if f.get("fn") and f.get("fid")
                      and _norm_filename(f["fn"]) not in existing_n]
@@ -435,7 +501,6 @@ def _process_one(job: dict):
                            f"分享 {code} 目标目录已存在本次分享的文件（此前尝试已落盘），跳过重复提交")
 
     confirmed = skip_receive  # 预检命中 = 已确认文件就在目标目录
-    received_before = False
     if not skip_receive:
         _assert_still_running(job)  # 看门狗可能已重排：旧线程不得继续执行真实 115 写操作
         try:
@@ -445,10 +510,12 @@ def _process_one(job: dict):
             if any(m in msg for m in _DEAD_SHARE_MARKERS):
                 # 提交阶段也可能报链接失效/过期：确定性失败，不重试不计熔断
                 raise PermanentTransferError(f"分享链接已失效（{msg[:120]}）") from e
+            if any(m in msg for m in _NO_RETRY_SHARE_MARKERS):
+                # 提交阶段才要求访问码（如码在提交时校验失败）：重试无用，直接失败
+                raise PermanentTransferError("分享需要访问码，消息中未提供有效提取码，无法转存") from e
             if "已接收" in msg:
                 # 115 幂等信号："文件已接收，无需重复接收"——本账号此前已接收过该分享，
                 # 文件已在网盘中。直接按成功处理：不反查、不找回、不重试。
-                received_before = True
                 confirmed = True
                 logstream.info("transfer", f"分享 {code} 115 提示此前已接收，文件已在网盘中，按成功处理")
             elif "已存在" in msg and "不存在" not in msg:
@@ -466,7 +533,8 @@ def _process_one(job: dict):
 
     # 5. 双重确认：反查目标目录，确认文件真实到达（防接口误报）。
     # 已确认文件在目标目录的（重试预检命中 / 已接收信号）除外。
-    if not confirmed and not _verify_receive(cid, snap):
+    found: dict = {}
+    if not confirmed and not _verify_receive(cid, snap, found=found):
         # 严格禁止跨目录全盘搜索复制：115 搜索是分词模糊匹配，全盘找回会把其他影视目录中同集数/同名的文件
         # 错误复制进目标目录（严重污染媒体库并产生 (1) 冲突副本）。
         # 此处如未查到，多为 115 落库延迟，直接抛出重试异常；60 秒后工作器重试时
@@ -476,10 +544,13 @@ def _process_one(job: dict):
                            "系统将自动重试确认，无需手动处理）；多次重试仍失败时，"
                            "请到 115 网页核对目标目录或检查回收站")
 
+    dest_ids = json.dumps([str(i) for i in (found.get("ids") or [])], ensure_ascii=False) \
+        if found.get("ids") else ""
     changed = db.execute("UPDATE transfers SET status='success', title=?, size=?, file_count=?, "
-                         "finished_at=?, running_at=NULL, next_retry_at=NULL"
+                         "dest_cid=?, dest_ids=?, finished_at=?, running_at=NULL, next_retry_at=NULL"
                          " WHERE id=? AND status='running'",
-                         (title, snap["total_size"], file_total, time.time(), job["id"]))
+                         (title, snap["total_size"], file_total, cid, dest_ids,
+                          time.time(), job["id"]))
     if changed == 0:
         # 看门狗已把本任务重新排队（或已被人工终止）：旧线程迟到返回不能再改终态，
         # 更不能二次计额度/二次通知，否则会与新一轮执行重复转存、重复扣额度。
@@ -495,15 +566,63 @@ def _process_one(job: dict):
     jobs.notify_transfer(title, job.get("category", ""), job.get("channel", ""),
                          target, size=snap["total_size"], kind="share",
                          file_count=file_total)
+    jobs.check_space_alert(f"转存「{title[:40]}」后（本次 {snap['total_size'] / (1 << 40):.2f} TB）")
+    if job.get("wash") and job.get("wash_from"):
+        _archive_washed_version(job)
     # 说明：转存后统一通过「整理刮削」队列互斥执行整理重命名，此处不再直接并发调 organize_seasons。
 
 
-def _verify_receive(cid: int, snap: dict) -> bool:
+def _archive_washed_version(job: dict):
+    """洗版收尾：把被替代的旧版顶层条目移入归档目录（不删除，可随时人工恢复）。
+
+    只在新版成功落盘后执行；任何异常只记日志，绝不影响新任务的成功状态。
+    找不到旧版定位记录 / 目录已变更时放弃移动，避免跨目录误移用户文件。
+    """
+    try:
+        old = db.query("SELECT id, dest_cid, dest_ids FROM transfers WHERE id=?",
+                       (job.get("wash_from"),), one=True)
+        if not old:
+            return
+        archive_dir = str(db.get_setting("wash_archive_dir", "") or "").strip()
+        if not archive_dir:
+            logstream.warn("transfer", f"洗版完成：未配置旧版归档目录，旧版 #{old['id']} 保留在原处")
+            return
+        try:
+            ids = [str(i) for i in json.loads(old["dest_ids"] or "[]")]
+        except (TypeError, ValueError):
+            ids = []
+        old_cid = int(old["dest_cid"] or 0)
+        if not ids or not old_cid:
+            logstream.warn("transfer",
+                           f"洗版完成：旧版 #{old['id']} 缺少落盘定位记录，未自动移动（请手动清理）")
+            return
+        # 只移动仍位于原目录的条目：用户已手动挪走/删除的不跨目录误移
+        present = {str(e["id"]) for e in pan.list_entries(old_cid, limit=3000)}
+        move_ids = [i for i in ids if i in present]
+        if not move_ids:
+            logstream.info("transfer", f"洗版完成：旧版 #{old['id']} 条目已不在原目录，无需移动")
+            return
+        arch_cid = pan.mkdirs(archive_dir)
+        if not arch_cid:
+            logstream.warn("transfer", f"洗版完成：无法创建归档目录 {archive_dir}，旧版保留在原处")
+            return
+        pan.move_entries(move_ids, arch_cid)
+        _invalidate_dir_cache(old_cid)  # 目录内容已变化，避免后续同名去重读到过期缓存
+        db.execute("UPDATE transfers SET error=? WHERE id=? AND (error IS NULL OR error='')",
+                   (f"已洗版：旧版本移入 {archive_dir}", old["id"]))
+        logstream.info("transfer",
+                       f"洗版完成：旧版 #{old['id']} 共 {len(move_ids)} 个条目已移入 {archive_dir}")
+    except Exception as e:
+        logstream.warn("transfer", f"洗版收尾失败（新版已成功，不影响任务状态）: {e}")
+
+
+def _verify_receive(cid: int, snap: dict, found: dict | None = None) -> bool:
     """反查目标目录：抽查分享条目是否真实到达。
 
     115 转存落库有延迟，这里轮询几次再判定；候选名同时包含分享展开后的文件名
     和分享顶层条目名（分享以文件夹整体转存时，目标目录里只有顶层文件夹名）。
     验证接口异常时按 API 成功处理，避免把接口抖动误判成转存失败。
+    found 传入字典时回填命中的顶层条目 id（洗版定位旧版用）。
     """
     names = [f.get("fn") for f in snap["files"][:10] if f.get("fn")]
     names += [n for n in (snap.get("top_names") or [])[:10] if n]
@@ -511,12 +630,20 @@ def _verify_receive(cid: int, snap: dict) -> bool:
     if not names:
         return True
     delays = (2, 5, 8)
+    wanted = {_norm_filename(n) for n in names if _norm_filename(n)}
     try:
         for i, delay in enumerate(delays):
             time.sleep(delay)
             got = pan.list_file_names(cid)
             got_norm = {_norm_filename(n) for n in got}
             if any(_norm_filename(n) in got_norm for n in names):
+                if found is not None:
+                    try:
+                        entries = pan.list_entries(cid, limit=2000)
+                        found["ids"] = [str(e["id"]) for e in entries
+                                        if _norm_filename(e["name"]) in wanted][:200]
+                    except Exception as e:
+                        logstream.warn("transfer", f"记录落盘条目 id 失败（不影响转存结果）: {e}")
                 return True
             if i == len(delays) - 1:
                 logstream.warn("transfer",
@@ -555,6 +682,25 @@ def _backoff(attempts: int) -> float:
 
 def _fail(job: dict, err: str):
     attempts = job["attempts"] + 1
+    # 空间不足：账号级环境问题，重试必然继续失败。本条标 skipped（可恢复）不重试，
+    # 同时挂起整个队列，等空间恢复后自动继续，避免后续任务被逐条打成 failed。
+    if _is_space_error(err):
+        db.execute("UPDATE transfers SET status='skipped', attempts=?, error=?"
+                   " WHERE id=? AND status='running'",
+                   (attempts, f"SPACE_FULL: {err}"[:500], job["id"]))
+        db.set_setting("space_blocked", True)
+        db.set_setting("space_blocked_reason", str(err)[:200])
+        logstream.warn("transfer",
+                       f"分享 {job['share_code']} 因 115 空间不足跳过（不重试），"
+                       "转存队列已暂停，等待空间恢复")
+        jobs.notify_failure(
+            job.get("kind", "share"),
+            (classifier.headline(job.get("title", "")) or job.get("title", "")
+             or job["share_code"]), job.get("category", ""), job.get("channel", ""),
+            "115 空间不足",
+            retry_info="💡 本条不重试，已标记「跳过」；转存队列已自动暂停，清理空间后会恢复")
+        jobs.check_space_alert("转存时 115 返回空间不足")
+        return
     if attempts >= MAX_ATTEMPTS:
         db.execute("UPDATE transfers SET status='failed', attempts=?, error=? WHERE id=?"
                    " AND status='running'",
@@ -566,6 +712,7 @@ def _fail(job: dict, err: str):
                    or job["share_code"]), job.get("category", ""),
             job.get("channel", ""), err[:200],
             retry_info=f"💡 已自动重试 {attempts} 次仍未成功，请检查分享链接是否失效")
+        jobs.check_space_alert("转存失败后（若提示空间不足请及时清理）")
     else:
         delay = _backoff(attempts)
         changed = db.execute("UPDATE transfers SET status='queued', attempts=?, error=?, next_retry_at=?"
@@ -652,7 +799,9 @@ def _poll_worker_gates():
         db.query("SELECT count(*) c FROM transfers WHERE status='queued'", one=True)["c"]
         if (limit > 0 and quota >= limit) else 0
     )
-    return running, paused, sched_on, in_win, jitter_min, limit, quota, waiting
+    space_blocked, space_reason = _space_gate()
+    return (running, paused, sched_on, in_win, jitter_min, limit, quota, waiting,
+            space_blocked, space_reason)
 
 
 def _claim_next_job():
@@ -682,14 +831,19 @@ async def queue_worker():
     schedule_logged = False
     pause_logged = False
     stopped_logged = False
+    space_logged = False
     last_schedule_active = False
+    # 启动时清掉上次进程遗留的挂起标记：门闸会在首轮重新探测，避免误显示「空间不足」
+    if db.get_setting("space_blocked", False):
+        db.set_setting("space_blocked", False)
+        db.set_setting("space_blocked_reason", "")
     while True:
         try:
             # 互斥门闸：若文件整理正在运行，暂停转存并在此挂起等待整理完成
             await transfer_gate.wait_transfer_worker_allowed()
 
-            running, paused, sched_on, in_win, jitter_min, limit, quota, waiting = \
-                await asyncio.to_thread(_poll_worker_gates)
+            (running, paused, sched_on, in_win, jitter_min, limit, quota, waiting,
+             space_blocked, space_reason) = await asyncio.to_thread(_poll_worker_gates)
 
             # 总开关：用户未点击「开始运行」前不消费队列
             if not running:
@@ -708,6 +862,27 @@ async def queue_worker():
                 await asyncio.sleep(10)
                 continue
             pause_logged = False
+
+            # 空间门闸：115 空间告急时整队列挂起，任务保持 queued 不判失败、不计重试次数。
+            # 空间恢复（<88%）后自动继续，避免逐条失败刷屏与无意义的 115 调用。
+            if space_blocked:
+                if not space_logged:
+                    logstream.warn("transfer",
+                                   f"115 空间告急（{space_reason}），转存队列已自动暂停；"
+                                   "任务保留在队列，清理空间后自动恢复")
+                    await asyncio.to_thread(db.set_setting, "space_blocked", True)
+                    await asyncio.to_thread(db.set_setting, "space_blocked_reason", space_reason)
+                    await asyncio.to_thread(jobs.check_space_alert,
+                                            f"转存队列已暂停（{space_reason}）")
+                    space_logged = True
+                await asyncio.sleep(60)
+                continue
+            if space_logged:
+                logstream.info("transfer", "115 空间已恢复，转存队列自动继续")
+                space_logged = False
+                await asyncio.to_thread(db.set_setting, "space_blocked", False)
+                await asyncio.to_thread(db.set_setting, "space_blocked_reason", "")
+                await asyncio.to_thread(jobs.notify, "✅ 115 空间已恢复，转存队列自动继续。")
 
             # 定时计划窗口检查
             if not in_win:

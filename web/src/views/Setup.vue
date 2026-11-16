@@ -19,12 +19,13 @@
           <template v-if="qr.loading"><el-skeleton style="width: 180px; margin: 0 auto" animated /></template>
           <template v-else-if="qr.svg">
             <!-- 后端生成的 SVG 改用 data URI 承载：不再以 v-html 直插外部接口数据 -->
-            <div class="qr-box" @click="createQr">
+            <div class="qr-box" role="button" tabindex="0" aria-label="刷新 115 登录二维码"
+                 @click="createQr" @keydown.enter="createQr" @keydown.space.prevent="createQr">
               <img :src="qrSvgUrl" alt="115 登录二维码">
             </div>
             <p v-if="qr.err" class="qr-err">❌ {{ qr.err }}</p>
-            <p v-else-if="qr.scanned" style="color: #67c23a; margin: 4px">✅ 已扫描，请在手机上确认</p>
-            <p v-else style="color: #999; font-size: var(--fs-caption); margin: 4px">点击二维码可刷新</p>
+            <p v-else-if="qr.scanned" style="color: var(--el-color-success); margin: 4px">✅ 已扫描，请在手机上确认</p>
+            <p v-else style="color: var(--text-muted); font-size: var(--fs-caption); margin: 4px">点击二维码可刷新</p>
           </template>
           <el-button v-else type="primary" @click="createQr">生成二维码</el-button>
         </div>
@@ -41,11 +42,11 @@
         <el-radio-group v-model="tgMode" style="display: block; margin: 16px 0">
           <el-radio value="polling" size="large" border style="display: block; margin: 10px 0; height: auto; padding: 12px">
             <b>网页轮询（推荐）</b><br />
-            <span style="color: #999; font-size: var(--fs-caption)">只支持公开频道；不需要 TG 账号，风控风险低，延迟分钟级</span>
+            <span style="color: var(--text-muted); font-size: var(--fs-caption)">只支持公开频道；不需要 TG 账号，风控风险低，延迟分钟级</span>
           </el-radio>
           <el-radio value="userbot" size="large" border style="display: block; margin: 10px 0; height: auto; padding: 12px">
             <b>Userbot 账号监听</b><br />
-            <span style="color: #999; font-size: var(--fs-caption)">实时、支持私密频道；需要 TG api_id/api_hash，建议用小号</span>
+            <span style="color: var(--text-muted); font-size: var(--fs-caption)">实时、支持私密频道；需要 TG api_id/api_hash，建议用小号</span>
           </el-radio>
           <el-radio value="both" size="large" border style="display: block; margin: 10px 0; height: auto; padding: 12px">
             <b>两者都启用</b>
@@ -465,7 +466,7 @@ const finish = async () => {
   text-align: left;
 }
 .ready-item { display: flex; align-items: center; gap: 8px; font-size: var(--fs-body); color: var(--saas-text-main); }
-.ready-item .el-icon.ok { color: #67c23a; }
+.ready-item .el-icon.ok { color: var(--el-color-success); }
 .ready-item .el-icon.bad { color: #f56c6c; }
 .ready-item .el-button { margin-left: auto; }
 </style>

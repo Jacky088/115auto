@@ -1,5 +1,5 @@
 <template>
-  <div class="account-page">
+  <div class="account-page" v-loading="pageLoading">
     <!-- 顶部账户卡片：115 网盘 与 Telegram Userbot -->
     <div class="account-grid page-card">
       <!-- 115 -->
@@ -11,7 +11,7 @@
             <el-tag v-else type="danger" size="small">未登录 / 失效</el-tag>
           </el-descriptions-item>
           <el-descriptions-item label="账号">{{ s115.name || '-' }}</el-descriptions-item>
-          <el-descriptions-item label="说明">转存通过 Cookie 完成，系统每 10 分钟自动巡检有效性。国内服务器推荐扫码登录；海外服务器扫码易被风控，可点击「手动导入 Cookie」</el-descriptions-item>
+          <el-descriptions-item label="说明">转存通过 Cookie 完成，系统按「设置 → 后台巡检周期」自动巡检有效性。国内服务器推荐扫码登录；海外服务器扫码易被风控，可点击「手动导入 Cookie」</el-descriptions-item>
         </el-descriptions>
         <div class="btn-row" style="margin-top: 14px">
           <el-button type="primary" @click="openQr">扫码登录 / 重新登录</el-button>
@@ -159,12 +159,13 @@
       <div style="text-align: center; min-height: 220px">
         <template v-if="qr.svg">
           <!-- 后端生成的 SVG 改用 data URI 承载：不再以 v-html 直插外部接口数据 -->
-          <div class="qr-box" @click="createQr">
+          <div class="qr-box" role="button" tabindex="0" aria-label="刷新 115 登录二维码"
+               @click="createQr" @keydown.enter="createQr" @keydown.space.prevent="createQr">
             <img :src="qrSvgUrl" alt="115 登录二维码">
           </div>
           <p v-if="qr.err" class="qr-err">❌ {{ qr.err }}</p>
-          <p v-else-if="qr.scanned" style="color: #67c23a; margin: 4px">✅ 已扫描，请在手机上确认</p>
-          <p v-else style="color: #999; font-size: var(--fs-caption)">请用 115 App 扫码，点击二维码可刷新</p>
+          <p v-else-if="qr.scanned" style="color: var(--el-color-success); margin: 4px">✅ 已扫描，请在手机上确认</p>
+          <p v-else style="color: var(--text-muted); font-size: var(--fs-caption)">请用 115 App 扫码，点击二维码可刷新</p>
         </template>
         <el-button v-else type="primary" :loading="qr.loading" @click="createQr">生成二维码</el-button>
       </div>
@@ -272,13 +273,18 @@ const onRz = () => { drawerSize.value = window.innerWidth <= 768 ? '94%' : '600p
 
 const ubConnected = computed(() => !!tg.value.connected)
 
+const pageLoading = ref(true)
 const load = async () => {
   // 各面板独立结算并先到先渲染：防止 115 状态检测慢/失败时拖垮或隐藏 TG 频道列表
-  await Promise.allSettled([
-    api.get('/api/account/115/status').then((res) => { s115.value = res.data }).catch(() => {}),
-    api.get('/api/tg/userbot/status').then((res) => { tg.value = res.data }).catch(() => {}),
-    api.get('/api/channels').then((res) => { channels.value = res.data }).catch(() => {}),
-  ])
+  try {
+    await Promise.allSettled([
+      api.get('/api/account/115/status').then((res) => { s115.value = res.data }).catch(() => {}),
+      api.get('/api/tg/userbot/status').then((res) => { tg.value = res.data }).catch(() => {}),
+      api.get('/api/channels').then((res) => { channels.value = res.data }).catch(() => {}),
+    ])
+  } finally {
+    pageLoading.value = false
+  }
 }
 
 const loadChannels = async () => {
@@ -505,10 +511,10 @@ onUnmounted(() => {
 .qr-err { color: #f56c6c; font-size: var(--fs-body); margin: 4px; }
 .tg-test { margin-top: 12px; display: flex; flex-direction: column; gap: 6px; }
 .tg-ch { display: flex; align-items: center; gap: 6px; font-size: var(--fs-body); }
-.tg-ch .ok { color: #67c23a; }
+.tg-ch .ok { color: var(--el-color-success); }
 .tg-ch .bad { color: #f56c6c; }
 .tg-ch-name { font-weight: 600; }
-.tg-ch-sub { color: #909399; }
+.tg-ch-sub { color: var(--el-text-color-secondary); }
 .tg-ch-err { color: #f56c6c; font-size: var(--fs-caption); }
 
 /* 消息预览卡片 */

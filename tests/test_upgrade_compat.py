@@ -8,7 +8,6 @@
 任何改动破坏了这些行为，升级中的生产实例都会出现无法登录/数据丢失，故固化为测试。
 """
 import os
-import sys
 import tempfile
 
 os.environ.setdefault("DATA_DIR", tempfile.mkdtemp(prefix="autosave_test_upgrade_"))

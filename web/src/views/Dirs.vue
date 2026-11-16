@@ -1,5 +1,5 @@
 <template>
-  <div>
+  <div v-loading="pageLoading">
     <!-- 分类 → 目录 映射 -->
     <el-card shadow="never" class="page-card">
       <template #header>
@@ -16,21 +16,26 @@
             <el-tag type="danger" effect="plain" size="small">● 有未保存的更改</el-tag>
             <el-button type="primary" size="small" @click="saveRoutes">保存映射</el-button>
           </div>
-          <el-tooltip content="无法识别分类的资源：跳过，或输入任意目录统一存放（如 /待整理），输入后回车确认">
+          <div class="unclassified-block">
             <div class="unclassified-row">
               <span class="unclassified-label">未分类动作：</span>
               <el-select v-model="unclassifiedAction" class="unclassified-select" filterable allow-create
-                         default-first-option @change="dirtyRoutes = true">
-                <el-option label="跳过（不转存）" value="skip" />
+                         default-first-option @change="onUnclassifiedChange">
+                <el-option label="跳过（不转存、不云下载）" value="skip" />
                 <el-option label="/待整理" value="/待整理" />
               </el-select>
             </div>
-          </el-tooltip>
+            <div class="unclassified-tip">
+              当前规则：{{ unclassifiedAction === 'skip' ? '跳过（不转存、不云下载）' : unclassifiedAction }}。
+              说明：规则仅适用于 TG 频道，对转存和云下载同时生效！如更换目录，请手动输入目录名称，
+              如：/未整理，回车确认，程序会自动创建，点击保存后生效！
+            </div>
+          </div>
         </div>
       </template>
       <p class="page-tip">
         本页设置各分类的转存位置（分享转存 / 云下载可分目录）。资源如何被判定为某个分类，
-        由「匹配规则」页的正则规则与黑名单决定。
+        由频道消息自带的标签（#电影 / #剧集 等）与「匹配规则」页的正则规则共同决定；黑名单只负责拦截，不参与分类。
       </p>
       <el-table :data="routes" size="small">
         <el-table-column prop="category" label="分类" width="120" />
@@ -357,7 +362,7 @@
           <template v-if="drainStatus.submitted">（{{ drainStatus.submitted }} 个云下载中）</template>
           <template v-if="drainStatus.retrying">（{{ drainStatus.retrying }} 个等待重试）</template>
           <template v-if="drainStatus.queued">（{{ drainStatus.queued }} 个排队中）</template>
-          ，系统必须等待全部成功、云下载落盘或重试彻底结束后，自动独占开启移动归档！
+          ，系统需等待队列全部到达终态（成功、云下载落盘、跳过或重试结束）后，自动独占开启移动归档！
         </span>
       </div>
 
@@ -439,10 +444,10 @@
             <span>媒体类型
               <el-tooltip placement="top" effect="dark">
                 <template #content>
-                  按标题匹配时的文件归属判别（配合两库同名场景）：&lt;br/&gt;
-                  · 电影库：跳过带集数标识（S01E01/第1集）的文件，剧集交给剧集规则；&lt;br/&gt;
-                  · 剧集库：正常认领（含剧场版/特别篇）；&lt;br/&gt;
-                  · 自动：不区分，与历史行为一致。&lt;br/&gt;
+                  按标题匹配时的文件归属判别（配合两库同名场景）：<br />
+                  · 电影库：跳过带集数标识（S01E01/第1集）的文件，剧集交给剧集规则；<br />
+                  · 剧集库：正常认领（含剧场版/特别篇）；<br />
+                  · 自动：不区分，与历史行为一致。<br />
                   与规则顺序无关，无论哪条规则先执行结果一致。
                 </template>
                 <el-icon class="q-icon"><QuestionFilled /></el-icon>
@@ -466,9 +471,9 @@
             <span>云下载
               <el-tooltip placement="top" effect="dark">
                 <template #content>
-                  云下载目录专用模式：&lt;br/&gt;
-                  115 云下载的中文标题只在任务目录名上，目录内文件多为纯英文名——开启后按&lt;b&gt;任务子目录名&lt;/b&gt;匹配（自动剥除含网址的广告括号段），目录内文件继承归属。&lt;br/&gt;
-                  电影/剧集按集数标识自动判别；广告域名/微小体积文件自动过滤不入库；&lt;br/&gt;
+                  云下载目录专用模式：<br />
+                  115 云下载的中文标题只在任务目录名上，目录内文件多为纯英文名——开启后按<b>任务子目录名</b>匹配（自动剥除含网址的广告括号段），目录内文件继承归属。<br />
+                  电影/剧集按集数标识自动判别；广告域名/微小体积文件自动过滤不入库；<br />
                   仅当源目录是分类路由配置的云下载目录时可开启，配置变更后失效会自动拦下并告警。
                 </template>
                 <el-icon class="q-icon"><QuestionFilled /></el-icon>
@@ -557,14 +562,14 @@
               按父目录名匹配
               <el-tooltip placement="top" effect="dark">
                 <template #content>
-                  适用场景：115 云下载的中文标题只在任务目录名上（如「【广告www..】奥德赛[简繁英字幕].The.Odyssey.2026…」），&lt;br/&gt;
-                  目录内文件多为纯英文名（The.Odyssey.2026….mkv）。&lt;br/&gt;&lt;br/&gt;
-                  开启后的行为变化：&lt;br/&gt;
-                  · 匹配对象从文件名换成任务子目录名（自动剥除含网址的广告括号段）；&lt;br/&gt;
-                  · 目录内纯英文文件继承目录归属，电影/剧集按集数标识自动判别；&lt;br/&gt;
-                  · 广告域名/微小体积（&lt;10MB）文件自动过滤，不入媒体库；&lt;br/&gt;
-                  · 源目录根部散落的单文件（如 a.mp4）不参与，留待手动处理；&lt;br/&gt;
-                  · 字幕不跟移（留给整理刮削配对）。&lt;br/&gt;&lt;br/&gt;
+                  适用场景：115 云下载的中文标题只在任务目录名上（如「【广告www..】奥德赛[简繁英字幕].The.Odyssey.2026…」），<br />
+                  目录内文件多为纯英文名（The.Odyssey.2026….mkv）。<br /><br />
+                  开启后的行为变化：<br />
+                  · 匹配对象从文件名换成任务子目录名（自动剥除含网址的广告括号段）；<br />
+                  · 目录内纯英文文件继承目录归属，电影/剧集按集数标识自动判别；<br />
+                  · 广告域名/微小体积（&lt;10MB）文件自动过滤，不入媒体库；<br />
+                  · 源目录根部散落的单文件（如 a.mp4）不参与，留待手动处理；<br />
+                  · 字幕不跟移（留给整理刮削配对）。<br /><br />
                   仅当源目录 = 分类路由配置的云下载目录时可开启；配置变更后自动失效并告警。
                 </template>
                 <el-icon class="q-icon"><QuestionFilled /></el-icon>
@@ -666,13 +671,42 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { showScanLoading, closeScanLoading } from '../composables/scanLoading'
+import { usePolling } from '../composables/usePolling'
 import { api, errMsg, fmtSize, saveOk } from '../api'
 import { useUnsavedGuard } from '../composables/unsavedGuard'
 import DirPicker from '../components/DirPicker.vue'
 
+// 首屏数据加载态：分类映射 + 整理规则都到位后再撤掉遮罩，避免表格先空后跳
+const pageLoading = ref(true)
+
 // ---------- 分类转存目录 ----------
 const routes = ref([])
 const unclassifiedAction = ref('skip')
+let unclassifiedSaved = 'skip'
+
+// 手动输入的未分类目录校验：必须是 / 开头的 115 网盘子目录（与后端校验一致）
+const dirError = (p) => {
+  if (!p || p === 'skip') return ''
+  if (!p.startsWith('/')) return '目录需以 / 开头，填写 115 网盘路径，例如 /未整理'
+  if (p === '/') return '不能使用网盘根目录 /，请填写一个子目录，例如 /未整理'
+  if (p.split('/').some((seg) => seg === '..')) return '目录不能包含 ..'
+  if (/\s/.test(p)) return '目录不能包含空格，请去掉空格后重试'
+  if (p.length > 200) return '目录过长，请控制在 200 个字符以内'
+  return ''
+}
+
+const onUnclassifiedChange = (val) => {
+  const err = dirError(val)
+  if (err) {
+    ElMessageBox.alert(err, '目录格式有误', {
+      type: 'warning',
+      confirmButtonText: '重新输入',
+      callback: () => { unclassifiedAction.value = unclassifiedSaved },
+    })
+    return
+  }
+  dirtyRoutes.value = true
+}
 const newCat = ref('')
 const dirtyRoutes = ref(false)
 
@@ -706,7 +740,6 @@ const drainStatus = ref({ unfinished: 0, queued: 0, retrying: 0, running: 0, sub
 const nextRuns = ref([])
 const newFixedTime = ref('')
 const systemRunning = ref(false)
-let sysTimer = null
 
 const computedAutoMoveEnabled = computed({
   get() {
@@ -754,12 +787,14 @@ const checkSysState = async () => {
   } catch {}
 }
 
+// 系统运行状态的轻量轮询（3 秒），页面不可见时自动暂停
+const sysPoll = usePolling(checkSysState, 3000)
+
 watch(systemRunning, (isRunning) => {
   if (!isRunning) {
     moveSettings.value.auto_move_enabled = false
   }
 })
-let pollTimer = null
 const runningMove = ref(false)
 const dialogVisible = ref(false)
 const newRuleForm = ref({
@@ -831,6 +866,7 @@ const load = async () => {
     suppressWatch = true
     routes.value = data.routes
     unclassifiedAction.value = data.unclassified_action
+    unclassifiedSaved = data.unclassified_action
     await nextTick()
     suppressWatch = false
     dirtyRoutes.value = false
@@ -870,41 +906,42 @@ const loadAutoMove = async () => {
   }
 }
 
-const startAutoMovePolling = () => {
-  if (pollTimer) return
-  pollTimer = setInterval(async () => {
-    try {
-      const wasRunningMove = runningMove.value
-      const { data } = await api.get('/api/auto-move/rules')
-      gateState.value = data.gate_state || 'idle'
-      activeMode.value = data.active_mode || 'none'
-      exclusiveBusy.value = !!data.exclusive_busy
-      drainStatus.value = data.drain_status || { unfinished: 0, queued: 0, retrying: 0, running: 0, submitted: 0 }
-      nextRuns.value = data.next_runs || []
-      if (gateState.value === 'idle') {
-        stopAutoMovePolling()
-        runningMove.value = false
-        moveRules.value = data.rules || []
-        if (data.settings) moveSettings.value = { ...moveSettings.value, ...data.settings }
-        if (wasRunningMove) {
-          if (data.last_result && data.last_result.total_moved !== undefined) {
-            ElMessage.success(`排队整理完成：共处理 ${data.last_result.total_rules} 条规则，移动 ${data.last_result.total_moved} 个文件（转存已恢复）`)
-          } else {
-            ElMessage.success('排队整理流程已全部完成（转存已恢复）')
-          }
+// 排队整理进度轮询（2.5 秒），页面不可见时自动暂停；gate 回到 idle 后自动停止
+const movePoll = usePolling(async () => {
+  try {
+    const wasRunningMove = runningMove.value
+    const { data } = await api.get('/api/auto-move/rules')
+    gateState.value = data.gate_state || 'idle'
+    activeMode.value = data.active_mode || 'none'
+    exclusiveBusy.value = !!data.exclusive_busy
+    drainStatus.value = data.drain_status || { unfinished: 0, queued: 0, retrying: 0, running: 0, submitted: 0 }
+    nextRuns.value = data.next_runs || []
+    if (gateState.value === 'idle') {
+      stopAutoMovePolling()
+      runningMove.value = false
+      moveRules.value = data.rules || []
+      if (data.settings) moveSettings.value = { ...moveSettings.value, ...data.settings }
+      if (wasRunningMove) {
+        if (data.last_result && data.last_result.total_moved !== undefined) {
+          ElMessage.success(`排队整理完成：共处理 ${data.last_result.total_rules} 条规则，移动 ${data.last_result.total_moved} 个文件（转存已恢复）`)
+        } else {
+          ElMessage.success('排队整理流程已全部完成（转存已恢复）')
         }
-      } else {
-        runningMove.value = !['organize', 'scrape'].includes(activeMode.value)
       }
-    } catch (_) {}
-  }, 2500)
+    } else {
+      runningMove.value = !['organize', 'scrape'].includes(activeMode.value)
+    }
+  } catch (e) {
+    console.debug('[auto-move]', e)
+  }
+}, 2500)
+
+const startAutoMovePolling = () => {
+  movePoll.start()
 }
 
 const stopAutoMovePolling = () => {
-  if (pollTimer) {
-    clearInterval(pollTimer)
-    pollTimer = null
-  }
+  movePoll.stop()
 }
 
 const isSkip = (d) => d === 'skip'
@@ -992,6 +1029,7 @@ const saveRoutes = async () => {
       unclassified_action: unclassifiedAction.value,
     })
     dirtyRoutes.value = false
+    unclassifiedSaved = unclassifiedAction.value
     saveOk('目录映射已保存', '分类目录更改已生效')
   } catch (e) { ElMessage.error(errMsg(e)) }
 }
@@ -1245,17 +1283,20 @@ const confirmRunAfterPreview = async () => {
 useUnsavedGuard(dirtyRoutes)  // 有未保存更改时，离开页面弹窗确认
 
 onUnmounted(stopPreviewCountdown)
-onMounted(() => {
-  load()
-  loadAutoMove()
+onMounted(async () => {
+  try {
+    await Promise.all([load(), loadAutoMove()])
+  } finally {
+    pageLoading.value = false
+  }
   checkSysState()
-  sysTimer = setInterval(checkSysState, 3000)
+  sysPoll.start()
   window.addEventListener('focus', checkSysState)
 })
 
 onUnmounted(() => {
   stopAutoMovePolling()
-  if (sysTimer) clearInterval(sysTimer)
+  sysPoll.stop()
   window.removeEventListener('focus', checkSysState)
 })
 </script>
@@ -1276,7 +1317,7 @@ onUnmounted(() => {
 }
 .dir-btn.dir-skip { color: #e6a23c; }
 .dir-btn.dir-skip .el-icon { color: #e6a23c; }
-.dir-btn.dir-empty { color: #909399; font-style: italic; }
+.dir-btn.dir-empty { color: var(--el-text-color-secondary); font-style: italic; }
 .dir-btn.dir-empty .el-icon { color: #c0c4cc; }
 .dir-btn:hover,
 .dir-btn:active {
@@ -1702,13 +1743,27 @@ onUnmounted(() => {
   gap: 6px;
   flex: none;
 }
+.unclassified-block {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  margin-left: auto;
+  min-width: 0;
+}
 .unclassified-row {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  color: #999;
+  color: var(--text-muted);
   font-size: var(--fs-caption);
-  margin-left: auto;
+}
+.unclassified-tip {
+  max-width: 560px;
+  color: var(--text-muted);
+  font-size: var(--fs-caption);
+  line-height: 1.5;
+  text-align: right;
 }
 .unclassified-label {
   white-space: nowrap;
@@ -1761,9 +1816,17 @@ onUnmounted(() => {
     width: 100%;
     flex-wrap: wrap;
   }
+  .unclassified-block {
+    width: 100%;
+    align-items: stretch;
+  }
   .unclassified-row {
     margin-left: 0;
     width: 100%;
+  }
+  .unclassified-tip {
+    max-width: none;
+    text-align: left;
   }
   .unclassified-select {
     flex: 1;

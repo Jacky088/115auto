@@ -319,7 +319,7 @@ def test_scrape_0sec_skip_plain_tg_report_and_web_commit(tmp_path):
 
 def test_media_api_routes_and_bot_callbacks(tmp_path):
     from fastapi.testclient import TestClient
-    from backend import auth, config
+    from backend import auth
     from backend.main import app
 
     token = auth.make_token("admin")

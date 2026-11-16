@@ -75,7 +75,8 @@ def should_exclude(rel_path: Path) -> bool:
         if p in EXCLUDE_DIRS:
             return True
     name = rel_path.name
-    if name in EXCLUDE_FILES or name.startswith(".env."):
+    # .env.example 是部署模板（不含真实密钥），需要随包分发；其余 .env* 一律排除
+    if name in EXCLUDE_FILES or (name.startswith(".env.") and name != ".env.example"):
         return True
     if rel_path.suffix.lower() in EXCLUDE_EXTS:
         return True
@@ -143,7 +144,7 @@ def build_zip():
                 or "__pycache__/" in n
                 or n.endswith((".db", ".db-wal", ".db-shm", ".sqlite", ".sqlite3", ".session", ".key", ".pem", ".log"))
                 or Path(n).name in EXCLUDE_FILES
-                or Path(n).name.startswith(".env")
+                or (Path(n).name.startswith(".env") and Path(n).name != ".env.example")
             )
         ]
         if forbidden:

@@ -12,6 +12,9 @@
         <b>系统设置</b>
         <el-tag v-if="dirty" type="danger" effect="plain" size="small">● 有未保存的更改</el-tag>
         <el-button v-if="dirty" type="primary" size="small" style="margin-left: 8px" @click="save">保存设置</el-button>
+        <el-button size="small" style="margin-left: 8px" :loading="doctorLoading" @click="runDoctor">
+          系统自检
+        </el-button>
         <span style="margin-left: auto" class="tip">修改需点击「保存设置」后生效</span>
       </div>
     </template>
@@ -24,7 +27,7 @@
               <span class="tip">关闭后新消息中的分享链接不再转存，排队任务自动跳过</span>
             </div>
           </el-form-item>
-          <el-form-item label="云下载（ED2K）">
+          <el-form-item label="云下载（ED2K / 磁力）">
             <div class="switch-row">
               <el-switch v-model="f.enable_offline_download" />
               <span class="tip">关闭后新消息中的电驴/磁力链接不再提交云下载，排队任务自动跳过</span>
@@ -109,7 +112,13 @@
                 <el-option v-for="p in RETRY_PRESETS" :key="p.label"
                            :label="p.label" :value="p.label" />
               </el-select>
-              <span class="tip range-tip">失败后按预设间隔逐级重试（共 3 次）</span>
+              <span class="tip range-tip">失败后按预设间隔逐级重试，最多 5 次尝试（含首次）</span>
+            </div>
+          </el-form-item>
+          <el-form-item label="空间不足自动暂停">
+            <div class="switch-row">
+              <el-switch v-model="f.space_guard_enabled" />
+              <span class="tip">115 使用率 ≥90%（或剩余 &lt;10GB）时自动暂停转存队列：本条标记「跳过」且不再自动重试，后续任务保留排队、不判失败；回落到 88% 以下且剩余 ≥10GB 时自动恢复；关闭后不做空间预检</span>
             </div>
           </el-form-item>
           </div>
@@ -196,7 +205,7 @@
           <el-form-item label="转存结果通知">
             <div class="switch-row">
               <el-switch v-model="f.notify_transfer_success" />
-              <span class="tip">转存成功/失败、云下载提交/完成/失败都会推送 TG 消息（含具体原因）</span>
+              <span class="tip">转存成功/失败、云下载提交/完成/失败都会推送通知（TG / Bark / PushPlus / ntfy，含具体原因）</span>
             </div>
           </el-form-item>
           <el-form-item label="TG 推送">
@@ -219,6 +228,16 @@
               </div>
             </SecretConfig>
           </el-form-item>
+          <el-form-item label="直发链接格式">
+            <div class="tip" style="width: 100%">
+              直接发给 Bot 的链接需以指令头开头，程序据此判断进哪个队列（不带会回复格式说明）：<br />
+              <code>转存 [分类] &lt;115 分享链接&gt;</code> → 进入分享转存队列<br />
+              <code>云下载 [分类] &lt;磁力/电驴链接&gt;</code> → 进入云下载队列<br />
+              空格不影响识别，链接可紧贴指令头；分类可省略（如 <code>云下载 动漫 magnet:?xt=…</code>），
+              写了分类就用该分类目录，省略时按标题规则识别、识别不出用「未分类动作」；<br />
+              分类名须与「转存目录」页的「分类 → 目录映射」完全一致，写错会拒绝入队并回复全部可选分类
+            </div>
+          </el-form-item>
           </div>
 
           <div class="section-card"><div class="section-title">转存增强</div>
@@ -234,7 +253,7 @@
           <el-form-item label="按文件名去重">
             <div class="switch-row">
               <el-switch v-model="f.dedup_by_name" :disabled="!f.enable_share_transfer && !f.enable_offline_download" />
-              <span class="tip">开启后转存前再按文件名查重：网盘同名目录下已存在同名文件时自动跳过</span>
+              <span class="tip">开启后分享转存前再按文件名查重：网盘同名目录下已存在同名文件时自动跳过</span>
             </div>
           </el-form-item>
           <el-form-item label="整理刮削">
@@ -246,6 +265,43 @@
                 支持电影/剧集标准命名、[tmdbid] 标签、TMDB 精准刮削、本地 NFO/海报与 TG 联动人工确认
               </span>
             </div>
+          </el-form-item>
+          </div>
+
+          <div class="section-card"><div class="section-title">订阅质量与洗版</div>
+          <el-form-item label="质量策略">
+            <div class="switch-row">
+              <el-switch v-model="f.quality_policy_enabled" />
+              <span class="tip">
+                开启后按标题识别画质（分辨率/来源/编码）：同一订阅的同一集出现多份分享时自动择优，
+                画质相同时不再重复转存。识别不出画质的一律放行，不会误拦正常资源
+              </span>
+            </div>
+          </el-form-item>
+          <el-form-item label="最低画质">
+            <el-select v-model="f.quality_min_resolution" :disabled="!f.quality_policy_enabled" style="width: 200px">
+              <el-option label="不限" value="" />
+              <el-option label="720p 及以上" value="720p" />
+              <el-option label="1080p 及以上" value="1080p" />
+              <el-option label="2160p (4K)" value="2160p" />
+            </el-select>
+            <span class="tip">明确识别为低于该画质的分享直接跳过；订阅页可为单个订阅单独设置（优先于此处）</span>
+          </el-form-item>
+          <el-form-item label="洗版升级">
+            <div class="switch-row">
+              <el-switch v-model="f.wash_enabled" :disabled="!f.quality_policy_enabled" />
+              <span class="tip">同一集出现更高画质时自动转存新版，并把旧版移入下方归档目录（只移动、不删除，可随时取回）</span>
+            </div>
+          </el-form-item>
+          <el-form-item label="旧版归档目录">
+            <div class="dir-pick-row">
+              <el-button class="dir-btn" @click="washPickerOpen = true">
+                <el-icon><FolderOpened /></el-icon>
+                <span>{{ f.wash_archive_dir || '点击选择 115 网盘目录' }}</span>
+              </el-button>
+              <el-button v-if="f.wash_archive_dir" text @click="f.wash_archive_dir = ''">清空</el-button>
+            </div>
+            <div class="tip">开启洗版必须选择该目录；升级后旧版本只会被移入此处，不会删除。无法确认旧版位置时放弃移动</div>
           </el-form-item>
           </div>
 
@@ -476,11 +532,47 @@
       </div>
     </el-form>
   </el-card>
+
+  <!-- 未保存提醒浮动条：长表单滚到任何位置都能直接保存。
+       放在 el-card 之外，避免卡片 backdrop-filter 成为 position:fixed 的包含块 -->
+  <div v-if="loaded && dirty" class="save-dock">
+    <span class="dock-hint">有未保存的更改</span>
+    <el-button type="primary" size="small" @click="save">保存设置</el-button>
+  </div>
+
+  <DirPicker v-model="washPickerOpen" title="选择洗版旧版归档目录"
+             @pick="onWashArchivePicked" />
+
+  <el-dialog v-model="doctorOpen" title="系统自检" width="min(760px, 94vw)">
+    <div v-if="doctor" class="toolbar" style="margin-bottom: 10px">
+      <el-tag :type="doctorTagType(doctor.overall)" effect="dark">
+        {{ doctorTagText(doctor.overall) }}
+      </el-tag>
+      <span class="tip">
+        共 {{ doctor.checks.length }} 项：正常 {{ doctor.counts.ok }} / 警告 {{ doctor.counts.warn }} /
+        失败 {{ doctor.counts.fail }} · 版本 {{ doctor.version }}
+      </span>
+    </div>
+    <el-table :data="doctor ? doctor.checks : []" size="small" max-height="420">
+      <el-table-column prop="name" label="检查项" width="150" />
+      <el-table-column label="状态" width="88">
+        <template #default="{ row }">
+          <el-tag :type="doctorTagType(row.status)" size="small">{{ doctorTagText(row.status) }}</el-tag>
+        </template>
+      </el-table-column>
+      <el-table-column prop="detail" label="结果" min-width="260" show-overflow-tooltip />
+    </el-table>
+    <template #footer>
+      <el-button @click="copyDoctor" :disabled="!doctor">复制报告</el-button>
+      <el-button type="primary" :loading="doctorLoading" @click="runDoctor">重新检查</el-button>
+    </template>
+  </el-dialog>
 </template>
 
 <script setup>
 import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { FolderOpened } from '@element-plus/icons-vue'
 import { api, errMsg, fmtSize, saveOk, SECRET_MASK } from '../api'
 import { useUnsavedGuard } from '../composables/unsavedGuard'
 
@@ -511,6 +603,56 @@ const testing = ref(false)
 const chTesting = ref('') // 正在测试的通知渠道（bark/pushplus/ntfy）
 const dirty = ref(false)
 
+// ---- 洗版旧版归档目录：复用全站 115 目录选择器，避免手填路径出错 ----
+const washPickerOpen = ref(false)
+const onWashArchivePicked = (path) => {
+  const p = String(path || '').trim()
+  if (!p) return
+  if (p === '/') {
+    ElMessage.warning('归档目录不能是网盘根目录，请选择或新建一个子目录')
+    return
+  }
+  f.value.wash_archive_dir = p
+  dirty.value = true
+}
+
+// ---- 系统自检 ----
+const doctorOpen = ref(false)
+const doctorLoading = ref(false)
+const doctor = ref(null)
+const DOCTOR_TEXT = { ok: '正常', warn: '警告', fail: '失败', skip: '跳过' }
+const doctorTagText = (s) => DOCTOR_TEXT[s] || s || ''
+const doctorTagType = (s) => (s === 'ok' ? 'success' : s === 'warn' ? 'warning'
+  : s === 'fail' ? 'danger' : 'info')
+const runDoctor = async () => {
+  doctorOpen.value = true
+  doctorLoading.value = true
+  try {
+    doctor.value = (await api.get('/api/system/doctor')).data
+  } catch (e) {
+    ElMessage.error(errMsg(e) || '自检失败')
+  } finally {
+    doctorLoading.value = false
+  }
+}
+const copyDoctor = async () => {
+  const text = doctor.value && doctor.value.report
+  if (!text) return
+  try {
+    await navigator.clipboard.writeText(text)
+  } catch {
+    // 非 HTTPS 环境 clipboard 不可用：退回复制到隐藏 textarea
+    const ta = document.createElement('textarea')
+    ta.value = text
+    ta.style.position = 'fixed'
+    ta.style.opacity = '0'
+    document.body.appendChild(ta)
+    ta.select()
+    try { document.execCommand('copy') } finally { ta.remove() }
+  }
+  ElMessage.success('自检报告已复制')
+}
+
 const enableSchedule = () => {
   f.value.schedule_enabled = true
   dirty.value = true
@@ -527,6 +669,7 @@ const enableSchedule = () => {
 // ---- 密钥类配置的独立编辑/保存（参考 TMDB API Key 的「已配置 + 更换」模式）----
 // 每块用独立 draft，编辑时不联动底部表单，保存成功后同步回 f（避免底部保存把旧值覆盖回去）
 import SecretConfig from '../components/SecretConfig.vue'
+import DirPicker from '../components/DirPicker.vue'
 const nf = reactive({ token: '', chat_id: '' })   // TG 通知
 const bf = reactive({ url: '' })                  // Bark
 const pf = reactive({ token: '', topic: '' })     // PushPlus
@@ -991,6 +1134,15 @@ const validateForm = () => {
     }
   }
 
+  // 6. 洗版升级必须填写旧版归档目录
+  if (f.value.wash_enabled) {
+    const dir = String(f.value.wash_archive_dir || '').trim()
+    if (!dir.startsWith('/') || dir.split('/').includes('..')) {
+      ElMessage.warning('开启「洗版升级」需填写以 / 开头的旧版归档目录，如 /媒体库/洗版归档')
+      return false
+    }
+  }
+
   return true
 }
 
@@ -1158,15 +1310,18 @@ onMounted(load)
 .settings-flow { column-count: 2; column-gap: 16px; }
 .settings-flow > .section-card { break-inside: avoid; }
 @media (max-width: 1100px) { .settings-flow { column-count: 1; } }
-.tip { color: #999; font-size: var(--fs-caption); line-height: 1.55; }
+.tip { color: var(--text-muted); font-size: var(--fs-caption); line-height: 1.55; }
 /* 警示性提示文字：加粗 + 琥珀色，一眼可见（全局样式 .warn-text 的本地兜底） */
-.warn-text { font-weight: 600; color: #b45309; }
+.warn-text { font-weight: 600; color: var(--text-warn); }
 .switch-row {
   width: 100%;
   display: flex; align-items: center; gap: 10px;
 }
 .switch-row :deep(.el-switch) { flex: none; }
 .switch-row .tip { flex: 1; min-width: 0; }
+/* 洗版归档目录：与全站目录选择按钮同款，窄屏自动换行不挤压 */
+.dir-pick-row { display: flex; align-items: center; gap: 8px; width: 100%; max-width: 520px; }
+.dir-pick-row .dir-btn { flex: 1; min-width: 0; }
 .ub-inline { width: 100%; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .ub-inline .tip { flex: 1 1 200px; min-width: 0; }
 .range-row { width: 100%; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
@@ -1230,7 +1385,37 @@ html.dark .bundle-capsule-radios :deep(.el-radio-button__original-radio:checked 
   color: #ffffff !important;
 }
 .bundle-switch-group { display: flex; flex-direction: column; gap: 6px; }
-.bundle-check { display: inline-flex; align-items: center; gap: 8px; font-size: var(--fs-caption); color: #606266; cursor: pointer; }
+.bundle-check { display: inline-flex; align-items: center; gap: 8px; font-size: var(--fs-caption); color: var(--el-text-color-regular); cursor: pointer; }
 .bundle-progress-wrap { width: 100%; max-width: 460px; display: flex; flex-direction: column; gap: 4px; }
-.sep { color: #999; }
+.sep { color: var(--text-muted); }
+/* 底部浮动保存条：仅在存在未保存修改时出现，不遮挡表单操作 */
+.save-dock {
+  position: fixed;
+  left: 50%;
+  bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+  transform: translateX(-50%);
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: calc(100vw - 32px);
+  box-sizing: border-box;
+  padding: 8px 10px 8px 16px;
+  border-radius: var(--r-pill);
+  background: var(--glass-bg-strong);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--glass-shadow-lg);
+}
+.dock-hint {
+  font-size: var(--fs-caption);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+/* 极窄屏只留按钮，避免浮动条撑出横向滚动 */
+@media (max-width: 420px) {
+  .save-dock { gap: 0; padding: 8px; }
+  .dock-hint { display: none; }
+}
 </style>

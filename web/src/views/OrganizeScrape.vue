@@ -1,5 +1,5 @@
 <template>
-  <div class="media-page">
+  <div class="media-page" v-loading="pageLoading">
     <!-- 顶部系统运行状态联动警告 -->
     <el-alert
       v-if="!status.running"
@@ -932,7 +932,7 @@
       :title="ruleDialog.mode === 'organize'
         ? (ruleDialog.id ? '编辑目录整理规则' : '新增目录整理规则')
         : (ruleDialog.id ? '编辑媒体刮削目录' : '新增媒体刮削目录')"
-      width="560px"
+      width="min(560px, 94vw)"
     >
       <!-- 必选项明确文字提示横幅 -->
       <div class="rule-dialog-hint">
@@ -1174,7 +1174,7 @@
     </el-dialog>
 
     <!-- 手动搜索 TMDB 弹窗 -->
-    <el-dialog v-model="manualDialog.open" title="手动搜索 TMDB 并暂存绑定" width="640px">
+    <el-dialog v-model="manualDialog.open" title="手动搜索 TMDB 并暂存绑定" width="min(640px, 94vw)">
       <div class="mb12 meta-hint">
         待绑定文件：<b>{{ manualDialog.task?.orig_name }}</b>（选定后置为「已选待提交」，需点「提交队列」才执行）
       </div>
@@ -1222,9 +1222,9 @@
     </el-dialog>
 
     <!-- 本地元数据 NFO / 海报预览弹窗 -->
-    <el-dialog v-model="metaDialog.open" title="本地持久化 NFO 与海报详情（零 115 上传）" width="760px">
+    <el-dialog v-model="metaDialog.open" title="本地持久化 NFO 与海报详情（零 115 上传）" width="min(760px, 94vw)">
       <div v-if="metaDialog.data" class="meta-view">
-        <div class="mb12" style="font-size:12px;color:#64748b">
+        <div class="mb12" style="font-size:12px;color:var(--text-muted)">
           存储位置：<code>{{ metaDialog.data.meta_dir }}</code>
         </div>
         <div class="meta-imgs mb12" v-if="metaDialog.data.has_poster || metaDialog.data.has_fanart">
@@ -1248,6 +1248,8 @@ import DirPicker from '../components/DirPicker.vue'
 import { Timer, Lock, Calendar, Plus } from '@element-plus/icons-vue'
 
 const activeTab = ref('organize')
+// 首屏加载态：状态/规则/记录/任务/设置全部到位后再撤掉遮罩
+const pageLoading = ref(true)
 const taskFilter = ref('pending_group')
 const recordFilter = ref('all')
 
@@ -2032,7 +2034,11 @@ onMounted(async () => {
   if (typeof window !== 'undefined') {
     window.addEventListener('resize', onResize)
   }
-  await Promise.all([loadStatus(), loadRules(), loadRecords(), loadTasks(), loadSettings()])
+  try {
+    await Promise.all([loadStatus(), loadRules(), loadRecords(), loadTasks(), loadSettings()])
+  } finally {
+    pageLoading.value = false
+  }
   pollTimer = setInterval(async () => {
     await loadStatus()
     if (activeTab.value === 'organize' && (status.value.gate.active_mode === 'organize' || records.value.length === 0)) {
@@ -2069,16 +2075,21 @@ onUnmounted(() => {
 .step-header {
   display: flex;
   justify-content: space-between;
-  align-items: center;
+  align-items: flex-start;
   gap: 12px;
   flex-wrap: wrap;
   margin-bottom: 12px;
 }
+/* 步骤徽标独占第一行，标题与描述换到第二行并和徽标左对齐（桌面/移动一致） */
 .step-title-wrap {
   display: flex;
-  align-items: center;
-  gap: 12px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-width: 0;
 }
+.step-title-wrap > div { width: 100%; }
 .step-badge {
   display: inline-flex;
   align-items: center;
@@ -2228,7 +2239,7 @@ html.dark .cb-stats :deep(.el-radio-button__original-radio:checked + .el-radio-b
 .staged-banner {
   margin-top: 8px; padding: 6px 10px; border-radius: 8px;
   background: rgba(245, 158, 11, .14); border: 1px solid rgba(245, 158, 11, .3);
-  color: #b45309; font-size: var(--fs-caption);
+  color: var(--text-warn); font-size: var(--fs-caption);
 }
 html.dark .staged-banner { color: #fbbf24; }
 
@@ -2259,7 +2270,7 @@ html.dark .cand-rating { color: #fbbf24; }
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
 }
 .cand-reasons { font-size: var(--fs-caption); color: var(--saas-text-sub); opacity: .8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.no-cand-tip { margin-top: 8px; font-size: var(--fs-caption); color: #b45309; }
+.no-cand-tip { margin-top: 8px; font-size: var(--fs-caption); color: var(--text-warn); }
 html.dark .no-cand-tip { color: #fbbf24; }
 
 /* ---- 规则 / 账本工具条 ---- */

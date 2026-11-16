@@ -1,9 +1,7 @@
 """测试 SQLite 损坏自动容灾自愈机制"""
-import os
 import shutil
 import tempfile
 from pathlib import Path
-import pytest
 
 from backend import config, database
 

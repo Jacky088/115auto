@@ -35,6 +35,15 @@
             <el-switch :model-value="!!row.enabled" @change="(v) => toggle(row, v)" />
           </template>
         </el-table-column>
+        <el-table-column label="最低画质" width="124">
+          <template #default="{ row }">
+            <el-select :model-value="row.min_quality || ''" size="small"
+                       :disabled="!qualityPolicyOn"
+                       @change="(v) => setMinQuality(row, v)">
+              <el-option v-for="o in QUALITY_OPTS" :key="o.value" :label="o.label" :value="o.value" />
+            </el-select>
+          </template>
+        </el-table-column>
         <el-table-column label="最近集数" width="100">
           <template #default="{ row }">{{ row.last_ep || '-' }}</template>
         </el-table-column>
@@ -138,7 +147,10 @@
               <el-image v-if="it.poster_path" :src="posterUrl(it.poster_path)"
                         fit="cover" lazy class="poster-img">
                 <template #error>
-                  <div class="poster-err" title="点击重试海报" @click.stop="retryPoster(it.poster_path)">
+                  <div class="poster-err" role="button" tabindex="0" title="点击重试海报"
+                       aria-label="重试加载海报" @click.stop="retryPoster(it.poster_path)"
+                       @keydown.enter.stop="retryPoster(it.poster_path)"
+                       @keydown.space.prevent.stop="retryPoster(it.poster_path)">
                     <el-icon :size="16"><RefreshRight /></el-icon>
                     <span>加载失败</span>
                     <span class="retry-hint">点击重试</span>
@@ -374,6 +386,7 @@ const load = async () => {
     items.value = sub.data.items || []
     if (st?.data) {
       tmdbKey.value = String(st.data.tmdb_api_key || '')
+      qualityPolicyOn.value = !!st.data.quality_policy_enabled
     }
   } catch (e) { ElMessage.error(errMsg(e)) } finally { loading.value = false }
   // 已配置 Key：进页面就按分类拉取热门影视（无需搜索）
@@ -389,6 +402,22 @@ const toggle = async (row, v) => {
     row.enabled = v ? 0 : 1
     ElMessage.error(errMsg(e))
   }
+}
+
+// ---- 订阅级最低画质（需先在系统设置开启「质量策略」）----
+const QUALITY_OPTS = [
+  { label: '跟随全局', value: '' },
+  { label: '720p', value: '720p' },
+  { label: '1080p', value: '1080p' },
+  { label: '2160p', value: '2160p' },
+]
+const qualityPolicyOn = ref(false)
+const setMinQuality = async (row, v) => {
+  try {
+    await api.put(`/api/subscriptions/${row.id}`, { min_quality: v })
+    row.min_quality = v
+    ElMessage.success(v ? `「${row.keyword}」最低画质已设为 ${v}` : `「${row.keyword}」已改为跟随全局画质`)
+  } catch (e) { ElMessage.error(errMsg(e)) }
 }
 
 const resetProgress = async (row) => {
@@ -415,9 +444,9 @@ onMounted(load)
 
 <style scoped>
 .sub-keyword { font-weight: 500; font-size: var(--fs-body); }
-.tip { color: #999; font-size: var(--fs-caption); font-weight: 400; }
-.hit-title { font-size: var(--fs-caption); color: #999; margin-top: 2px; word-break: break-all; }
-.sub-alias { font-size: var(--fs-caption); color: #999; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tip { color: var(--text-muted); font-size: var(--fs-caption); font-weight: 400; }
+.hit-title { font-size: var(--fs-caption); color: var(--text-muted); margin-top: 2px; word-break: break-all; }
+.sub-alias { font-size: var(--fs-caption); color: var(--text-muted); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ---- TMDB 选剧 ---- */
 .sub-section,
@@ -439,7 +468,7 @@ onMounted(load)
 .tmdb-key-input { width: 300px; max-width: 100%; }
 .k-chips { display: inline-flex; gap: 6px; margin-left: auto; }
 .k-chip { font-size: var(--fs-caption); padding: 1px 10px; }
-.tmdb-empty { color: #999; font-size: var(--fs-body); padding: 12px 0 4px; }
+.tmdb-empty { color: var(--text-muted); font-size: var(--fs-body); padding: 12px 0 4px; }
 .tmdb-cats { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
 .cat-chip {
   padding: 5px 14px; border-radius: var(--r-pill); font-size: var(--fs-caption); cursor: pointer; user-select: none;
@@ -474,7 +503,7 @@ onMounted(load)
 .poster-img { width: 96px; height: 144px; border-radius: 8px; display: block; background: var(--saas-hover, #f4f7fe); }
 .poster-err, .poster-none {
   width: 96px; height: 144px; border-radius: 8px; display: flex; flex-direction: column; align-items: center; justify-content: center;
-  background: var(--saas-hover, #f4f7fe); color: #999; font-size: var(--fs-caption); text-align: center; padding: 6px;
+  background: var(--saas-hover, #f4f7fe); color: var(--text-muted); font-size: var(--fs-caption); text-align: center; padding: 6px;
   user-select: none; transition: background .15s, color .15s;
 }
 .poster-err {
@@ -491,10 +520,10 @@ onMounted(load)
 }
 .tmdb-info { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .tmdb-name { font-weight: 600; font-size: var(--fs-body); color: var(--saas-text-main, #1f2d3d); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tmdb-orig { font-size: var(--fs-caption); color: #999; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tmdb-orig { font-size: var(--fs-caption); color: var(--text-muted); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tmdb-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 6px; font-size: var(--fs-caption); color: var(--saas-text-sub, #666); }
 .tmdb-overview {
-  font-size: var(--fs-caption); color: #8a97b3; line-height: 1.6; margin-top: 6px;
+  font-size: var(--fs-caption); color: var(--text-muted); line-height: 1.6; margin-top: 6px;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
 }
 .tmdb-sub-btn { margin-top: auto; align-self: flex-start; }

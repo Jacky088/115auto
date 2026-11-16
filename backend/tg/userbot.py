@@ -80,7 +80,7 @@ def _proxy_kw() -> dict:
             "password": password or None,
             "rdns": True,
         }}
-    except Exception as e:
+    except Exception:
         # 日志不回显代理串（可能内嵌 user:password@host）
         logstream.warn("userbot", "代理配置无效，本次将直连（请检查设置页的代理地址）")
         return {}

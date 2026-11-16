@@ -14,7 +14,7 @@ import datetime
 import os
 import re
 import string
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from ..pan115.client import (
     _GENERIC_LIBRARY_SKIP_FOLDERS,

@@ -83,7 +83,7 @@
             <span>{{ testResult.offline_target_dir }}</span>
             <el-tag size="small" type="warning" style="margin-left: 6px">云下载目录</el-tag>
           </template>
-          <template v-else>{{ testResult.target_dir || '跳过（不转存）' }}</template>
+          <template v-else>{{ testResult.target_dir || '跳过（不转存、不云下载）' }}</template>
         </el-descriptions-item>
       </el-descriptions>
     </el-card>
@@ -93,7 +93,7 @@
       <template #header>
         <div class="toolbar" style="margin-bottom: 0">
           <span>黑名单</span>
-          <span style="color:#999; font-size:var(--fs-caption)">命中规则的资源在转存前被拦截，可复核放行</span>
+          <span style="color:var(--text-muted); font-size:var(--fs-caption)">频道/关键词命中会在提取链接前拦截；文件名正则与分享体积下限在转存前复核，命中记录可复核放行</span>
         </div>
       </template>
       <el-tabs v-model="blTab" @tab-change="loadBlacklist">
@@ -117,7 +117,7 @@
           </el-popconfirm>
           <el-button v-if="blTab === 'file_pattern'" @click="regexHelpVisible = true">正则说明</el-button>
         </div>
-        <p style="color:#999; font-size:var(--fs-caption); margin-top: 0">
+        <p style="color:var(--text-muted); font-size:var(--fs-caption); margin-top: 0">
           {{ blHint }}
         </p>
         <el-table :data="blItems" size="small" empty-text="暂无条目">
@@ -142,7 +142,7 @@
       </template>
 
       <template v-else>
-        <p style="color:#999; font-size:var(--fs-caption); margin-top: 0; margin-bottom: 10px">
+        <p style="color:var(--text-muted); font-size:var(--fs-caption); margin-top: 0; margin-bottom: 10px">
           被黑名单拦截的消息记录。点击内容可查看完整消息（分享链接已高亮）；若确认为误拦，可点击「放行」重新处理。
         </p>
         <el-table :data="blHits" size="small" empty-text="暂无拦截记录" v-loading="blHitsLoading">
@@ -162,7 +162,9 @@
           </el-table-column>
           <el-table-column label="内容" min-width="300">
             <template #default="{ row }">
-              <span class="hit-summary" @click="openDetail(row)" :title="row.text">
+              <span class="hit-summary" role="button" tabindex="0" aria-label="查看拦截详情"
+                    @click="openDetail(row)" @keydown.enter="openDetail(row)"
+                    @keydown.space.prevent="openDetail(row)" :title="row.text">
                 {{ (row.text || '（无文本）').slice(0, 60) }}
               </span>
             </template>
@@ -190,10 +192,12 @@
         <h4>一、工作原理</h4>
         <p>每条消息进来后，系统按以下流程处理：</p>
         <ol>
+          <li><b>消息去重</b>：同一频道的同一条消息只处理一次；</li>
+          <li><b>黑名单</b>：先查频道黑名单与消息关键词黑名单，命中直接丢弃；</li>
           <li><b>提取链接</b>：从消息正文（含「查看资源」按钮指向的页面）提取 115 分享链接或云下载链接（电驴/磁力）；</li>
-          <li><b>规则匹配</b>：用消息标题从上到下逐条尝试匹配规则，<b>第一条命中的规则决定分类</b>（优先级数字越小越靠前）；</li>
+          <li><b>分类</b>：消息自带标签（#电影 / #剧集 等）优先；无标签时用标题从上到下逐条尝试匹配规则，<b>第一条命中的规则决定分类</b>（优先级数字越小越靠前）；全部未命中则按「未分类动作」处理；</li>
           <li><b>目录路由</b>：按分类查「转存目录」页的映射表——<b>分享转存进「分享转存目录」，云下载进「云下载目录」</b>（云下载目录留空则与分享转存相同）；</li>
-          <li><b>黑名单检查</b>：命中本页黑名单的丢弃，其余入队转存。</li>
+          <li><b>入队</b>：分享转存前还会按文件名正则与分享体积下限再复核一次，通过后入队。</li>
         </ol>
         <p class="eg">例：某资源命中「全N集」规则 → 分类<b>电视剧</b> → 分享转存进
           <code>/媒体库/电视剧</code>；同一资源若是 ED2K 云下载链接，且该分类的云下载目录填了
@@ -230,6 +234,8 @@
           <li><b>转入指定目录</b>：在下拉框直接输入一个路径（如 <code>/待整理</code>），无法识别的资源统一进这里，
             之后你在 115 网盘里手动归档；也可以为它添加自定义规则（如 <code>短剧|微短剧</code> → 分类「电视剧」）让它以后自动分类。</li>
         </ul>
+        <p class="tip">该规则仅适用于 TG 频道，且对分享转存与云下载同时生效。手动输入目录时请以 <code>/</code> 开头，
+          回车确认后程序会自动创建该目录，点击「保存」后生效；目录格式不正确会弹窗提示修改。</p>
 
         <h4>五、注意事项</h4>
         <ul>
@@ -439,7 +445,7 @@ const blPlaceholderMap = {
 }
 const blPlaceholder = ref(blPlaceholderMap.keyword)
 const blHints = {
-  keyword: '消息标题命中关键词 → 整条消息丢弃（含所有链接）',
+  keyword: '消息标题或正文命中关键词 → 整条消息丢弃（含所有链接）；内置已覆盖预告/花絮/枪版/抢先版/解说/广告/引流等，误拦可到「命中记录」放行',
   channel: '频道黑名单 → 该频道的所有消息直接忽略',
   file_pattern: '分享内文件名命中正则 → 该分享整体跳过（转存前检查）',
 }

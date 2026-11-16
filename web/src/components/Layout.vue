@@ -53,7 +53,8 @@
     </el-aside>
     <el-container>
       <el-header height="52px" class="header">
-        <el-button class="menu-btn" text @click="menuOpen = true">
+        <el-button class="menu-btn" text title="打开导航菜单" aria-label="打开导航菜单"
+                   @click="menuOpen = true">
           <el-icon :size="20"><Fold /></el-icon>
         </el-button>
           <div class="header-left">
@@ -71,6 +72,12 @@
             <el-tag disable-transitions v-else size="small" class="run-tag run-tag--not-ready">
               <span class="not-ready-dot"></span>未就绪
             </el-tag>
+            <el-tooltip v-if="sysSpaceBlocked" placement="bottom"
+                        :content="'115 空间不足（' + (sysSpaceReason || '剩余空间告急') + '）：触发本条已标记跳过且不再自动重试，后续任务保留排队、未被判失败，清理空间后自动继续；可在「设置 → 转存控制」关闭自动暂停'">
+              <el-tag disable-transitions size="small" class="run-tag run-tag--space">
+                <span class="space-dot"></span>空间不足·已暂停
+              </el-tag>
+            </el-tooltip>
           </div>
           <el-tooltip :disabled="sysRunning || sysReady" placement="bottom"
                       :content="sysReasons.length ? '无法开始运行：' + sysReasons.join('；') : ''">
@@ -86,7 +93,9 @@
         </div>
         <div class="header-right">
           <el-tooltip :content="isDark ? '切换到浅色模式' : '切换到深色模式'" placement="bottom">
-            <el-button text class="theme-btn" @click="toggleTheme">
+            <el-button text class="theme-btn"
+                       :aria-label="isDark ? '切换到浅色模式' : '切换到深色模式'"
+                       @click="toggleTheme">
               <el-icon :size="17"><Sunny v-if="isDark" /><Moon v-else /></el-icon>
             </el-button>
           </el-tooltip>
@@ -107,7 +116,10 @@
       </el-header>
       <el-alert v-if="cookieExpired" type="error" :closable="false" show-icon
                 title="115 Cookie 已失效，转存已暂停，请前往「账号管理」重新扫码登录"
-                style="margin: 0 10px" class="cookie-alert" />
+                style="margin: 0 10px" class="cookie-alert">
+        <el-button size="small" type="danger" plain class="cookie-alert-btn"
+                   @click="router.push('/account')">去账号管理</el-button>
+      </el-alert>
       <el-alert v-if="autoStop" type="error" :closable="true" show-icon class="auto-stop-alert"
                 style="margin: 8px 10px 0" @close="autoStop = ''">
         <template #title>
@@ -163,6 +175,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { api, errMsg, saveOk, clearLoggedIn } from '../api'
 import { resetWizardCache } from '../router'
+import { usePolling } from '../composables/usePolling'
 
 const route = useRoute()
 const router = useRouter()
@@ -178,6 +191,8 @@ const sysRunning = ref(false)
 const sysPaused = ref(false)
 const sysReady = ref(false)
 const sysReasons = ref([])
+const sysSpaceBlocked = ref(false)
+const sysSpaceReason = ref('')
 const autoStop = ref('')
 const toggling = ref(false)
 
@@ -187,6 +202,9 @@ const loadSys = async () => {
     sysRunning.value = data.running
     // 暂停态与运行态独立展示：Bot 侧 /pause 后网页顶栏同步可见、可恢复
     sysPaused.value = !!data.paused
+    // 空间门闸：队列因 115 空间不足自动挂起时，顶栏给出醒目提示（任务仍在排队，不会丢）
+    sysSpaceBlocked.value = !!data.space_blocked
+    sysSpaceReason.value = data.space_blocked_reason || ''
     // 就绪 = 115 登录 + 启用中频道 +（纯 Userbot 频道时）Userbot 在线；未就绪时按钮灰置并提示缺什么
     sysReady.value = !!data.ready
     sysReasons.value = data.reasons || []
@@ -262,20 +280,16 @@ const loadVersion = async () => {
   try { version.value = (await api.get('/api/health')).data.version || '' } catch { /* ignore */ }
 }
 
-// 定时刷新系统状态/ cookie 状态：随组件销毁一起清理，避免退出登录后定时器累积
-let sysTimer = null
-let cookieTimer = null
+// 定时刷新系统状态/ cookie 状态：页面不可见时暂停轮询，组件销毁时自动清理（避免退出登录后定时器累积）
+const sysPoll = usePolling(loadSys, 10000)
+const cookiePoll = usePolling(check, 10000)  // Cookie 巡检与状态同频：恢复后 10 秒内消除警示
 onMounted(() => {
   loadSys()
   check()
   loadUsername()
   loadVersion()
-  sysTimer = setInterval(loadSys, 10000)
-  cookieTimer = setInterval(check, 10000)  // Cookie 巡检与状态同频：恢复后 10 秒内消除警示
-})
-onUnmounted(() => {
-  clearInterval(sysTimer)
-  clearInterval(cookieTimer)
+  sysPoll.start()
+  cookiePoll.start()
 })
 
 const pwdVisible = ref(false)
@@ -348,7 +362,7 @@ const changePwd = async () => {
 </script>
 
 <style scoped>
-.auto-stop-body { font-size: var(--fs-caption); line-height: 1.7; color: #606266; margin-top: 2px; }
+.auto-stop-body { font-size: var(--fs-caption); line-height: 1.7; color: var(--el-text-color-regular); margin-top: 2px; }
 .pwd-tips {
   margin-top: 4px; padding: 10px 12px; border-radius: 8px;
   background: #f6f9ff; border: 1px solid #e9eefb;
@@ -389,6 +403,8 @@ const changePwd = async () => {
    顶栏 + 多条告警 + 内容超过视口高度时 flex 会把告警压缩裁掉正文（表现为"被折叠"）。
    flex:none 让告警永远按内容完整显示，高度缺口全部由可滚动的 el-main 吸收 */
 .cookie-alert, .auto-stop-alert { flex: none; }
+/* Cookie 失效横幅里的快捷跳转按钮：与告警正文留出间距，窄屏不挤压标题 */
+.cookie-alert-btn { margin-top: 6px; }
 .header {
   display: flex; align-items: center; gap: 8px;
   background: var(--saas-card);

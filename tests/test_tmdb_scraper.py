@@ -8,7 +8,7 @@ from unittest.mock import patch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("DATA_DIR", tempfile.mkdtemp(prefix="autosave_test_tmdb_"))
 
-from backend import config, database as db
+from backend import database as db
 from backend.core.media_parser import parse_media_filename
 from backend.core import tmdb_scraper
 

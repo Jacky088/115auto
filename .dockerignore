@@ -1,0 +1,26 @@
+# Docker 构建上下文排除（镜像只需要 backend/ 与入口脚本，排除后可大幅缩短上传时间）
+.git
+.github
+.venv
+.vscode
+.idea
+data
+tests
+docs
+android
+scratch
+web
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.ruff_cache
+*.zip
+*.db
+*.db-wal
+*.db-shm
+*.log
+*.session
+*.session-journal
+.env
+.env.*
+!.env.example

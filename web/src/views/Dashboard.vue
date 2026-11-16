@@ -1,5 +1,5 @@
 <template>
-  <div>
+  <div v-loading="pageLoading">
     <div class="stat-grid page-card">
       <el-card shadow="never" v-for="c in cards" :key="c.label" class="stat-card">
         <div class="stat-top">
@@ -92,13 +92,16 @@
       </template>
       <!-- 模块筛选：从日志流中动态收集出现过的 module，点击切换「全部/某模块」 -->
       <div class="module-chips">
-        <span class="m-chip" :class="{ active: modFilter === '' }" @click="modFilter = ''">全部</span>
+        <span class="m-chip" :class="{ active: modFilter === '' }" role="button" tabindex="0"
+              :aria-pressed="modFilter === ''" aria-label="显示全部模块日志"
+              @click="modFilter = ''" @keydown.enter="modFilter = ''" @keydown.space.prevent="modFilter = ''">全部</span>
         <span v-for="m in logModules" :key="m" class="m-chip" :class="{ active: modFilter === m }"
-              @click="modFilter = m">{{ m }}</span>
+              role="button" tabindex="0" :aria-pressed="modFilter === m" :aria-label="'只看 ' + m + ' 模块日志'"
+              @click="modFilter = m" @keydown.enter="modFilter = m" @keydown.space.prevent="modFilter = m">{{ m }}</span>
       </div>
       <div class="log-window" ref="logBox" @touchstart.passive="autoScroll = false">
         <div v-for="(l, i) in shownLines" :key="i" class="log-line">
-          <span style="color: #666">{{ ts(l.ts) }}</span>
+          <span style="color: var(--text-muted)">{{ ts(l.ts) }}</span>
           <span :class="'lv-' + l.level">[{{ l.level }}]</span>
           <span class="mod">{{ l.module }}</span>
           <span>{{ l.message }}</span>
@@ -110,8 +113,15 @@
 
 <script setup>
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
-import * as echarts from 'echarts'
 import { api, fmtSize, fmtTime, statusLabel } from '../api'
+import { usePolling } from '../composables/usePolling'
+// ECharts 按需引入：仪表盘只用饼图 + 标题/提示/图例，避免整库打进来（体积约为原来的 1/4）
+import * as echarts from 'echarts/core'
+import { PieChart } from 'echarts/charts'
+import { LegendComponent, TitleComponent, TooltipComponent } from 'echarts/components'
+import { CanvasRenderer } from 'echarts/renderers'
+
+echarts.use([PieChart, TitleComponent, TooltipComponent, LegendComponent, CanvasRenderer])
 
 const stats = ref({})
 const space = ref({ total: 0, use: 0, free: 0, ratio: 0 })
@@ -190,6 +200,8 @@ const connectWs = () => {
 }
 
 let loading = false
+// 首屏加载遮罩：只在第一次拉取时显示，之后的定时刷新不闪遮罩
+const pageLoading = ref(true)
 const load = async () => {
   if (loading) return // 上一轮未完成时跳过，防止定时器并发堆积
   loading = true
@@ -202,6 +214,7 @@ const load = async () => {
     retryRender()
   } catch { /* 网络抖动时保留上次数据，不打断定时刷新 */ } finally {
     loading = false
+    pageLoading.value = false
   }
 }
 
@@ -315,21 +328,22 @@ watch(spaceRef, (el) => {
   nextTick(() => retryRender())
 })
 
-let timer = null
 let tick = 0
 let ro = null
 let roTimer = null
 let themeObs = null
+// 10 秒刷新统计/最近记录；115 空间每 60 秒才查一次，避免频繁请求 115 接口。
+// 页面不可见时轮询自动暂停（切回标签页立即补一次）
+const statPoll = usePolling(() => {
+  tick += 1
+  load()
+  if (tick % 6 === 0) loadSpace()
+}, 10000)
 onMounted(() => {
   load()
   loadSpace()
   connectWs()
-  // 10 秒刷新统计/最近记录；115 空间每 60 秒才查一次，避免频繁请求 115 接口
-  timer = setInterval(() => {
-    tick += 1
-    load()
-    if (tick % 6 === 0) loadSpace()
-  }, 10000)
+  statPoll.start()
   window.addEventListener('resize', onResize)
   // ResizeObserver：容器尺寸从 0 变为可用（或任何尺寸变化）时自动重画 —— 空白修复的关键
   ro = new ResizeObserver(() => {
@@ -345,7 +359,7 @@ onMounted(() => {
 })
 onUnmounted(() => {
   disposed = true
-  clearInterval(timer)
+  statPoll.stop()
   clearTimeout(wsTimer)
   clearTimeout(roTimer)
   clearTimeout(renderRetryTimer)
@@ -373,7 +387,7 @@ const onResize = () => { if (pieChart) pieChart.resize(); if (spaceChart) spaceC
 @media (max-width: 768px) { .ring-chart { height: 220px; min-height: 200px; } }
 .space-text.center { text-align: center; margin-top: 0; padding-bottom: 8px; }
 .space-ratio-tag { margin-left: auto; font-size: var(--fs-caption); font-weight: 600; }
-.space-empty { text-align: center; color: #999; font-size: var(--fs-body); padding: 60px 0; }
+.space-empty { text-align: center; color: var(--text-muted); font-size: var(--fs-body); padding: 60px 0; }
 .stat-card :deep(.el-card__body) { padding: 18px; }
 .stat-top { display: flex; align-items: center; gap: 10px; }
 .stat-icon {

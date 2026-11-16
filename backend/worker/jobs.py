@@ -438,6 +438,9 @@ def notify_failure(kind: str, title: str, category: str, source: str, reason: st
         pass
 
 
+BIG_TRANSFER_SIZE = 1 << 40  # 1 TB：超大资源醒目标识阈值（单个或整目录合计都按此判断）
+
+
 def notify_transfer(title: str, category: str, source: str, target: str,
                     size: int = 0, kind: str = "share", file_count: int = 0):
     """转存/云下载结果通知（简洁格式）。kind: share 分享转存成功 | offline 已提交云下载 | offline_done 云下载完成。失败静默，不影响主流程。"""
@@ -446,6 +449,9 @@ def notify_transfer(title: str, category: str, source: str, target: str,
             return
         title = classifier.headline(title) or title
         head = {"offline": "☁️ 云下载任务已添加", "offline_done": "✅ 云下载任务完成"}.get(kind, "✅ 转存成功")
+        big = bool(size and size >= BIG_TRANSFER_SIZE)
+        if big:  # 超大资源：标题加红块前缀，一眼可见
+            head = "🟥 " + head + "｜超大资源 🟥"
         lines = [head, ""]
         lines.append("📺 " + (title or "未命名")[:80])
         if category:
@@ -463,12 +469,60 @@ def notify_transfer(title: str, category: str, source: str, target: str,
         elif kind == "offline_done":
             lines.append("② 115 已下载完毕，文件已保存至目标目录")
         if size:
-            lines.append("💾 大小：" + _fmt_size(size))
+            if big:
+                lines.append("🚨 本次占用：" + _fmt_size(size) + "（≥ 1 TB，请留意 115 空间）")
+            else:
+                lines.append("💾 大小：" + _fmt_size(size))
         if file_count:
             lines.append("🗃 文件数：" + str(file_count))
         notify("\n".join(lines))
     except Exception:
         pass  # 通知失败不影响转存
+
+
+def check_space_alert(trigger: str = ""):
+    """115 空间告急提醒：使用率跨过 90% / 95% 时推送一次醒目通知。
+
+    阈值与仪表盘空间条变红一致（≥90%）。同一档位 24 小时内不重复推送，避免
+    每笔大转存都刷屏；空间回落后自动降档，再次涨上来可重新提醒。
+    失败只记日志，绝不影响转存主流程。
+    """
+    try:
+        if not db.get_setting("notify_transfer_success", True):
+            return
+        sp = pan.space_info()
+        total = int(sp.get("total") or 0)
+        use = int(sp.get("use") or 0)
+        if total <= 0:
+            return
+        ratio = use * 100.0 / total
+        level = 95 if ratio >= 95 else 90 if ratio >= 90 else 0
+        prev = int(db.get_setting("space_alert_level", 0) or 0)
+        if level == 0:
+            if prev:
+                db.set_setting("space_alert_level", 0)
+            return
+        if level < prev:  # 空间略有回落（如 95% → 92%）：静默降档，便于再次跨档提醒
+            db.set_setting("space_alert_level", level)
+            return
+        last = float(db.get_setting("space_alert_at", 0) or 0)
+        if level <= prev and time.time() - last < 86400:
+            return  # 同档位 24 小时内只提醒一次
+        remain = max(total - use, 0)
+        notify("🟥🟥 115 空间告急！ 🟥🟥\n\n"
+               f"📊 已用：{_fmt_size(use)} / {_fmt_size(total)}（{ratio:.1f}%）\n"
+               f"📉 剩余：{_fmt_size(remain)}\n"
+               + (f"📌 触发：{trigger}\n" if trigger else "") +
+               "\n⚠️ 空间接近上限，后续转存/云下载可能失败。\n"
+               "请到 115 网盘或网页「文件管理」清理无用文件，\n"
+               "也可在「设置 → 每日转存上限」临时调低。\n\n"
+               "空间回落到 90% 以下后，本提醒会重新生效。")
+        db.set_setting("space_alert_level", level)
+        db.set_setting("space_alert_at", time.time())
+        logstream.warn("system",
+                       f"115 空间告急：已用 {ratio:.1f}%（{_fmt_size(use)} / {_fmt_size(total)}）")
+    except Exception as e:
+        logstream.warn("system", f"空间告急检查失败: {e}")
 
 
 def stop_system(reason: str):
@@ -920,6 +974,8 @@ def _finish_offline(job, ok: bool, name: str = "", reason: str = "", size: int =
                        f"✅ 云下载任务完成：{shown[:60]} → {job['target_dir']}，文件已保存至目标目录")
         notify_transfer(shown, job.get("category", ""), job.get("channel", ""),
                         job["target_dir"], size=size, kind="offline_done")
+        check_space_alert(f"云下载「{shown[:40]}」完成后"
+                          + (f"（本次 {size / (1 << 40):.2f} TB）" if size else ""))
     else:
         changed = db.execute("UPDATE transfers SET status='failed', error=?"
                              " WHERE id=? AND status='submitted'",
@@ -958,8 +1014,8 @@ def digest_text() -> str:
     if db.get_setting("cookie_ok", None):
         try:
             sp = pan.space_info()
-            gb = lambda b: f"{b / (1 << 30):.1f}GB"
-            lines.append(f"💾 115 空间：已用 {gb(sp['use'])}/{gb(sp['total'])}（{sp['ratio']}%）")
+            tb = lambda b: f"{b / (1 << 40):.1f}TB"
+            lines.append(f"💾 115 空间：已用 {tb(sp['use'])}/{tb(sp['total'])}（{sp['ratio']}%）")
         except Exception:
             pass
     subs = db.query("SELECT keyword, last_ep, last_title FROM subscriptions"

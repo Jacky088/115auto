@@ -203,8 +203,8 @@ def _load_db_transfer_hints() -> tuple[dict[str, dict], dict[str, dict]]:
                     al = json.loads(raw_aliases)
                     if isinstance(al, list):
                         names.extend(str(a).strip() for a in al if str(a or "").strip())
-                except Exception:
-                    pass
+                except Exception as e:
+                    logstream.warn("scrape", f"订阅别名解析失败（忽略该条别名）: {e}")
             disp = kw or lt
             for nm in names:
                 nt = normalize_title(nm, fuzzy_t2s=True)
@@ -214,8 +214,8 @@ def _load_db_transfer_hints() -> tuple[dict[str, dict], dict[str, dict]]:
                         "kind": str(r["kind"] or ""),
                         "tmdb_id": r["tmdb_id"],
                     }
-    except Exception:
-        pass
+    except Exception as e:
+        logstream.warn("scrape", f"订阅索引构建失败，本次刮削的同名去重能力下降: {e}")
     try:
         tr_rows = db.query(
             "SELECT title, category, target_dir FROM transfers "
@@ -234,8 +234,8 @@ def _load_db_transfer_hints() -> tuple[dict[str, dict], dict[str, dict]]:
                 "kind": kind,
                 "tmdb_id": pm.tmdb_id,
             }
-    except Exception:
-        pass
+    except Exception as e:
+        logstream.warn("scrape", f"历史转存记录索引构建失败，本次刮削的同名去重能力下降: {e}")
     return by_title, {}
 
 
@@ -702,8 +702,8 @@ def _clean_empty_dirs_sync(candidate_cids: list[str], protect_cids: set[str]) ->
             if not entries:
                 client.delete_entries([scid])
                 removed += 1
-        except Exception:
-            pass
+        except Exception as e:
+            logstream.warn("organize", f"清理空目录 {scid} 失败（不影响整理结果）: {e}")
     return removed
 
 
