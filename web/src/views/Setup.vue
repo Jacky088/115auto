@@ -306,17 +306,14 @@ const skipFinish = async () => {
   const reasons = (ready.data?.reasons || []).map((r) => `· ${r}`).join('\n')
   try {
     await ElMessageBox.confirm(
-      `当前部分配置尚未完成，系统暂未开启运行。
+      `当前还缺：
+${reasons}
 
-当前还缺：
-${reasons}` +
-      `
-
-您可以先进入系统，稍后在「账号管理」完成配置后，在顶栏随时点击「运行」。`,
-      '配置尚未完成',
+进入后可在「账号管理」补全配置，再到顶栏点击「运行」。`,
+      '配置尚未完成，仍要进入系统？',
       {
-        confirmButtonText: '知道了，直接进入系统',
-        cancelButtonText: '留在向导中补全',
+        confirmButtonText: '进入系统',
+        cancelButtonText: '留在向导',
         type: 'warning',
       },
     )

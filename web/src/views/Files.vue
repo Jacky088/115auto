@@ -432,8 +432,8 @@ const deleteRows = async (rows) => {
   if (!rows.length) return
   try {
     await ElMessageBox.confirm(
-      `确认删除选中的 ${rows.length} 项？删除后可在 115 回收站中找回。`,
-      '删除文件', { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
+      '删除后可在 115 回收站中找回。',
+      `删除选中的 ${rows.length} 项内容？`, { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
     )
   } catch { return }
   const ids = rows.map((r) => String(r.id))

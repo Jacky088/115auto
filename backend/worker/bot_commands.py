@@ -508,7 +508,7 @@ def _bot_enqueue_links(text: str, message_id: int) -> str:
 
     指令头只决定队列（分享转存 / 云下载）；指令头后可再写一个分类名（如「云下载 动漫」），
     写了就按该分类的目录存放，不写则按标题规则识别、识别不出用「未分类动作」。
-    任务进入与网页完全相同的串行队列，来源标记 tgbot，在「转存归档」与 /ls 中可区分。
+    任务进入与网页完全相同的串行队列，来源标记 tgbot，在「分流记录」与 /ls 中可区分。
     """
     from ..core import classifier, extractor, pipeline
 
@@ -567,7 +567,7 @@ def _bot_enqueue_links(text: str, message_id: int) -> str:
         if "未分类" in reason:
             parts.append("可在「分类 → 目录映射」把「未分类动作」设为目录（如 /待整理）后重发。")
     elif res.get("skipped"):
-        parts.append(f"⏭ 另有 {res['skipped']} 个未入队（原因见「转存归档」记录）")
+        parts.append(f"⏭ 另有 {res['skipped']} 个未入队（原因见「分流记录」记录）")
     return "\n".join(parts) or "未入队（原因见日志）"
 
 

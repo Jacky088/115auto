@@ -85,7 +85,7 @@
                   <template #default="{ row }">
                     <el-button link type="primary" size="small" @click="openOrganizeRuleDialog(row)">编辑</el-button>
                     <el-popconfirm
-                      title="确认删除该条整理规则？删除后无法恢复。"
+                      title="删除这条整理规则？删除后无法恢复。"
                       confirm-button-text="删除"
                       cancel-button-text="取消"
                       confirm-button-type="danger"
@@ -204,7 +204,7 @@
                   <template #default="{ row }">
                     <template v-if="!row.undone">
                       <el-popconfirm
-                        title="确认撤销此条整理？将把文件重命名并移回源目录。"
+                        title="撤销这条整理？文件将重命名并移回源目录。"
                         confirm-button-text="撤销"
                         cancel-button-text="取消"
                         confirm-button-type="warning"
@@ -216,7 +216,7 @@
                         </template>
                       </el-popconfirm>
                       <el-popconfirm
-                        title="确认撤销同批次全部整理记录？将批量移回源目录。"
+                        title="撤销本批次全部整理？文件将批量移回源目录。"
                         confirm-button-text="撤销同批"
                         cancel-button-text="取消"
                         confirm-button-type="danger"
@@ -297,7 +297,7 @@
                   <template #default="{ row }">
                     <el-button link type="primary" size="small" @click="openScrapeRuleDialog(row)">编辑</el-button>
                     <el-popconfirm
-                      title="确认删除该条刮削目录规则？删除后无法恢复。"
+                      title="删除这条刮削目录规则？删除后无法恢复。"
                       confirm-button-text="删除"
                       cancel-button-text="取消"
                       confirm-button-type="danger"
@@ -402,7 +402,7 @@
                   ✨ 批量暂存首选项 (≥50分)
                 </el-button>
                 <el-popconfirm
-                  title="确认清理所有已完结和已忽略的刮削记录？未处理任务将保留。"
+                  title="清理已完结和已忽略的刮削记录？未处理任务将保留。"
                   confirm-button-text="清理"
                   cancel-button-text="取消"
                   confirm-button-type="info"
@@ -478,7 +478,7 @@
                     </el-button>
                     <el-popconfirm
                       v-if="t.status === 'need_confirm' || t.status === 'staged'"
-                      title="确认忽略此条目？忽略后本轮及后续刮削将不再处理此视频。"
+                      title="忽略这条视频？本轮及后续刮削将不再处理。"
                       confirm-button-text="忽略"
                       cancel-button-text="取消"
                       confirm-button-type="info"
@@ -778,7 +778,7 @@
                   </div>
 
                   <!-- 总开关 -->
-                  <div class="config-form-item mb12">
+                  <div class="config-form-item sched-toggle-item mb12">
                     <span class="config-label">定时整理：</span>
                     <div class="config-control">
                       <el-switch v-model="cfg.media_organize_schedule_enabled" @change="saveScheduleQuick" />
@@ -788,7 +788,7 @@
                     </div>
                   </div>
 
-                  <div class="config-form-item mb12">
+                  <div class="config-form-item sched-toggle-item mb12">
                     <span class="config-label">定时刮削：</span>
                     <div class="config-control">
                       <el-switch v-model="cfg.media_scrape_schedule_enabled" @change="saveScheduleQuick" />
@@ -838,7 +838,7 @@
                     <div v-if="cfg.media_organize_schedule_type === 'interval'" class="config-form-item mb12">
                       <span class="config-label">间隔时长：</span>
                       <div class="config-control">
-                        <el-select v-model="cfg.media_organize_schedule_hours" style="width: 170px" @change="saveScheduleQuick">
+                        <el-select v-model="cfg.media_organize_schedule_hours" style="width: 170px" fit-input-width @change="saveScheduleQuick">
                           <el-option label="每 2 小时" :value="2" />
                           <el-option label="每 4 小时" :value="4" />
                           <el-option label="每 6 小时" :value="6" />
@@ -1180,7 +1180,7 @@
       </div>
       <div class="manual-search-bar mb12">
         <el-input v-model="manualDialog.q" placeholder="输入片名或剧名关键字，按回车搜索..." @keyup.enter="searchManualTmdb" />
-        <el-select v-model="manualDialog.kind" style="width:105px">
+        <el-select v-model="manualDialog.kind" style="width:105px" fit-input-width>
           <el-option value="multi" label="全部" />
           <el-option value="tv" label="剧集" />
           <el-option value="movie" label="电影" />
@@ -1243,7 +1243,7 @@
 
 <script setup>
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { api, errMsg, fmtTime, toast } from '../api'
+import { api, errMsg, fmtTime, toast, LONG_SCAN_TIMEOUT } from '../api'
 import DirPicker from '../components/DirPicker.vue'
 import { Timer, Lock, Calendar, Plus } from '@element-plus/icons-vue'
 
@@ -1626,7 +1626,7 @@ async function runOrganize() {
   showScanLoading()
   let data = null
   try {
-    const resp = await api.post('/api/media/organize/preview', {})
+    const resp = await api.post('/api/media/organize/preview', {}, { timeout: LONG_SCAN_TIMEOUT })
     data = resp.data
   } catch (e) {
     closeScanLoading()
@@ -1935,7 +1935,7 @@ async function openPreview() {
   previewing.value = true
   showScanLoading()
   try {
-    const { data } = await api.post('/api/media/organize/preview', {})
+    const { data } = await api.post('/api/media/organize/preview', {}, { timeout: LONG_SCAN_TIMEOUT })
     if (!data.ok) {
       toast.error(data.msg || '预览失败')
       return
@@ -2503,6 +2503,22 @@ html.dark .rule-dialog-hint {
   }
   .delay-inputs .el-input-number, .schedule-inputs .el-input-number {
     width: 100%;
+  }
+  /* 定时计划调度开关项：标签独占一行，开关 + 说明放下一行并左对齐 */
+  .sched-toggle-item {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+  }
+  .sched-toggle-item :deep(.config-control) {
+    width: 100%;
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+  .sched-toggle-item :deep(.tip-inline) {
+    margin-left: 0 !important;
+    flex: 1 1 200px;
+    min-width: 0;
   }
   .cfg-form-full :deep(.el-radio-group) {
     display: flex;

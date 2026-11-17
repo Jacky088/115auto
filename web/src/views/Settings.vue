@@ -50,7 +50,7 @@
 
           <el-form-item v-if="f.tg_mode !== 'userbot'" label="轮询间隔">
             <div class="range-row">
-              <el-select v-model="pollPreset" style="width: 220px">
+              <el-select v-model="pollPreset" style="width: 220px" fit-input-width>
                 <el-option v-for="p in POLL_PRESETS" :key="p.label"
                            :label="p.label" :value="p.label" />
               </el-select>
@@ -87,7 +87,7 @@
           <div class="section-card"><div class="section-title">转存控制</div>
           <el-form-item label="转存间隔">
             <div class="range-row">
-              <el-select v-model="transferPreset" style="width: 220px">
+              <el-select v-model="transferPreset" style="width: 220px" fit-input-width>
                 <el-option v-for="p in TRANSFER_PRESETS" :key="p.label"
                            :label="p.label" :value="p.label" />
               </el-select>
@@ -108,7 +108,7 @@
           </el-form-item>
           <el-form-item label="失败重试">
             <div class="range-row">
-              <el-select v-model="retryPreset" style="width: 220px">
+              <el-select v-model="retryPreset" style="width: 220px" fit-input-width>
                 <el-option v-for="p in RETRY_PRESETS" :key="p.label"
                            :label="p.label" :value="p.label" />
               </el-select>
@@ -177,7 +177,7 @@
 
           <el-form-item label="后台巡检周期">
             <div class="range-row">
-              <el-select v-model="f.health_check_interval_min" style="width: 220px">
+              <el-select v-model="f.health_check_interval_min" style="width: 220px" fit-input-width>
                 <el-option label="每 5 分钟" :value="5" />
                 <el-option label="每 10 分钟（推荐）" :value="10" />
                 <el-option label="每 15 分钟" :value="15" />
@@ -189,7 +189,7 @@
 
           <el-form-item label="查重目录缓存">
             <div class="range-row">
-              <el-select v-model="f.dedup_cache_ttl_sec" style="width: 220px">
+              <el-select v-model="f.dedup_cache_ttl_sec" style="width: 220px" fit-input-width>
                 <el-option label="不缓存（每次穿透查）" :value="0" />
                 <el-option label="30 秒" :value="30" />
                 <el-option label="60 秒" :value="60" />
@@ -279,7 +279,7 @@
             </div>
           </el-form-item>
           <el-form-item label="最低画质">
-            <el-select v-model="f.quality_min_resolution" :disabled="!f.quality_policy_enabled" style="width: 200px">
+            <el-select v-model="f.quality_min_resolution" :disabled="!f.quality_policy_enabled" style="width: 200px" fit-input-width>
               <el-option label="不限" value="" />
               <el-option label="720p 及以上" value="720p" />
               <el-option label="1080p 及以上" value="1080p" />
@@ -804,8 +804,8 @@ const doRestore = async () => {
     await ElMessageBox.confirm(
       `备份导出于 ${summary.exported_at || '未知时间'}（${kb} KB），包含：` +
       `设置 ${summary.settings || 0} 项、${fmtBackupCounts(summary)}。` +
-      `恢复将覆盖当前全部业务数据（登录密码与通知密钥不变；新版备份含待刮削任务，旧版备份会清空现有队列），且系统回到停止状态。确定继续？`,
-      '确认恢复备份', { confirmButtonText: '确认恢复', cancelButtonText: '取消', type: 'warning' })
+      `恢复将覆盖当前全部业务数据（登录密码与通知密钥不变；新版备份含待刮削任务，旧版备份会清空现有队列）。恢复后系统将回到停止状态。`,
+      '恢复备份？', { confirmButtonText: '恢复', cancelButtonText: '取消', type: 'warning' })
     const { data: resp } = isCompressed
       ? await api.post('/api/backup/restore', rawBuf, {
           timeout: 120000,
@@ -960,9 +960,9 @@ const doBundleRestore = async () => {
       `迁移包导出于 ${p.exported_at || '未知时间'}（压缩包 ${fmtSize(p.bundle_bytes || file.size)}）。\n` +
       `数据库内容：设置 ${c.settings || 0} 项、${fmtBackupCounts(c)}。\n` +
       `${credLine}。\n${metaLine}。\n` +
-      `恢复将整库替换当前数据且系统回到停止状态，确定继续？`,
-      '确认从整机迁移包恢复',
-      { confirmButtonText: '确认覆盖恢复', cancelButtonText: '取消', type: 'warning' },
+      `恢复将整库替换当前数据，系统回到停止状态。`,
+      '从整机迁移包恢复？',
+      { confirmButtonText: '覆盖恢复', cancelButtonText: '取消', type: 'warning' },
     )
 
     bundleProgress.value = 0

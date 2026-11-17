@@ -33,12 +33,12 @@
     <!-- 筛选 -->
     <div class="toolbar filter-toolbar" style="margin-top: 14px">
       <div class="filter-selects">
-        <el-select v-model="filter.level" clearable placeholder="级别" class="filter-level" @change="loadFromFirstPage">
+        <el-select v-model="filter.level" clearable placeholder="级别" class="filter-level" fit-input-width @change="loadFromFirstPage">
           <el-option label="info" value="info" />
           <el-option label="warn" value="warn" />
           <el-option label="error" value="error" />
         </el-select>
-        <el-select v-model="filter.module" clearable filterable placeholder="模块" class="filter-module" @change="loadFromFirstPage">
+        <el-select v-model="filter.module" clearable filterable placeholder="模块" class="filter-module" fit-input-width @change="loadFromFirstPage">
           <el-option v-for="m in modules" :key="m" :label="m" :value="m" />
         </el-select>
       </div>
@@ -224,7 +224,7 @@ onMounted(async () => {
 /* 筛选栏：桌面端同一行铺开；移动端拆成双栏下拉 + 搜索按钮行，不撑宽卡片 */
 .filter-selects { display: inline-flex; align-items: center; gap: 10px; }
 .filter-level { width: 120px; }
-.filter-module { width: 150px; }
+.filter-module { width: 180px; }
 .filter-search-row { display: inline-flex; align-items: center; gap: 10px; }
 .filter-search { width: 260px; }
 .filter-count { white-space: nowrap; }

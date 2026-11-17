@@ -263,8 +263,8 @@ html.dark .saas-hero-bg .el-card { background: var(--glass-bg) !important; }
 .el-input-number {
   border-radius: 10px;
   overflow: hidden;
-  height: 38px;
-  line-height: 38px;
+  height: var(--ctl-h-btn);
+  line-height: var(--ctl-h-btn);
   display: inline-flex;
   vertical-align: middle;
   position: relative;
@@ -294,7 +294,7 @@ html.dark .saas-hero-bg .el-card { background: var(--glass-bg) !important; }
 }
 .el-input-number .el-input__inner {
   height: 100% !important;
-  line-height: 36px !important;
+  line-height: calc(var(--ctl-h-btn) - 2px) !important;
   text-align: center !important;
   font-weight: 600 !important;
   font-size: 14px;
@@ -709,23 +709,6 @@ html.dark .el-tag--info.is-plain {
 .el-drawer__header { margin-bottom: 0; padding: 16px 20px; border-bottom: 1px solid rgba(126, 146, 196, .18);
                      color: var(--saas-text-main); font-weight: 600; }
 .el-drawer { background: var(--glass-bg-strong) !important; }
-.el-popconfirm__action { display: flex; gap: 6px; }
-/* 二次确认图标：红底问号。宽高统一用 em（随文字字号自适应），保持 1:1 正圆
-   iconColor 默认以行内样式写死为 #f90，必须用 !important 才能覆盖成红色 */
-.el-popconfirm__main { align-items: center; }
-.el-popconfirm__icon {
-  color: var(--el-color-danger) !important;
-  flex: none;
-  align-self: center;       /* 圆心与整个文字块垂直居中对齐 */
-  width: 2.2em;
-  height: 2.2em;
-  margin: 0 10px 0 0;
-}
-.el-popconfirm__icon svg {
-  display: block;
-  width: 100%;
-  height: 100%;
-}
 .el-notification {
   border-radius: 14px;
   background: var(--glass-bg-strong) !important;
@@ -818,6 +801,14 @@ html.dark .el-empty__description p {
   background: var(--grad-brand);
   color: #fff;
   box-shadow: 0 4px 14px rgba(79, 107, 255, .38);
+}
+/* 已选中项悬停：保持品牌渐变 + 纯白文字（只做轻微提亮），
+   避免被上面的普通悬停规则改成「浅蓝底 + 蓝字」而看不清 */
+.aside-menu .el-menu-item.is-active:hover,
+.aside-menu .el-menu-item.is-active:focus {
+  background: var(--grad-brand-hover) !important;
+  color: #fff !important;
+  box-shadow: 0 6px 18px rgba(79, 107, 255, .5);
 }
 
 /* ---- 下拉框选项与弹出菜单悬停高亮 ---- */
@@ -993,6 +984,23 @@ html.dark .el-message-box__headerbtn:hover .el-message-box__close {
 .btn-row.end { justify-content: flex-end; }
 .btn-stack { display: flex; flex-direction: column; align-items: center; gap: 12px; }
 
+/* ---- 顶部胶囊消息宽度总规则（全站唯一入口）----
+   目标：短消息按内容自适应；桌面空间足够时尽量少换行（最高 1200px）；
+   移动端贴边自适应，绝不横向溢出。
+   后续所有 toast 宽度只改这里的 --toast-max-width，禁止在页面内单独覆盖 .el-message 宽度。 */
+:root {
+  --toast-max-width: min(calc(100vw - 32px), 640px);
+}
+@media (min-width: 1200px) {
+  :root { --toast-max-width: min(calc(100vw - 64px), 900px); }
+}
+@media (min-width: 1600px) {
+  :root { --toast-max-width: min(calc(100vw - 96px), 1200px); }
+}
+@media (max-width: 768px) {
+  :root { --toast-max-width: calc(100vw - 24px); }
+}
+
 /* ---- 顶部胶囊消息（全站统一）：位于页面顶部居中，多条自动向下堆叠不遮挡 ---- */
 .el-message {
   border-radius: 999px;
@@ -1000,11 +1008,71 @@ html.dark .el-message-box__headerbtn:hover .el-message-box__close {
   box-shadow: 0 6px 24px rgba(31, 45, 74, .14);
   padding: 10px 18px;
   font-weight: 500;
-  max-width: min(calc(100vw - 32px), 640px);
+  max-width: var(--toast-max-width);
   -webkit-backdrop-filter: var(--glass-blur);
   backdrop-filter: var(--glass-blur);
 }
-.el-message .el-message__content { line-height: 1.5; }
+.el-message .el-message__content {
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+/* ---- 二次确认气泡（popconfirm）排版总规则（全站唯一入口）----
+   1. 宽度按内容自适应：短标题一行显示，长标题最多 380px 后自然换行；
+   2. 图标与首行文字顶部对齐，避免多行时图标悬空；
+   3. 按钮等宽、右对齐、统一高度，取消与确认不再一宽一窄。 */
+.el-popper.el-popover:has(.el-popconfirm) {
+  width: max-content !important;
+  min-width: min(260px, calc(100vw - 24px)) !important;
+  max-width: min(380px, calc(100vw - 24px)) !important;
+  padding: 14px 16px;
+}
+.el-popconfirm__main {
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 12px;
+  font-size: var(--el-font-size-base);
+  line-height: 1.55;
+  color: var(--el-text-color-primary);
+  white-space: normal;
+}
+/* 图标与「首行文字」中心对齐：图标盒子高度取正文行高（1.55 × 正文字号），
+   图标在盒子内居中 → 单行时与文字中心严格对齐，多行时与第一行对齐，不会悬在行间
+   （iconColor 默认以行内样式写死为 #f90，必须用 !important 才能覆盖成红色） */
+.el-popconfirm__icon {
+  color: var(--el-color-danger) !important;
+  flex: none;
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: calc(var(--fs-body) * 1.55);
+  margin: 0;
+  font-size: 20px;
+}
+.el-popconfirm__icon svg {
+  display: block;
+  width: 20px;
+  height: 20px;
+}
+.el-popconfirm__action {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 0;
+}
+.el-popconfirm__action .el-button {
+  min-width: 64px;
+  height: 30px;
+  padding: 0 12px;
+  margin: 0;
+}
+@media (max-width: 768px) {
+  .el-popper.el-popover:has(.el-popconfirm) {
+    max-width: calc(100vw - 24px) !important;
+  }
+}
 /* 语义配色：浅底 + 深字，颜色即含义 */
 .el-message--success {
   --el-message-bg-color: var(--el-color-success-light-9);
@@ -1267,6 +1335,13 @@ html.dark .user-chip:hover { background: rgba(79, 107, 255, .24) !important; }
 html.dark .user-name { color: #b7c4de; }
 html.dark .auto-stop-body { color: #8a97b3; }
 html.dark .aside-menu .el-menu-item:hover { background: rgba(79, 107, 255, .22) !important; color: #c2cdff !important; }
+/* 深色模式下已选中项悬停同样保持渐变胶囊 + 纯白文字 */
+html.dark .aside-menu .el-menu-item.is-active:hover,
+html.dark .aside-menu .el-menu-item.is-active:focus {
+  background: var(--grad-brand-hover) !important;
+  color: #fff !important;
+  box-shadow: 0 6px 18px rgba(79, 107, 255, .55);
+}
 html.dark .el-select-dropdown__item.hover,
 html.dark .el-select-dropdown__item:hover,
 html.dark .el-dropdown-menu__item:hover,
@@ -1399,22 +1474,22 @@ html.dark .dp-radio { border-color: #4c5b7d; }
   /* switch 加大触感 */
   .el-switch { --el-switch-on-color: #4f6bff; }
   .el-switch__core { min-width: 44px; height: 24px; }
-  /* 数字步进器移动端大按钮防误触（42px 宽大触控，居中清晰字号） */
+  /* 数字步进器移动端：与移动端按钮同高（--ctl-h-lg），加减区同步放大便于触控 */
   .el-input-number {
-    height: 42px !important;
-    line-height: 42px !important;
+    height: var(--ctl-h-lg) !important;
+    line-height: var(--ctl-h-lg) !important;
   }
   .el-input-number .el-input-number__decrease,
   .el-input-number .el-input-number__increase {
-    width: 42px !important;
+    width: 34px !important;
     font-size: 16px !important;
   }
   .el-input-number .el-input__wrapper {
-    padding-left: 42px !important;
-    padding-right: 42px !important;
+    padding-left: 34px !important;
+    padding-right: 34px !important;
   }
   .el-input-number .el-input__inner {
-    line-height: 40px !important;
+    line-height: calc(var(--ctl-h-lg) - 2px) !important;
     font-size: 15px !important;
   }
 }

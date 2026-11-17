@@ -3,6 +3,14 @@ import { ElMessage } from 'element-plus'
 
 export const api = axios.create({ timeout: 30000, withCredentials: true })
 
+/**
+ * 长耗时只读扫描（自动整理预览 / 目录整理 Dry-Run）的统一超时。
+ * 这类请求要逐目录遍历 115（每目录至少间隔 0.25s），30 秒必然超时；
+ * 15 分钟可覆盖约 3000+ 个目录，日常待整理目录远小于该规模。
+ * 所有扫描预览都应复用此常量，改一处即全局生效。
+ */
+export const LONG_SCAN_TIMEOUT = 900000
+
 // 登录态走 HttpOnly Cookie（sa_auth），token 不落 localStorage（脚本不可读）。
 // withCredentials 保证同源请求携带 Cookie；401 时清理本地残留并跳登录页。
 api.interceptors.request.use((cfg) => cfg)

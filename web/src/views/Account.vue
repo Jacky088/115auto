@@ -80,7 +80,7 @@
         <el-table-column prop="name" label="频道" min-width="160">
           <template #default="{ row }"><span class="mono">@{{ row.name }}</span></template>
         </el-table-column>
-        <el-table-column prop="type" label="接入方式" width="160">
+        <el-table-column prop="type" label="接入方式" width="200">
           <template #default="{ row }">
             <el-tooltip
               :disabled="!!row.enabled"
@@ -88,7 +88,7 @@
               placement="top"
             >
               <span>
-                <el-select :model-value="row.type" style="width: 134px"
+                <el-select :model-value="row.type" style="width: 172px" fit-input-width
                            :disabled="!row.enabled"
                            @change="(v) => changeType(row, v)">
                   <el-option label="网页轮询" value="polling" />
@@ -138,12 +138,12 @@
             <div class="table-actions">
               <el-button type="primary" text @click="preview(row)">预览</el-button>
               <el-popconfirm
-                title="清除去重记录，从最新消息重新抓取。确认重置？"
+                title="重置该频道？去重记录将清除，并从最新消息重新抓取。"
                 confirm-button-text="重置" cancel-button-text="取消" confirm-button-type="warning"
                 width="300" @confirm="reset(row)">
                 <template #reference><el-button type="warning" text>重置</el-button></template>
               </el-popconfirm>
-              <el-popconfirm title="不再监控该频道，并清除其记录。确认删除？"
+              <el-popconfirm title="删除这条频道监控？删除后将不再监控该频道，记录一并清除。"
                              confirm-button-text="删除" cancel-button-text="取消" confirm-button-type="danger"
                              width="300" @confirm="del(row)">
                 <template #reference><el-button type="danger" text>删除</el-button></template>

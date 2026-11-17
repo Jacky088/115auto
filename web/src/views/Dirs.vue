@@ -19,16 +19,17 @@
           <div class="unclassified-block">
             <div class="unclassified-row">
               <span class="unclassified-label">未分类动作：</span>
+              <el-tooltip trigger="click" effect="light" placement="bottom-end" popper-class="unclassified-tip-popper">
+                <template #content>
+                  <div class="unclassified-tip-text">{{ unclassifiedTip }}</div>
+                </template>
+                <button type="button" class="unclassified-help" aria-label="查看未分类动作说明">?</button>
+              </el-tooltip>
               <el-select v-model="unclassifiedAction" class="unclassified-select" filterable allow-create
-                         default-first-option @change="onUnclassifiedChange">
+                         fit-input-width default-first-option @change="onUnclassifiedChange">
                 <el-option label="跳过（不转存、不云下载）" value="skip" />
                 <el-option label="/待整理" value="/待整理" />
               </el-select>
-            </div>
-            <div class="unclassified-tip">
-              当前规则：{{ unclassifiedAction === 'skip' ? '跳过（不转存、不云下载）' : unclassifiedAction }}。
-              说明：规则仅适用于 TG 频道，对转存和云下载同时生效！如更换目录，请手动输入目录名称，
-              如：/未整理，回车确认，程序会自动创建，点击保存后生效！
             </div>
           </div>
         </div>
@@ -59,7 +60,7 @@
         </el-table-column>
         <el-table-column label="操作" width="84" fixed="right">
           <template #default="{ $index }">
-            <el-popconfirm title="确认删除该分类映射？保存后生效。" confirm-button-text="删除"
+            <el-popconfirm title="删除这条分类映射？保存后立即生效。" confirm-button-text="删除"
                            cancel-button-text="取消" confirm-button-type="danger" width="230"
                            @confirm="routes.splice($index, 1); dirtyRoutes = true">
               <template #reference><el-button type="danger" text>删除</el-button></template>
@@ -278,7 +279,7 @@
           <div v-if="moveSettings.auto_move_schedule_type === 'interval'" class="config-form-item">
             <span class="config-label">间隔时长：</span>
             <div class="config-control">
-              <el-select v-model="moveSettings.auto_move_interval_hours" style="width: 170px" @change="saveMoveSettings">
+              <el-select v-model="moveSettings.auto_move_interval_hours" style="width: 170px" fit-input-width @change="saveMoveSettings">
                 <el-option label="每 2 小时" :value="2" />
                 <el-option label="每 4 小时" :value="4" />
                 <el-option label="每 6 小时" :value="6" />
@@ -457,7 +458,7 @@
           <template #default="{ row }">
             <el-tooltip placement="top" :disabled="row.media_type !== 'movie'"
                         content="电影库规则会跳过带集数标识（S01E01/第1集）的文件，避免重名影片错位归档">
-              <el-select v-model="row.media_type" size="small" style="width: 104px"
+              <el-select v-model="row.media_type" size="small" style="width: 104px" fit-input-width
                          @change="saveMoveRule(row)">
                 <el-option label="自动" value="auto" />
                 <el-option label="电影库" value="movie" />
@@ -520,7 +521,7 @@
         </el-table-column>
         <el-table-column label="操作" width="84" fixed="right">
           <template #default="{ row }">
-            <el-popconfirm title="确认删除此整理映射？" confirm-button-text="删除" cancel-button-text="取消"
+            <el-popconfirm title="删除这条整理映射？删除后该规则立即失效。" confirm-button-text="删除" cancel-button-text="取消"
                            confirm-button-type="danger" width="200" @confirm="deleteMoveRule(row.id)">
               <template #reference><el-button type="danger" text>删除</el-button></template>
             </el-popconfirm>
@@ -672,7 +673,7 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { showScanLoading, closeScanLoading } from '../composables/scanLoading'
 import { usePolling } from '../composables/usePolling'
-import { api, errMsg, fmtSize, saveOk } from '../api'
+import { api, errMsg, fmtSize, saveOk, LONG_SCAN_TIMEOUT } from '../api'
 import { useUnsavedGuard } from '../composables/unsavedGuard'
 import DirPicker from '../components/DirPicker.vue'
 
@@ -683,6 +684,18 @@ const pageLoading = ref(true)
 const routes = ref([])
 const unclassifiedAction = ref('skip')
 let unclassifiedSaved = 'skip'
+
+// 说明文案跟随当前选择：跳过 / 待整理 / 用户自定义目录分别给出对应描述
+const unclassifiedTip = computed(() => {
+  if (unclassifiedAction.value === 'skip') {
+    return '当前规则：跳过（不转存、不云下载）。说明：规则仅适用于 TG 频道，' +
+           '对转存和云下载同时生效！'
+  }
+  const dir = unclassifiedAction.value || '/待整理'
+  return `当前规则：未分类资源将转存到 ${dir}（目录不存在时程序会自动创建）。` +
+         '说明：规则仅适用于 TG 频道，对转存和云下载同时生效！' +
+         '如需更换目录，请手动输入目录名称，如：/未整理，回车确认，点击保存后生效！'
+})
 
 // 手动输入的未分类目录校验：必须是 / 开头的 115 网盘子目录（与后端校验一致）
 const dirError = (p) => {
@@ -987,9 +1000,9 @@ const onPickDir = (val) => {
       if (pickerRow.dir_match && !cloudDirs.value.includes(normPath(val))) {
         ElMessageBox.confirm(
           '新源目录不是云下载目录，云下载模式将自动关闭，' +
-          '回落为按文件名匹配的基本规则并保持启用。确认修改？',
-          '云下载模式将自动关闭',
-          { type: 'warning', confirmButtonText: '修改并关闭云下载模式', cancelButtonText: '取消' }
+          '回落为按文件名匹配的基本规则并保持启用。',
+          '修改源目录？',
+          { type: 'warning', confirmButtonText: '修改并关闭', cancelButtonText: '取消' }
         ).then(() => {
           pickerRow.dir_match = 0
           saveMoveRule(pickerRow)
@@ -1116,10 +1129,10 @@ const toggleDirMatch = async (row) => {
   }
   try {
     await ElMessageBox.confirm(
-      '开启后本规则按任务子目录名匹配（子目录内文件可为纯英文名），不再按文件名匹配；' +
-      '源目录根部散落的文件不参与整理；目录内广告/微小体积文件自动过滤。确认开启？',
-      '开启云下载目录模式',
-      { type: 'warning', confirmButtonText: '确认开启', cancelButtonText: '取消' })
+      '本规则将按任务子目录名匹配（子目录内文件可为纯英文名），不再按文件名匹配；' +
+      '源目录根部散落的文件不参与整理；目录内广告/微小体积文件自动过滤。',
+      '开启云下载模式？',
+      { type: 'warning', confirmButtonText: '开启', cancelButtonText: '取消' })
   } catch {
     row.dir_match = 0
     return
@@ -1176,7 +1189,7 @@ const runAutoMoveNow = async () => {
   showScanLoading()
   let pv = null
   try {
-    const { data } = await api.post('/api/auto-move/preview')
+    const { data } = await api.post('/api/auto-move/preview', null, { timeout: LONG_SCAN_TIMEOUT })
     pv = data
   } catch (e) {
     closeScanLoading()
@@ -1758,19 +1771,53 @@ onUnmounted(() => {
   color: var(--text-muted);
   font-size: var(--fs-caption);
 }
-.unclassified-tip {
-  max-width: 560px;
-  color: var(--text-muted);
-  font-size: var(--fs-caption);
-  line-height: 1.5;
-  text-align: right;
-}
 .unclassified-label {
   white-space: nowrap;
   flex: none;
+  font-size: var(--el-font-size-base);
+}
+.unclassified-help {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid var(--el-color-primary-light-5);
+  border-radius: 50%;
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+html.dark .unclassified-help {
+  border-color: rgba(129, 152, 255, .65);
+  background: rgba(94, 124, 255, .22);
+  color: #b8c4ff;
+}
+.unclassified-help:hover,
+.unclassified-help:focus-visible {
+  background: var(--el-color-primary);
+  border-color: var(--el-color-primary);
+  color: #fff;
+  outline: none;
+}
+:global(.unclassified-tip-popper) {
+  max-width: calc(100vw - 32px);
+}
+.unclassified-tip-text {
+  width: 420px;
+  max-width: calc(100vw - 48px);
+  white-space: normal;
+  color: var(--el-text-color-regular);
+  font-size: var(--el-font-size-base);
+  line-height: 1.7;
 }
 .unclassified-select {
-  width: 190px;
+  width: 220px;
 }
 
 /* 表格响应式容器 */
@@ -1823,10 +1870,6 @@ onUnmounted(() => {
   .unclassified-row {
     margin-left: 0;
     width: 100%;
-  }
-  .unclassified-tip {
-    max-width: none;
-    text-align: left;
   }
   .unclassified-select {
     flex: 1;

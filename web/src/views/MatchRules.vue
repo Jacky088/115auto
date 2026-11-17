@@ -10,7 +10,7 @@
           </div>
           <el-tag v-if="dirtyRules" type="danger" effect="plain" size="small">● 有未保存的更改</el-tag>
           <el-button v-if="dirtyRules" type="primary" size="small" style="margin-left: 6px" @click="saveRules">保存规则</el-button>
-          <el-popconfirm title="确认恢复默认规则？当前自定义规则将被覆盖，目录映射保留。"
+          <el-popconfirm title="恢复默认规则？自定义规则将被覆盖，目录映射保留。"
                          confirm-button-text="恢复默认" cancel-button-text="取消"
                          confirm-button-type="danger" width="260" @confirm="resetRules">
             <template #reference>
@@ -28,7 +28,7 @@
         <el-table-column label="正则" min-width="280">
           <template #default="{ row }"><el-input v-model="row.pattern" class="mono" placeholder="正则表达式" /></template>
         </el-table-column>
-        <el-table-column label="分类" width="120">
+        <el-table-column label="分类" width="150">
           <template #default="{ row }">
             <el-select v-model="row.category" filterable allow-create>
               <el-option v-for="r in routes" :key="r.category" :label="r.category" :value="r.category" />
@@ -40,7 +40,7 @@
         </el-table-column>
         <el-table-column label="操作" width="84" fixed="right">
           <template #default="{ $index }">
-            <el-popconfirm title="确认删除该规则？保存后生效。" confirm-button-text="删除"
+            <el-popconfirm title="删除这条规则？保存后立即生效。" confirm-button-text="删除"
                            cancel-button-text="取消" confirm-button-type="danger" width="220"
                            @confirm="rules.splice($index, 1); dirtyRules = true">
               <template #reference><el-button type="danger" text>删除</el-button></template>
@@ -105,10 +105,10 @@
 
       <template v-if="blTab !== 'hits'">
         <div class="toolbar">
-          <el-input v-model="blNewValue" style="flex: 1" type="textarea" :autosize="{ minRows: 1, maxRows: 8 }"
+          <el-input v-model="blNewValue" class="bl-add-input" type="textarea" :autosize="{ minRows: 1, maxRows: 8 }"
                     :placeholder="blPlaceholder" />
           <el-button type="primary" @click="addBlacklistItem">添加</el-button>
-          <el-popconfirm v-if="blTab === 'keyword'" title="确认恢复默认关键词？只补齐缺失项，不会删除你添加的内容。"
+          <el-popconfirm v-if="blTab === 'keyword'" title="恢复默认关键词？只补齐缺失项，不会删除你添加的内容。"
                          confirm-button-text="恢复默认" cancel-button-text="取消" confirm-button-type="primary"
                          width="270" @confirm="blRestoreDefaults">
             <template #reference>
@@ -131,7 +131,7 @@
           </el-table-column>
           <el-table-column label="操作" width="84" fixed="right">
             <template #default="{ row }">
-              <el-popconfirm title="确认删除该条目？删除后不再拦截。" confirm-button-text="删除"
+              <el-popconfirm title="删除这条黑名单？删除后不再拦截相关内容。" confirm-button-text="删除"
                              cancel-button-text="取消" confirm-button-type="danger" width="220"
                              @confirm="delBlacklistItem(row)">
                 <template #reference><el-button type="danger" text>删除</el-button></template>
@@ -173,7 +173,7 @@
             <template #default="{ row }">
               <div class="table-actions">
                 <el-button text type="primary" @click="openDetail(row)">详情</el-button>
-                <el-popconfirm title="确认放行？将忽略黑名单重新处理该消息。" confirm-button-text="放行"
+                <el-popconfirm title="放行这条消息？将忽略黑名单重新处理。" confirm-button-text="放行"
                                cancel-button-text="取消" confirm-button-type="primary" width="240"
                                @confirm="releaseHit(row)">
                   <template #reference><el-button type="primary" text>放行</el-button></template>
@@ -271,7 +271,7 @@
           <el-button text @click="copyLinks">复制消息中的资源链接</el-button>
           <div style="display: flex; align-items: center; gap: 10px">
             <el-button @click="detailVisible = false">关闭</el-button>
-            <el-popconfirm title="确认放行？将忽略黑名单重新处理该消息。" confirm-button-text="放行"
+            <el-popconfirm title="放行这条消息？将忽略黑名单重新处理。" confirm-button-text="放行"
                            cancel-button-text="取消" confirm-button-type="primary" width="240"
                            @confirm="releaseFromDetail">
               <template #reference>
@@ -551,6 +551,12 @@ onMounted(() => { loadRules(); loadBlacklist() })
 
 <style scoped>
 .tip-text { color: #e6a23c; font-size: var(--fs-caption); }
+/* 黑名单输入框：桌面占满剩余空间；移动端独占一行（按钮另起一行左对齐），
+   避免不同 Tab 按钮数量不同导致输入框宽度忽大忽小 */
+.bl-add-input { flex: 1; min-width: 0; }
+@media (max-width: 768px) {
+  .bl-add-input { flex: 1 0 100% !important; }
+}
 .hit-summary { cursor: pointer; color: #3a4661; font-size: var(--fs-caption); }
 .hit-summary:hover { color: var(--el-color-primary); text-decoration: underline; }
 .detail-content {

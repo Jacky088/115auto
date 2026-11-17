@@ -3,7 +3,7 @@
     <template #header>
       <div class="card-head">
         <div class="title-with-badge">
-          <span class="card-title">转存归档</span>
+          <span class="card-title">分流记录</span>
           <el-tag size="small" class="count-tag">
             {{ activeTab === 'records' ? `共 ${total} 条转存` : `共 ${ledgerTotal} 条整理` }}
           </el-tag>
@@ -15,7 +15,7 @@
       <!-- ============ Tab 1：转存记录（原有列表，原样保留） ============ -->
       <el-tab-pane label="转存记录" name="records">
         <div class="toolbar">
-          <el-select v-model="filter.status" placeholder="状态" clearable style="width: 130px" @change="loadFromFirstPage">
+          <el-select v-model="filter.status" placeholder="状态" clearable style="width: 130px" fit-input-width @change="loadFromFirstPage">
             <el-option v-for="(v, k) in statusLabel" :key="k" :label="v" :value="k" />
           </el-select>
           <el-input v-model="filter.search" placeholder="搜索标题 / 分享码" clearable style="width: 260px"
@@ -26,7 +26,7 @@
           <el-button type="danger" plain :disabled="!selected.length" @click="delSelected">
             批量删除{{ selected.length ? `（${selected.length}）` : '' }}
           </el-button>
-          <el-popconfirm title="确认重试全部失败任务？将重新入队。" confirm-button-text="重试"
+          <el-popconfirm title="重试全部失败任务？任务将重新入队。" confirm-button-text="重试"
                          cancel-button-text="取消" confirm-button-type="primary" width="240"
                          @confirm="retryAll">
             <template #reference>
@@ -85,9 +85,9 @@
                                 && row.channel && row.message_id"
                            type="primary" text @click="openBackfill(row)">补全</el-button>
                 <el-popconfirm v-if="['queued', 'submitted', 'failed', 'skipped', 'duplicate'].includes(row.status)"
-                               title="确认删除该任务记录？"
+                               title="删除这条任务记录？仅移除本地记录，115 中的文件不受影响。"
                                confirm-button-text="删除" cancel-button-text="取消" confirm-button-type="danger"
-                               width="220" @confirm="del(row)">
+                               @confirm="del(row)">
                   <template #reference><el-button type="danger" text>删除</el-button></template>
                 </el-popconfirm>
               </div>
@@ -106,7 +106,7 @@
       <!-- ============ Tab 2：整理记录（定时文件整理的移动账本） ============ -->
       <el-tab-pane label="整理记录" name="ledger">
         <div class="toolbar">
-          <el-select v-model="ledgerFilter.undone" placeholder="状态" clearable style="width: 130px"
+          <el-select v-model="ledgerFilter.undone" placeholder="状态" clearable style="width: 130px" fit-input-width
                      @change="loadLedgerFromFirstPage">
             <el-option label="已归档" value="0" />
             <el-option label="已撤销" value="1" />
@@ -116,7 +116,7 @@
             <el-option v-for="r in ledgerRules" :key="r.id" :value="r.id"
                        :label="`${r.source_dir} ➔ ${r.target_dir}`" />
           </el-select>
-          <el-select v-model="ledgerFilter.batch_id" placeholder="批次" clearable style="width: 210px"
+          <el-select v-model="ledgerFilter.batch_id" placeholder="批次" clearable style="width: 260px" fit-input-width
                      @change="loadLedgerFromFirstPage">
             <el-option v-for="b in ledgerBatches" :key="b.batch_id" :value="b.batch_id"
                        :label="`${fmtTime(b.t0)} · ${b.c} 个文件`" />
@@ -127,7 +127,7 @@
           </el-input>
           <el-button @click="loadLedgerFromFirstPage">查询</el-button>
           <el-popconfirm v-if="ledgerFilter.batch_id && ledgerBatchAlive > 0"
-                         title="确认撤销本批次全部已归档文件？文件将移回整理前的源目录。"
+                         title="撤销本批次全部已归档文件？文件将移回整理前的源目录。"
                          confirm-button-text="撤销本批" cancel-button-text="取消" confirm-button-type="danger"
                          width="300" @confirm="openUndoBatch">
             <template #reference>
@@ -183,7 +183,7 @@
           </el-checkbox>
           <template #footer>
             <el-button @click="undoDialog.visible = false">取消</el-button>
-            <el-button type="danger" :loading="undoDialog.loading" @click="doUndo">确认撤销</el-button>
+            <el-button type="danger" :loading="undoDialog.loading" @click="doUndo">撤销并移回</el-button>
           </template>
         </el-dialog>
       </el-tab-pane>
@@ -270,8 +270,8 @@ const delSelected = async () => {
   if (!n) return
   try {
     await ElMessageBox.confirm(
-      `确认删除选中的 ${n} 条任务记录？删除后仪表盘的最近转存记录会同步移除。`,
-      '批量删除', { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' })
+      '仪表盘的最近转存记录将同步移除。',
+      `删除选中的 ${n} 条任务记录？`, { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' })
   } catch { return }  // 用户取消
   try {
     const { data } = await api.post('/api/transfers/batch-delete',

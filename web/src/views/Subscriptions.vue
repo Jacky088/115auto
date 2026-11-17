@@ -37,7 +37,7 @@
         </el-table-column>
         <el-table-column label="最低画质" width="124">
           <template #default="{ row }">
-            <el-select :model-value="row.min_quality || ''" size="small"
+            <el-select :model-value="row.min_quality || ''" size="small" fit-input-width
                        :disabled="!qualityPolicyOn"
                        @change="(v) => setMinQuality(row, v)">
               <el-option v-for="o in QUALITY_OPTS" :key="o.value" :label="o.label" :value="o.value" />
@@ -60,12 +60,12 @@
           <template #default="{ row }">
             <div class="table-actions">
               <el-button type="primary" text @click="openBackfill(row)">补全</el-button>
-              <el-popconfirm title="重置后将清除该订阅的追更进度记录，下次命中重新记录。确认重置？"
+              <el-popconfirm title="重置追更进度？进度记录将清空，下次命中重新记录。"
                              confirm-button-text="重置" cancel-button-text="取消" confirm-button-type="warning"
                              width="280" @confirm="resetProgress(row)">
                 <template #reference><el-button type="warning" text>重置</el-button></template>
               </el-popconfirm>
-              <el-popconfirm title="删除后将不再按该关键词自动追剧。确认删除？"
+              <el-popconfirm title="删除这条订阅？删除后不再按该关键词自动追剧。"
                              confirm-button-text="删除" cancel-button-text="取消" confirm-button-type="danger"
                              width="260" @confirm="del(row)">
                 <template #reference><el-button type="danger" text>删除</el-button></template>
