@@ -5,7 +5,7 @@
                class="menu-drawer">
       <div class="aside" style="height: 100%">
         <div class="logo">
-          <div class="logo-mark"><el-icon :size="17"><Box /></el-icon></div>
+          <img src="/favicon.svg" alt="115" class="logo-mark" />
           <div class="logo-text">115 自动转存</div>
         </div>
         <el-menu :default-active="$route.path" router class="aside-menu" @select="menuOpen = false">
@@ -33,7 +33,7 @@
     <!-- 桌面端侧边栏 -->
     <el-aside width="216px" class="aside pc-only">
       <div class="logo">
-        <div class="logo-mark"><el-icon :size="17"><Box /></el-icon></div>
+        <img src="/favicon.svg" alt="115" class="logo-mark" />
         <div class="logo-text">115 自动转存</div>
       </div>
       <el-menu :default-active="$route.path" router class="aside-menu">
@@ -413,9 +413,8 @@ const changePwd = async () => {
 .logo { display: flex; align-items: center; gap: 10px; padding: 20px 18px 16px; }
 .logo-mark {
   width: 32px; height: 32px; border-radius: var(--r-md); flex: none;
-  background: var(--grad-brand);
-  display: flex; align-items: center; justify-content: center; color: #fff;
-  box-shadow: 0 4px 12px rgba(79, 107, 255, .45);
+  display: block; object-fit: contain;
+  box-shadow: 0 4px 12px rgba(34, 120, 248, .28);
 }
 .logo-text { color: var(--saas-text-main); font-weight: 600; font-size: var(--fs-title); letter-spacing: .5px; }
 /* 菜单撑满剩余空间，把版本号压到侧栏最底部；菜单过长时自身滚动 */

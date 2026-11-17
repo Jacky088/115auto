@@ -2,7 +2,7 @@
   <div class="saas-hero-bg login-wrap">
     <el-card class="login-card">
       <div class="login-head">
-        <div class="login-mark"><el-icon :size="22"><Box /></el-icon></div>
+        <img src="/favicon.svg" alt="115" class="login-mark" />
         <h2>115 自动转存助手</h2>
         <p>Telegram 频道资源 · 自动分类转存</p>
       </div>
@@ -58,10 +58,9 @@ const submit = async () => {
 }
 .login-head { text-align: center; margin-bottom: 22px; }
 .login-mark {
-  width: 52px; height: 52px; border-radius: var(--r-lg); margin: 0 auto 12px;
-  background: var(--grad-brand);
-  display: flex; align-items: center; justify-content: center; color: #fff;
-  box-shadow: 0 8px 24px rgba(79, 107, 255, .42);
+  width: 56px; height: 56px; border-radius: var(--r-lg); margin: 0 auto 12px;
+  display: block; object-fit: contain;
+  box-shadow: 0 8px 24px rgba(34, 120, 248, .28);
 }
 .login-head h2 { margin: 0 0 4px; font-size: var(--fs-page); color: var(--saas-text-main); }
 .login-head p { color: var(--saas-text-sub); font-size: var(--fs-body); margin: 0; }

@@ -6,7 +6,6 @@
  */
 import {
   ArrowDown,
-  Box,
   Calendar,
   CaretRight,
   CircleCheck,
@@ -55,7 +54,6 @@ import {
 
 export default {
   ArrowDown,
-  Box,
   Calendar,
   CaretRight,
   CircleCheck,
