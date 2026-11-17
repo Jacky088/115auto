@@ -19,6 +19,7 @@ _MODE_LABELS = {
     "auto_move": "自动分流归档",
     "organize": "目录整理",
     "scrape": "媒体刮削",
+    "dedupe": "重复清理",
 }
 
 # 运行状态：'idle' | 'draining' | 'organizing'
@@ -111,14 +112,14 @@ def set_media_progress(info: dict | None) -> None:
 
 
 def try_begin_exclusive(mode: str) -> tuple[bool, str]:
-    """原子申请占用独占执行权（auto_move | organize | scrape）。
+    """原子申请占用独占执行权（auto_move | organize | scrape | dedupe）。
 
     强制约束：
     1. 顶部全局系统运行开关必须为开启；
     2. 任一时刻仅允许一个独占模块运行（整理与刮削、自动分流彼此完全互斥）。
     """
     global _active_mode, _state, _cancel_requested, _media_progress
-    if mode not in ("auto_move", "organize", "scrape"):
+    if mode not in ("auto_move", "organize", "scrape", "dedupe"):
         return False, f"无效的独占模式: {mode}"
     if str(db.get_setting("running", False)).lower() != "true":
         return False, "系统处于停止状态，请先点击顶栏「运行」启动系统"
@@ -326,7 +327,7 @@ async def prepare_and_drain_transfers(max_wait_seconds: float = 3600.0, mode: st
         _cutoff_id = int(row["m"] or 0) if row else 0
 
     mode_name = _MODE_LABELS.get(_active_mode, "文件整理")
-    log_mod = _active_mode if _active_mode in ("organize", "scrape") else "auto_move"
+    log_mod = _active_mode if _active_mode in ("organize", "scrape", "dedupe") else "auto_move"
     start_time = time.time()
     last_log_time = 0.0
 
@@ -415,7 +416,7 @@ async def prepare_and_drain_transfers(max_wait_seconds: float = 3600.0, mode: st
 def resume_all():
     """独占任务完全结束后调用：释放独占模式锁，恢复转存工作器与新任务接收门闸。"""
     global _state, _active_mode, _cutoff_id, _cancel_requested, _media_progress
-    log_mod = _active_mode if _active_mode in ("organize", "scrape") else "auto_move"
+    log_mod = _active_mode if _active_mode in ("organize", "scrape", "dedupe") else "auto_move"
     with _mode_lock:
         _state = "idle"
         _active_mode = "none"

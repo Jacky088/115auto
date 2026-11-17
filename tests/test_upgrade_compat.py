@@ -101,4 +101,7 @@ def test_business_data_survives_reinit(legacy_db):
     assert t is not None and t["status"] == "success"
     routes = db.query("SELECT count(*) c FROM routes WHERE category='纪录片'", one=True)["c"]
     assert routes == 1
+    # v1.5.0 新增的扫描索引表：旧库启动时自动建表且为空，不影响既有业务数据
+    for table in ("scan_dirs", "scan_entries"):
+        assert db.query(f"SELECT count(*) c FROM {table}", one=True)["c"] == 0
     # 迁移告警在锁外补发（死锁修复），不抛异常即通过

@@ -15,6 +15,7 @@ import httpx
 from .. import database as db
 from ..core import classifier, logstream, transfer_gate
 from ..pan115 import client as pan
+from . import scan_index
 
 LOG_RETENTION_SECONDS = 7 * 86400  # 日志保留 7 天，到期永久删除
 
@@ -1241,8 +1242,11 @@ def compute_next_runs() -> list[str]:
     return results
 
 
-async def execute_auto_move(trigger: str = "scheduled") -> dict:
-    """按 auto_move_rules 顺序排队执行文件移动整理（做好 115 严格防风控与通知推送）。"""
+async def execute_auto_move(trigger: str = "scheduled", include_ids: list[str] | None = None) -> dict:
+    """按 auto_move_rules 顺序排队执行文件移动整理（做好 115 严格防风控与通知推送）。
+
+    include_ids 非 None 时，仅移动预览阶段用户明确勾选的 file_id（预览后新增文件不处理）。
+    """
     global _last_auto_move_result
 
     def _preflight_cfg():
@@ -1305,6 +1309,7 @@ async def execute_auto_move(trigger: str = "scheduled") -> dict:
                 )
 
             scan_subdirs, global_mode, season_folder, fuzzy_t2s, dedup_by_episode = await asyncio.to_thread(_load_move_opts)
+            wanted_ids = {str(x) for x in include_ids} if include_ids is not None else None
             risk_aborted = False
             scan_cache: dict = {}
 
@@ -1373,6 +1378,7 @@ async def execute_auto_move(trigger: str = "scheduled") -> dict:
                         ambiguous_kws=ambiguous_kws,
                         match_by_dir=bool(r.get("dir_match")),
                         skip_stats_out=moved_skip,
+                        include_ids=wanted_ids,
                     )
                     await asyncio.to_thread(
                         db.execute,
@@ -1514,13 +1520,14 @@ def cloud_download_dirs() -> list[str]:
     return sorted(dirs)
 
 
-async def preview_auto_move(rule_ids: list[int] | None = None) -> dict:
+async def preview_auto_move(rule_ids: list[int] | None = None, ctx=None) -> dict:
     """整理前预览（dry_run）：按启用规则扫描源目录，返回「将会移动哪些文件」的计划。
 
     只读不写：不做任何移动/重命名；不进独占门闸（不需要暂停转存工作器），
     但独占任务执行中拒绝预览（避免叠加 115 扫描请求），并与正式执行共用模块锁互斥。
     预览的 115 请求量与正式执行相当（只少 fs_move），结果为当前时刻快照，
     确认执行时会重新扫描（期间新增/手动移走的文件与预览存在差异）。
+    ctx 由异步预览任务传入：按规则推进进度，并在预算耗尽时返回部分结果。
     """
     def _preflight():
         return (str(db.get_setting("running", False)).lower() == "true",
@@ -1577,8 +1584,13 @@ async def preview_auto_move(rule_ids: list[int] | None = None) -> dict:
         out_rules: list[dict] = []
         total_planned = 0
         risk_aborted = False
+        truncated = False
 
         for r in rules:
+            if ctx is not None:
+                if not ctx.can_continue() or not ctx.begin_dir():
+                    truncated = True
+                    break
             s_dir = r.get("source_dir", "").strip()
             t_dir = r.get("target_dir", "").strip()
             rule_mode = r.get("mode") or "default"
@@ -1589,6 +1601,13 @@ async def preview_auto_move(rule_ids: list[int] | None = None) -> dict:
                      "planned": [], "skip_ep": 0, "skip_ep_samples": [],
                      "skip_movie": 0, "skip_ambiguous": 0, "skip_ambiguous_samples": [], "error": ""}
 
+            ok_root, root_msg = scan_index.validate_scan_root(s_dir)
+            if not ok_root:
+                entry["error"] = root_msg
+                out_rules.append(entry)
+                continue
+            if ctx is not None:
+                ctx.set_phase("scanning", f"正在扫描 {s_dir} → {t_dir}")
             if effective_mode == "exact" and not kw:
                 entry["error"] = "目标文件夹名为空，无法提取匹配关键词"
                 out_rules.append(entry)
@@ -1650,8 +1669,10 @@ async def preview_auto_move(rule_ids: list[int] | None = None) -> dict:
 
         if risk_aborted:
             logstream.error("auto_move", "⚠️ 预览过程触发 115 风控信号，已中止剩余规则的预览")
+        if truncated and ctx is not None:
+            ctx.truncated = True
         return {"ok": True, "total_planned": total_planned, "rules": out_rules,
-                "risk_aborted": risk_aborted}
+                "risk_aborted": risk_aborted, "truncated": truncated}
 
 
 def _undo_auto_move_sync(records: list[dict]) -> dict:

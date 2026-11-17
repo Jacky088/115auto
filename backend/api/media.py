@@ -13,7 +13,7 @@ from pydantic import BaseModel
 from .. import auth, config, database as db
 from ..core import logstream, tmdb_scraper, transfer_gate
 from ..core.media_parser import validate_organize_template
-from ..worker import media_worker
+from ..worker import media_worker, scan_index
 from .manage import require_user
 
 _APP_BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -53,6 +53,8 @@ class RuleIn(BaseModel):
 
 class RuleIdsIn(BaseModel):
     rule_ids: list[int] | None = None
+    include_ids: list[str] | None = None
+    confirm_large: bool = False  # 预估目录超过 2 万时，前端确认后置 true 再发起预览
 
 
 class MediaSettingsIn(BaseModel):
@@ -109,6 +111,7 @@ def media_status():
     org_rules = db.query("SELECT count(*) c FROM media_rules WHERE enabled=1 AND organize_enabled=1", one=True)["c"]
     scr_rules = db.query("SELECT count(*) c FROM media_rules WHERE enabled=1 AND scrape_enabled=1", one=True)["c"]
     rec_cnt = db.query("SELECT count(*) c FROM organized_records WHERE undone=0", one=True)["c"]
+    dedupe_rules_cnt = db.query("SELECT count(*) c FROM dedupe_rules WHERE enabled=1", one=True)["c"]
     return {
         "running": media_worker.is_system_running(),
         "tmdb_configured": bool(str(db.get_setting("tmdb_api_key", "") or "").strip()),
@@ -125,10 +128,12 @@ def media_status():
             "organize_rules": int(org_rules or 0),
             "scrape_rules": int(scr_rules or 0),
             "records": int(rec_cnt or 0),
+            "dedupe_rules": int(dedupe_rules_cnt or 0),
         },
         "last_run": {
             "organize": float(db.get_setting("media_organize_last_run", 0) or 0),
             "scrape": float(db.get_setting("media_scrape_last_run", 0) or 0),
+            "dedupe": float(db.get_setting("dedupe_last_run", 0) or 0),
         },
     }
 
@@ -275,6 +280,39 @@ async def organize_preview(body: RuleIdsIn | None = None):
     return await media_worker.preview_organize(body.rule_ids if body else None)
 
 
+@router.post("/organize/preview/start")
+async def organize_preview_start(body: RuleIdsIn | None = None):
+    """异步预览：立即返回 job_id，轮询 /organize/preview/status 显示进度。"""
+    if not media_worker.is_system_running():
+        raise HTTPException(400, "系统处于停止状态，请先在顶栏点击「运行」后再预览")
+    rids = body.rule_ids if body else None
+    confirm_large = bool(body.confirm_large) if body else False
+    sql = "SELECT source_dir FROM media_rules WHERE enabled=1 AND organize_enabled=1"
+    params: list = []
+    if rids:
+        sql += " AND id IN (" + ",".join("?" for _ in rids) + ")"
+        params.extend(int(x) for x in rids)
+    paths = [r["source_dir"] for r in db.query(sql, tuple(params))]
+    guard = scan_index.scope_guard(paths, confirm_large)
+    if guard:
+        return guard
+    res = scan_index.start_job(
+        "organize_preview", lambda ctx: media_worker.preview_organize(rids, ctx))
+    if not res.get("ok"):
+        raise HTTPException(409, res.get("msg") or "扫描任务发起失败")
+    return res
+
+
+@router.get("/organize/preview/status")
+async def organize_preview_status(job_id: str):
+    return scan_index.job_status(job_id)
+
+
+@router.post("/organize/preview/cancel")
+async def organize_preview_cancel(body: dict | None = None):
+    return scan_index.cancel_job(str((body or {}).get("job_id") or ""))
+
+
 @router.post("/organize/run")
 async def organize_run(body: RuleIdsIn | None = None):
     if not media_worker.is_system_running():
@@ -287,11 +325,16 @@ async def organize_run(body: RuleIdsIn | None = None):
         raise HTTPException(400, "请先在「目录规则」中新增并启用至少一条整理规则")
 
     rids = body.rule_ids if body else None
+    include_ids: list[str] | None = None
+    if body is not None and body.include_ids is not None:
+        include_ids = [str(x).strip() for x in body.include_ids if str(x).strip()]
+        if not include_ids:
+            raise HTTPException(400, "请至少选择一个需要执行目录整理的文件")
     t = media_worker._ACTIVE_TASK_REF.get("organize")
     if t and not t.done():
         raise HTTPException(409, "目录整理已在执行队列中")
     media_worker._ACTIVE_TASK_REF["organize"] = asyncio.create_task(
-        media_worker.execute_organize_queue(rule_ids=rids, trigger="manual")
+        media_worker.execute_organize_queue(rule_ids=rids, trigger="manual", include_ids=include_ids)
     )
     return {"ok": True, "msg": "已发起目录整理：正在停止接收新转存并消化现有转存队列后按序整理"}
 

@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import auth, config, database as db
-from .api import account, ext, files, manage, media, ws
+from .api import account, dedupe, ext, files, manage, media, ws
 from .core import logstream
 from .tg import episode_backfill, polling, userbot
 from .worker import bot_commands, jobs, queue_worker
@@ -185,6 +185,7 @@ async def security_headers(request, call_next):
 app.include_router(manage.router)
 app.include_router(media.router)
 app.include_router(media.poster_router)
+app.include_router(dedupe.router)
 app.include_router(ext.router)
 app.include_router(account.router)
 app.include_router(files.router)

@@ -214,6 +214,32 @@ CREATE TABLE IF NOT EXISTS organized_records(
 CREATE INDEX IF NOT EXISTS idx_org_records_file ON organized_records(file_id, undone);
 CREATE INDEX IF NOT EXISTS idx_org_records_orig ON organized_records(orig_name, undone);
 CREATE INDEX IF NOT EXISTS idx_org_records_batch ON organized_records(batch_id);
+CREATE TABLE IF NOT EXISTS dedupe_rules(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT DEFAULT '',
+    source_dir TEXT NOT NULL,
+    include_subdirs INTEGER NOT NULL DEFAULT 1,
+    min_size_mb INTEGER NOT NULL DEFAULT 0,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at REAL NOT NULL,
+    last_run_at REAL,
+    last_deleted_count INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS dedupe_records(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id TEXT DEFAULT '',
+    rule_id INTEGER NOT NULL DEFAULT 0,
+    file_id TEXT DEFAULT '',
+    file_name TEXT DEFAULT '',
+    file_path TEXT DEFAULT '',
+    sha1 TEXT DEFAULT '',
+    size INTEGER DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'deleted',
+    note TEXT DEFAULT '',
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_dedupe_records_batch ON dedupe_records(batch_id);
+CREATE INDEX IF NOT EXISTS idx_dedupe_records_file ON dedupe_records(file_id);
 CREATE TABLE IF NOT EXISTS tmdb_cache(
     cache_key TEXT PRIMARY KEY,
     payload TEXT NOT NULL,
@@ -228,6 +254,34 @@ CREATE TABLE IF NOT EXISTS media_tg_batches(
     pushed_confirm INTEGER DEFAULT 0,
     created_at REAL NOT NULL
 );
+-- ---- 扫描索引（三套预览共用：分流整理 / 目录整理刮削 / 重复清理）----
+-- 目录级索引：TTL 内直接读索引零请求；本程序写操作后置 dirty 触发增量重扫
+CREATE TABLE IF NOT EXISTS scan_dirs(
+    cid INTEGER PRIMARY KEY,
+    path TEXT DEFAULT '',
+    entry_count INTEGER NOT NULL DEFAULT 0,
+    last_scan_at REAL,
+    last_full_at REAL,
+    dirty INTEGER NOT NULL DEFAULT 0
+);
+-- 条目级索引：cid+file_id 唯一，gone_at 标记已消失条目（软删，便于判重与续扫）
+CREATE TABLE IF NOT EXISTS scan_entries(
+    cid INTEGER NOT NULL,
+    file_id TEXT NOT NULL,
+    name TEXT NOT NULL DEFAULT '',
+    is_dir INTEGER NOT NULL DEFAULT 0,
+    size INTEGER NOT NULL DEFAULT 0,
+    sha1 TEXT NOT NULL DEFAULT '',
+    parent_cid TEXT NOT NULL DEFAULT '',
+    path TEXT NOT NULL DEFAULT '',
+    uptime REAL NOT NULL DEFAULT 0,
+    seen_at REAL NOT NULL DEFAULT 0,
+    gone_at REAL,
+    PRIMARY KEY(cid, file_id)
+);
+CREATE INDEX IF NOT EXISTS idx_scan_entries_file ON scan_entries(file_id);
+CREATE INDEX IF NOT EXISTS idx_scan_entries_uptime ON scan_entries(cid, uptime);
+CREATE INDEX IF NOT EXISTS idx_scan_entries_path ON scan_entries(path);
 """
 
 LOG_RETENTION_DAYS = 7  # 日志保留天数，到期自动永久删除

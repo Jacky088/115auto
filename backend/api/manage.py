@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from .. import auth, config, database as db
 from ..core import classifier, filters, logstream, patguard, pipeline, subscribe as submod, transfer_gate
 from ..pan115 import client as pan
-from ..worker import jobs
+from ..worker import jobs, scan_index
 from .deps import AUTH_COOKIE, require_user
 
 router = APIRouter(prefix="/api")
@@ -2469,7 +2469,15 @@ def update_auto_move_settings(body: dict, _=Depends(require_user)):
 
 
 @router.post("/auto-move/run")
-async def run_auto_move_now(_=Depends(require_user)):
+async def run_auto_move_now(body: dict | None = None, _=Depends(require_user)):
+    include_ids: list[str] | None = None
+    raw_ids = (body or {}).get("include_ids")
+    if raw_ids is not None:
+        if not isinstance(raw_ids, list):
+            raise HTTPException(400, "include_ids 必须为文件 ID 数组")
+        include_ids = [str(x).strip() for x in raw_ids if str(x).strip()]
+        if not include_ids:
+            raise HTTPException(400, "请至少选择一个需要执行分流整理的文件")
     if not (str(db.get_setting("running", False)).lower() == "true"):
         raise HTTPException(400, "系统处于停止状态，请先在顶栏点击「运行」启动系统后再执行！")
     if not bool(db.get_setting("auto_move_enabled", False)):
@@ -2477,8 +2485,8 @@ async def run_auto_move_now(_=Depends(require_user)):
 
     excl = transfer_gate.get_exclusive_status()
     active_mode = excl.get("active_mode", "none")
-    if excl.get("exclusive_busy") and active_mode in ("organize", "scrape"):
-        mode_cn = "媒体整理" if active_mode == "organize" else "媒体刮削"
+    if excl.get("exclusive_busy") and active_mode in ("organize", "scrape", "dedupe"):
+        mode_cn = {"organize": "媒体整理", "scrape": "媒体刮削", "dedupe": "重复清理"}.get(active_mode, "独占任务")
         raise HTTPException(
             409,
             f"当前正在执行「{mode_cn}」，同一时刻仅允许运行一个独占任务，请等待其完成或安全中断后再执行分流归档！",
@@ -2495,7 +2503,7 @@ async def run_auto_move_now(_=Depends(require_user)):
         }
 
     # 异步启动后台执行：即便需要等待转存/云下载/重试数分钟，也不会阻塞 HTTP 接口
-    asyncio.create_task(jobs.execute_auto_move(trigger="manual"))
+    asyncio.create_task(jobs.execute_auto_move(trigger="manual", include_ids=include_ids))
     return {
         "ok": True,
         "started": True,
@@ -2515,6 +2523,41 @@ async def preview_auto_move_now(body: dict | None = None, _=Depends(require_user
     if not res.get("ok"):
         raise HTTPException(400 if not res.get("msg", "").startswith("当前有互斥") else 409, res.get("msg", "预览失败"))
     return res
+
+
+@router.post("/auto-move/preview/start")
+async def preview_auto_move_start(body: dict | None = None, _=Depends(require_user)):
+    """异步预览：立即返回 job_id，前端轮询 /auto-move/preview/status 显示进度。"""
+    rule_ids = (body or {}).get("rule_ids")
+    if rule_ids is not None and not isinstance(rule_ids, list):
+        raise HTTPException(400, "rule_ids 必须是数组")
+    if str(db.get_setting("running", False)).lower() != "true":
+        raise HTTPException(400, "系统处于停止状态，请先在顶栏点击「运行」后再预览")
+    if not bool(db.get_setting("auto_move_enabled", False)):
+        raise HTTPException(400, "定时文件整理功能未开启，请先打开功能总开关")
+    sql = "SELECT source_dir FROM auto_move_rules WHERE enabled=1"
+    want_ids = [int(x) for x in rule_ids if str(x).isdigit()] if rule_ids else []
+    if want_ids:
+        sql += " AND id IN (" + ",".join("?" for _ in want_ids) + ")"
+    paths = [r["source_dir"] for r in db.query(sql, tuple(want_ids))]
+    guard = scan_index.scope_guard(paths, bool((body or {}).get("confirm_large")))
+    if guard:
+        return guard
+    res = scan_index.start_job(
+        "auto_move_preview", lambda ctx: jobs.preview_auto_move(rule_ids, ctx))
+    if not res.get("ok"):
+        raise HTTPException(409, res.get("msg") or "扫描任务发起失败")
+    return res
+
+
+@router.get("/auto-move/preview/status")
+async def preview_auto_move_status(job_id: str, _=Depends(require_user)):
+    return scan_index.job_status(job_id)
+
+
+@router.post("/auto-move/preview/cancel")
+async def preview_auto_move_cancel(body: dict | None = None, _=Depends(require_user)):
+    return scan_index.cancel_job(str((body or {}).get("job_id") or ""))
 
 
 @router.get("/auto-move/records")

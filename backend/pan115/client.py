@@ -731,38 +731,78 @@ def task_list_all(max_pages: int = 20) -> list[dict]:
     return out
 
 
-def list_entries(cid: int, limit: int = 2000) -> list[dict]:
-    """列出目录内全部条目 [{id, name, is_dir}]（整理/去重用，需要 id 而不只是名字）。"""
+def list_entries(cid: int, limit: int = 2000, known_ids: set[str] | None = None,
+                 state: dict | None = None, before_request=None) -> list[dict]:
+    """列出目录内全部条目 [{id, name, is_dir, size, sha1, uptime}]。
+
+    known_ids / state / before_request 供扫描索引做增量与预算控制（可选，缺省行为与旧版一致）：
+    - known_ids：索引里已存在的 file_id 集合；整页 file_id 全部已知即提前停止
+      （目录按 user_ptime 新→旧返回，更旧的页视为未变，省下大量请求）；
+    - state：回填 {"complete": bool, "requests": n}，complete=False 表示因预算/上限未扫完；
+    - before_request：每页请求前的回调（扫描节流/预算/取消），返回 False 时停止翻页。
+    """
     client = _get_client()
     out: list[dict] = []
     offset = 0
+    requests = 0
+    complete = True
+    early_stopped = False  # 整页已知提前停止：更旧的页未被观察，不能据此判定条目消失
+    page_size = 1150  # 115 单页上限
     while offset < limit:
-        resp = pan_call(client.fs_files, {"cid": cid, "limit": min(500, limit - offset),
+        if before_request is not None and not before_request():
+            complete = False
+            break
+        req_limit = min(page_size, limit - offset)
+        resp = pan_call(client.fs_files, {"cid": cid, "limit": req_limit,
                                           "offset": offset, "o": "user_ptime", "asc": 0,
                                           "show_dir": 1})
+        requests += 1
         if not resp.get("state"):
-            raise Pan115Error(f"列目录失败: {str(resp)[:200]}")
+            msg = str(resp.get("error") or resp.get("errno") or str(resp)[:200])
+            note_115_error(msg)
+            raise Pan115Error(f"列目录失败: {msg}")
         data = resp.get("data") or []
+        page_ids: list[str] = []
         for f in data:
             if not isinstance(f, dict):
                 continue
             name = _file_name(f)
             if not name:
                 continue
+            fid = _file_id(f)
+            page_ids.append(str(fid))
             f_size = _to_int(f.get("s") or f.get("fs") or f.get("file_size"), 0)
             out.append({
-                "id": _file_id(f),
+                "id": fid,
                 "name": name,
                 "is_dir": _is_dir_item(f),
                 "size": f_size,
                 "sha1": str(f.get("sha") or f.get("sha1") or ""),
+                "uptime": float(_to_int(f.get("user_ptime") or f.get("upt"), 0)),
             })
         if not data:
             break
         offset += len(data)
+        if known_ids and page_ids and len(page_ids) == len(data) \
+                and all(pid in known_ids for pid in page_ids):
+            # 本页全部已知：按更新时间倒序，更旧的页无需再翻。
+            # 若本页已装满，说明还有更旧的页未观察，此时不能做“消失”标记。
+            if len(data) >= req_limit:
+                early_stopped = True
+            break
+        if offset >= limit:
+            complete = False  # 达到单目录上限，目录可能还有更旧条目
+            break
         if offset < limit:
             time.sleep(0.4)
+    if state is not None:
+        state["complete"] = complete
+        state["early_stopped"] = early_stopped
+        state["requests"] = requests
+    if requests:
+        note_115_ok()  # 完整成功后逐级恢复限速档位
     return out
+
 
 
 _EP_SEASON_RE = re.compile(r"[Ss](\d{1,2})[\s._-]*[Ee]\d{1,3}")
@@ -1040,7 +1080,8 @@ def move_matched_files_for_rule(source_dir: str, target_dir: str,
                                 rule_media_type: str = "auto",
                                 ambiguous_kws: set | frozenset | None = None,
                                 match_by_dir: bool = False,
-                                skip_stats_out: dict | None = None) -> tuple:
+                                skip_stats_out: dict | None = None,
+                                include_ids: set[str] | None = None) -> tuple:
     """按映射规则排队移动满足条件的文件（做好 115 严格风控）：
 
     模式支持：
@@ -1548,6 +1589,11 @@ def move_matched_files_for_rule(source_dir: str, target_dir: str,
         dest_raw_names.add(best["name"])
         dest_canon_names.add(best["clean_name"])
 
+    # 两段式预览确认：仅执行用户在预览中明确勾选的条目，
+    # 预览后新出现的文件本次一律不移动（include_ids 为 None 时保持旧的全量执行口径）
+    if include_ids is not None:
+        files_to_move = [x for x in files_to_move if str(x["id"]) in include_ids]
+
     if ep_skipped_cnt > 0:
         logstream.info(
             "auto_move",
@@ -1729,6 +1775,15 @@ def _unwrap_write_resp(resp: dict, action_name: str) -> dict:
     return resp
 
 
+def _touch_scan_index(file_ids) -> None:
+    """写操作后把受影响条目所在目录标记为脏，下次预览走增量重扫（失败静默）。"""
+    try:
+        from ..worker import scan_index
+        scan_index.mark_dirty_for_file_ids([str(x) for x in file_ids if x])
+    except Exception:
+        pass
+
+
 def rename_entry(fid: str | int, new_name: str) -> None:
     """重命名单个文件或文件夹（经 pan_call 串行并清目录缓存）。"""
     client = _get_client()
@@ -1739,6 +1794,7 @@ def rename_entry(fid: str | int, new_name: str) -> None:
         resp = pan_call(client.fs_rename, (str(fid), name))
         _unwrap_write_resp(resp, "重命名")
         clear_dir_cache()
+        _touch_scan_index([fid])
     except Pan115Error:
         raise
     except Exception as e:
@@ -1765,6 +1821,7 @@ def move_entries(fids: list[str], target_cid: int) -> None:
             note_115_error(str(e))
             raise
     clear_dir_cache()
+    _touch_scan_index(ids)
 
 
 def delete_entries(fids: list[str]) -> None:
@@ -1777,6 +1834,7 @@ def delete_entries(fids: list[str]) -> None:
         resp = pan_call(client.fs_delete, ids)
         _unwrap_write_resp(resp, "移入回收站")
         clear_dir_cache()
+        _touch_scan_index(ids)
     except Pan115Error:
         raise
     except Exception as e:

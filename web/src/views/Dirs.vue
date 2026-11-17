@@ -636,7 +636,28 @@
       <div v-if="previewCountdown > 0" class="stat-line">
         ⏱ {{ Math.floor(previewCountdown / 60) }} 分 {{ previewCountdown % 60 }} 秒后自动暂存
       </div>
+      <div style="display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 8px">
+        <span style="font-size: var(--fs-caption); color: var(--saas-text-sub)">按规则整组：</span>
+        <el-checkbox
+          v-for="g in previewGroups"
+          :key="g.label"
+          :model-value="g.allSelected"
+          @change="(v) => togglePreviewGroup(g, v)"
+        >{{ g.label }}（{{ g.ids.length }}）</el-checkbox>
+      </div>
       <el-table :data="previewRows" size="small" max-height="46vh">
+        <el-table-column width="50" align="center">
+          <template #header>
+            <el-checkbox
+              :model-value="previewAllSelected"
+              :indeterminate="previewPartSelected"
+              @change="togglePreviewAll"
+            />
+          </template>
+          <template #default="{ row }">
+            <el-checkbox v-model="previewSelected[row.id]" />
+          </template>
+        </el-table-column>
         <el-table-column type="index" label="#" width="50" />
         <el-table-column prop="name" label="文件名" min-width="220" show-overflow-tooltip />
         <el-table-column prop="from_path" label="源位置" width="150" show-overflow-tooltip />
@@ -660,8 +681,14 @@
       </div>
       <template #footer>
         <el-button @click="previewVisible = false">关闭</el-button>
-        <el-button v-if="previewRows.length" type="primary" :loading="previewConfirming" @click="confirmRunAfterPreview">
-          确认执行（共 {{ previewRows.length }} 个文件）
+        <el-button
+          v-if="previewRows.length"
+          type="primary"
+          :loading="previewConfirming"
+          :disabled="!previewSelectedCount"
+          @click="confirmRunAfterPreview"
+        >
+          确认执行（已选 {{ previewSelectedCount }} / {{ previewRows.length }} 个文件）
         </el-button>
       </template>
     </el-dialog>
@@ -671,9 +698,9 @@
 <script setup>
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { showScanLoading, closeScanLoading } from '../composables/scanLoading'
+import { runPreviewJob } from '../composables/previewJob'
 import { usePolling } from '../composables/usePolling'
-import { api, errMsg, fmtSize, saveOk, LONG_SCAN_TIMEOUT } from '../api'
+import { api, errMsg, fmtSize, saveOk } from '../api'
 import { useUnsavedGuard } from '../composables/unsavedGuard'
 import DirPicker from '../components/DirPicker.vue'
 
@@ -1175,6 +1202,7 @@ const confirmAddMoveRule = async () => {
 }
 
 const runAutoMoveNow = async () => {
+  if (runningMove.value) return
   if (!moveSettings.value.auto_move_enabled) {
     ElMessage.warning('定时文件整理功能尚未开启，请先打开功能总开关！')
     return
@@ -1184,25 +1212,25 @@ const runAutoMoveNow = async () => {
     openPreviewDialog(previewCache.value.data, true)
     return
   }
-  // 两段式执行：扫描期间全屏冻结页面，防止误操作
+  // 两段式执行：异步扫描任务 + 轮询进度，避免大目录扫描把请求拖到超时；按 Esc 可取消
   runningMove.value = true
-  showScanLoading()
   let pv = null
   try {
-    const { data } = await api.post('/api/auto-move/preview', null, { timeout: LONG_SCAN_TIMEOUT })
-    pv = data
+    pv = await runPreviewJob('/api/auto-move/preview', null,
+      { text: '正在扫描待整理文件，请勿进行其他操作……（按 Esc 可取消扫描）' })
   } catch (e) {
-    closeScanLoading()
-    ElMessage.error(errMsg(e))
+    if (e?.silent) return  // 等待超时：已由预览任务给出提示，扫描仍在后台继续
+    if (e?.cancelled) ElMessage.info('已取消扫描')
+    else ElMessage.error(errMsg(e))
     return
   } finally {
-    closeScanLoading()
     runningMove.value = false
   }
   if (!pv || !pv.ok) {
     ElMessage.warning((pv && pv.msg) || '预览失败')
     return
   }
+  if (pv.truncated) ElMessage.warning(pv.msg || '本轮扫描达到预算上限，已返回部分结果')
   previewCache.value = { ts: Date.now(), data: pv }
   if (!pv.total_planned) {
     // 0 计划但存在拦截/跳过时仍然弹窗展示统计——帮助定位“为什么没分流”
@@ -1233,6 +1261,11 @@ let previewTimer = null
 const openPreviewDialog = (data, fromCache) => {
   previewData.value = data
   previewFromCache.value = !!fromCache
+  const sel = {}
+  for (const r of (data?.rules || [])) {
+    for (const it of (r.planned || [])) sel[it.id] = true
+  }
+  previewSelected.value = sel
   previewVisible.value = true
   startPreviewCountdown()
 }
@@ -1271,10 +1304,49 @@ const previewRows = computed(() => {
   return rows
 })
 
+// 预览勾选：默认全选，取消勾选即“本次不予执行”；确认时仅提交勾选的 file_id
+const previewSelected = ref({})
+const previewGroups = computed(() => {
+  const map = new Map()
+  for (const row of previewRows.value) {
+    const g = map.get(row.rule_label) || { label: row.rule_label, ids: [] }
+    g.ids.push(row.id)
+    map.set(row.rule_label, g)
+  }
+  return [...map.values()].map(g => ({
+    ...g,
+    allSelected: g.ids.length > 0 && g.ids.every(id => !!previewSelected.value[id]),
+  }))
+})
+const previewSelectedIds = computed(() => previewRows.value
+  .filter(row => !!previewSelected.value[row.id])
+  .map(row => row.id))
+const previewSelectedCount = computed(() => previewSelectedIds.value.length)
+const previewAllSelected = computed(() =>
+  previewRows.value.length > 0 && previewSelectedCount.value === previewRows.value.length)
+const previewPartSelected = computed(() =>
+  previewSelectedCount.value > 0 && previewSelectedCount.value < previewRows.value.length)
+const togglePreviewAll = (val) => {
+  const next = {}
+  for (const row of previewRows.value) next[row.id] = !!val
+  previewSelected.value = next
+}
+const togglePreviewGroup = (group, val) => {
+  const next = { ...previewSelected.value }
+  for (const id of group.ids) next[id] = !!val
+  previewSelected.value = next
+}
+
 const confirmRunAfterPreview = async () => {
+  if (!previewSelectedIds.value.length) {
+    ElMessage.warning('请至少勾选一个需要执行分流整理的文件')
+    return
+  }
   previewConfirming.value = true
   try {
-    const { data } = await api.post('/api/auto-move/run')
+    const { data } = await api.post('/api/auto-move/run', {
+      include_ids: previewSelectedIds.value,
+    })
     if (data.ok) {
       previewVisible.value = false
       previewCache.value = null

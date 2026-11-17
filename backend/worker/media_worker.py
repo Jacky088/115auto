@@ -47,7 +47,7 @@ from ..core.tmdb_scraper import (
 )
 from ..pan115 import client
 from ..pan115.client import normalize_title, strip_duplicate_suffix
-from . import jobs
+from . import jobs, scan_index
 
 _TASK_LOCKS: dict[str, asyncio.Lock] = {}
 _ACTIVE_TASK_REF: dict[str, asyncio.Task | None] = {"organize": None, "scrape": None}
@@ -288,12 +288,15 @@ def _scan_rules_sync(
     settings: dict,
     include_tmdb_hint_only: bool = False,
     stats_out: dict | None = None,
+    ctx=None,
 ) -> tuple[list[dict], list[dict]]:
     """同步扫描启用中的 `media_rules` 在 115 上的媒体条目，在 `run_pan_thread` 中调用。
 
     返回 `(rules, items)`；每个 item 已完成三层 `parse_media_context` 与配套字幕配对。
     stats_out 传入 dict 时累计扫描层跳过计数（非视频/类型互斥/花絮广告过滤/跨规则去重），
     供预览接口向用户解释「为什么某些文件不在清单里」。
+    ctx 由异步预览任务传入：目录列表走扫描索引（TTL 内 0 请求、增量提前停止、预算截断）；
+    ctx=None 时保持原有 client.walk_media_tree 实时全量扫描。
     """
     sql = f"SELECT * FROM media_rules WHERE enabled=1 AND {mode_col}=1"
     params: list = []
@@ -309,18 +312,29 @@ def _scan_rules_sync(
     hints_by_title, _ = _load_db_transfer_hints()
     items: list[dict] = []
     seen_file_ids: set[str] = set()
+    blocked: list[dict] = []
 
     for rule in rules:
         src_dir = "/" + str(rule["source_dir"] or "").strip("/")
         dest_root = "/" + str(rule.get("target_dir") or src_dir).strip("/")
         rmt = str(rule.get("media_type") or "auto").strip().lower()
+        ok_root, root_msg = scan_index.validate_scan_root(src_dir)
+        if not ok_root:
+            blocked.append({"rule_id": int(rule["id"]), "source_dir": src_dir, "msg": root_msg})
+            logstream.warn(mode_col.split("_")[0], f"规则「{rule.get('name') or src_dir}」{root_msg}")
+            continue
         try:
             src_cid = client.resolve_dir_cid(src_dir)
             if not src_cid:
                 logstream.warn("organize" if mode_col == "organize_enabled" else "scrape",
                                f"规则「{rule.get('name') or src_dir}」源目录在 115 上不存在，跳过")
                 continue
-            tree = client.walk_media_tree(int(src_cid), src_dir, max_depth=4)
+            if ctx is not None:
+                tree = scan_index.walk_media_tree(int(src_cid), src_dir, max_depth=4, ctx=ctx)
+                if tree.get("truncated"):
+                    ctx.truncated = True
+            else:
+                tree = client.walk_media_tree(int(src_cid), src_dir, max_depth=4)
         except Exception as e:
             logstream.warn("organize" if mode_col == "organize_enabled" else "scrape",
                            f"扫描规则目录 {src_dir} 失败: {e}")
@@ -459,6 +473,15 @@ def _scan_rules_sync(
             it["ep_stats"] = dict(dir_stats.get(it["dir_path"], {"video_count": 1, "max_ep": it["parsed"].episode or 0}))
             items.append(it)
 
+    # 默认跳过已执行整理过的文件（organized_records 未撤销），避免重复预览同一批内容
+    items, excluded = scan_index.exclude_organized(items)
+    if stats_out is not None:
+        if excluded:
+            stats_out["organized_skipped"] = excluded
+        if blocked:
+            stats_out["blocked_rules"] = blocked
+        if ctx is not None and ctx.truncated:
+            stats_out["truncated"] = True
     return rules, items
 
 
@@ -709,14 +732,17 @@ def _clean_empty_dirs_sync(candidate_cids: list[str], protect_cids: set[str]) ->
 
 # ---------- 模块 A：目录整理（Preview + 队列运行） ----------
 
-async def preview_organize(rule_ids: list[int] | None = None) -> dict:
-    """Dry-Run 预览待整理条目（只读 115 目录树与本地规则计算，零网盘写操作）。"""
+async def preview_organize(rule_ids: list[int] | None = None, ctx=None) -> dict:
+    """Dry-Run 预览待整理条目（只读 115 目录树与本地规则计算，零网盘写操作）。
+
+    ctx 由异步预览任务传入：走扫描索引增量 + 预算控制；不传则实时全量扫描。
+    """
     if transfer_gate.is_exclusive_busy():
         return {"ok": False, "msg": "当前有独占写任务正在执行，请待结束后再预览", "items": []}
     settings = await asyncio.to_thread(get_media_settings)
     scan_stats: dict = {}
     rules, items = await client.run_pan_thread(
-        _scan_rules_sync, rule_ids, "organize_enabled", settings, False, scan_stats)
+        _scan_rules_sync, rule_ids, "organize_enabled", settings, False, scan_stats, ctx)
     preview_rows = []
     for it in items:
         pm: ParsedMedia = it["parsed"]
@@ -749,6 +775,7 @@ async def preview_organize(rule_ids: list[int] | None = None) -> dict:
         "pending_count": sum(1 for r in preview_rows if not r["already_ok"]),
         "items": preview_rows,
         "scan_stats": scan_stats,
+        "truncated": bool(scan_stats.get("truncated")),
     }
 
 
@@ -1076,8 +1103,12 @@ def _build_scrape_tg_report(
     return text
 
 
-async def execute_organize_queue(rule_ids: list[int] | None = None, trigger: str = "manual") -> dict:
-    """模块 A：目录整理严格单队列顺序执行。"""
+async def execute_organize_queue(rule_ids: list[int] | None = None, trigger: str = "manual",
+                                 include_ids: list[str] | None = None) -> dict:
+    """模块 A：目录整理严格单队列顺序执行。
+
+    include_ids 非 None 时，仅处理预览阶段用户明确勾选的 file_id（预览后新增文件不处理）。
+    """
     if not is_system_running():
         return {"ok": False, "msg": "系统处于停止状态，请先点击顶栏「运行」启动系统"}
 
@@ -1118,6 +1149,9 @@ async def execute_organize_queue(rule_ids: list[int] | None = None, trigger: str
             transfer_gate.set_media_progress({"mode": "organize", "phase": "scanning", "current": 0, "total": 0, "label": "正在扫描待整理目录"})
             rules, items = await client.run_pan_thread(
                 _scan_rules_sync, rule_ids, "organize_enabled", settings, False, organize_scan_stats)
+            if include_ids is not None:
+                wanted = {str(x) for x in include_ids}
+                items = [it for it in items if str(it.get("file_id")) in wanted]
             rule_cnt = len(rules)
             total = len(items)
             if not rules:
