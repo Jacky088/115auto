@@ -161,8 +161,14 @@ async def security_headers(request, call_next):
         return JSONResponse({"detail": "请求体过大"}, status_code=413)
     resp = await call_next(request)
     # 升级友好缓存策略：index.html 不缓存（发版后浏览器立即拿到新资产清单，避免旧清单
-    # 引用已不存在的哈希文件名导致白屏）；/assets/ 文件名带内容哈希，可安全永久缓存
+    # 引用已不存在的哈希文件名导致白屏）；/assets/ 文件名带内容哈希，可安全永久缓存；
+    # PWA sw.js 强制不走 HTTP 缓存以确保版本及时检测更新，并设置 Service-Worker-Allowed
     if request.url.path in ("/", "/index.html"):
+        resp.headers.setdefault("Cache-Control", "no-cache")
+    elif request.url.path == "/sw.js":
+        resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        resp.headers.setdefault("Service-Worker-Allowed", "/")
+    elif request.url.path == "/manifest.webmanifest":
         resp.headers.setdefault("Cache-Control", "no-cache")
     elif request.url.path.startswith("/assets/"):
         resp.headers.setdefault("Cache-Control", "public, max-age=31536000, immutable")

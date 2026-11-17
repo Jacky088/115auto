@@ -23,6 +23,9 @@
             <template #prefix><el-icon><Search /></el-icon></template>
           </el-input>
           <el-button @click="loadFromFirstPage">查询</el-button>
+          <el-button type="primary" plain @click="openManualDialog">
+            <el-icon><Plus /></el-icon>手动转存
+          </el-button>
           <el-button type="danger" plain :disabled="!selected.length" @click="delSelected">
             批量删除{{ selected.length ? `（${selected.length}）` : '' }}
           </el-button>
@@ -96,6 +99,29 @@
         </el-table>
 
         <BackfillDialog ref="backfillDialogRef" />
+
+        <!-- 手动转存 / Web Share Target 接收弹窗 -->
+        <el-dialog v-model="manualDialog.open" title="手动添加转存" width="min(540px, 94vw)" class="pc-dialog">
+          <el-form :model="manualDialog" label-width="80px" @submit.prevent>
+            <el-form-item label="转存内容" required>
+              <el-input v-model="manualDialog.text" type="textarea" :rows="4"
+                        placeholder="支持粘贴 115 分享链接（含提取码）、磁力链接 (magnet:?)、电驴链接 (ed2k://)，或包含链接的整段消息文本..." />
+            </el-form-item>
+            <el-form-item label="指定分类">
+              <el-select v-model="manualDialog.category" placeholder="默认按标题规则自动分类" clearable style="width: 100%">
+                <el-option v-for="c in categories" :key="c" :label="c" :value="c" />
+              </el-select>
+            </el-form-item>
+          </el-form>
+          <template #footer>
+            <div class="dialog-footer">
+              <el-button @click="manualDialog.open = false">取消</el-button>
+              <el-button type="primary" :loading="manualDialog.submitting" @click="submitManualTransfer">
+                提交入队
+              </el-button>
+            </div>
+          </template>
+        </el-dialog>
 
         <el-pagination style="margin-top: 14px; justify-content: flex-end" layout="total, sizes, prev, pager, next"
                        :total="total" :page-size="size" :page-sizes="[20, 50, 100]"
@@ -193,10 +219,64 @@
 
 <script setup>
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Search } from '@element-plus/icons-vue'
 import { api, errMsg, fmtSize, fmtTime, saveOk, statusLabel } from '../api'
 import BackfillDialog from '../components/BackfillDialog.vue'
+
+const route = useRoute()
+const router = useRouter()
+const categories = ref([])
+const manualDialog = reactive({ open: false, text: '', category: '', submitting: false })
+
+const loadCategories = async () => {
+  if (categories.value.length) return
+  try {
+    const { data } = await api.get('/api/rules')
+    categories.value = Object.keys(data.routes || {})
+  } catch { /* ignore */ }
+}
+
+const openManualDialog = () => {
+  manualDialog.open = true
+  loadCategories()
+}
+
+const submitManualTransfer = async () => {
+  const text = manualDialog.text.trim()
+  if (!text) {
+    ElMessage.warning('请输入转存链接或包含链接的文本')
+    return
+  }
+  manualDialog.submitting = true
+  try {
+    const { data } = await api.post('/api/transfers/manual', {
+      text,
+      category: manualDialog.category,
+    })
+    const res = data.result || {}
+    if (res.queued > 0) {
+      saveOk('转存任务已入队', `已添加 ${res.queued} 个任务${res.duplicates ? `，重复跳过 ${res.duplicates} 个` : ''}`)
+      manualDialog.open = false
+      manualDialog.text = ''
+      manualDialog.category = ''
+      loadFromFirstPage()
+    } else if (res.duplicates > 0) {
+      ElMessage.info(`链接已存在，重复跳过 ${res.duplicates} 个任务`)
+      manualDialog.open = false
+      loadFromFirstPage()
+    } else if (res.blocked) {
+      ElMessage.error('链接命中黑名单规则被拦截')
+    } else {
+      ElMessage.warning('未能识别到有效的 115 分享或离线下载链接')
+    }
+  } catch (e) {
+    ElMessage.error(errMsg(e))
+  } finally {
+    manualDialog.submitting = false
+  }
+}
 
 const isMobile = ref(window.innerWidth <= 768)
 const onRz = () => { isMobile.value = window.innerWidth <= 768 }
@@ -415,7 +495,17 @@ const currentStopRuleIds = () => {
   return String(b?.rule_ids || '').split(',').filter((x) => x && x !== '0').map(Number)
 }
 
-onMounted(load)
+onMounted(() => {
+  load()
+  const q = route.query
+  const sharedText = q.share_text || q.share_url || q.text || q.url || ''
+  if (sharedText) {
+    manualDialog.text = String(sharedText).trim()
+    manualDialog.open = true
+    loadCategories()
+    router.replace({ path: '/transfers', query: {} })
+  }
+})
 </script>
 
 <style scoped>

@@ -1,4 +1,4 @@
-"""打包发版脚本：自动打包 115atuosave.zip
+"""打包发版脚本：自动打包 115autosave.zip
 
 严格排除：
 - data/ (运行时数据库，绝不能打入包中覆盖生产环境)
@@ -18,7 +18,7 @@ import zipfile
 from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
-OUTPUT_ZIP = Path(r"C:\Users\littl\Desktop\115atuosave.zip")
+OUTPUT_ZIP = Path(r"C:\Users\littl\Desktop\115autosave.zip")
 
 EXCLUDE_DIRS = {
     ".git",

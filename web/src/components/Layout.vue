@@ -19,6 +19,9 @@
           <el-menu-item index="/history"><el-icon><Tickets /></el-icon>日志查询</el-menu-item>
           <el-menu-item index="/account"><el-icon><User /></el-icon>账号管理</el-menu-item>
           <el-menu-item index="/settings"><el-icon><Setting /></el-icon>系统设置</el-menu-item>
+          <el-menu-item v-if="canInstall || isIosSafari" index="" @click="handleInstall">
+            <el-icon><Download /></el-icon>安装到主屏幕
+          </el-menu-item>
         </el-menu>
         <a v-if="version" class="footer-ver aside-foot" :href="REPO_URL"
            target="_blank" rel="noopener" title="GitHub 仓库">
@@ -44,6 +47,9 @@
         <el-menu-item index="/history"><el-icon><Tickets /></el-icon>日志查询</el-menu-item>
         <el-menu-item index="/account"><el-icon><User /></el-icon>账号管理</el-menu-item>
         <el-menu-item index="/settings"><el-icon><Setting /></el-icon>系统设置</el-menu-item>
+        <el-menu-item v-if="canInstall || isIosSafari" index="" @click="handleInstall">
+          <el-icon><Download /></el-icon>安装为应用
+        </el-menu-item>
       </el-menu>
       <a v-if="version" class="footer-ver aside-foot" :href="REPO_URL"
          target="_blank" rel="noopener" title="GitHub 仓库">
@@ -92,6 +98,11 @@
           </el-tooltip>
         </div>
         <div class="header-right">
+          <el-tooltip v-if="canInstall || isIosSafari" content="安装为独立应用 (PWA)" placement="bottom">
+            <el-button text class="theme-btn" aria-label="安装为独立应用" @click="handleInstall">
+              <el-icon :size="17"><Download /></el-icon>
+            </el-button>
+          </el-tooltip>
           <el-tooltip :content="isDark ? '切换到浅色模式' : '切换到深色模式'" placement="bottom">
             <el-button text class="theme-btn"
                        :aria-label="isDark ? '切换到浅色模式' : '切换到深色模式'"
@@ -107,6 +118,9 @@
           </div>
           <template #dropdown>
             <el-dropdown-menu>
+              <el-dropdown-item v-if="canInstall || isIosSafari" command="install">
+                <el-icon><Download /></el-icon>安装到主屏幕 (PWA)
+              </el-dropdown-item>
               <el-dropdown-item command="pwd">修改用户名 / 密码</el-dropdown-item>
               <el-dropdown-item command="logout" divided>退出登录</el-dropdown-item>
             </el-dropdown-menu>
@@ -172,10 +186,11 @@
 <script setup>
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { api, errMsg, saveOk, clearLoggedIn } from '../api'
 import { resetWizardCache } from '../router'
 import { usePolling } from '../composables/usePolling'
+import { usePwaInstall } from '../composables/usePwaInstall'
 
 const route = useRoute()
 const router = useRouter()
@@ -328,7 +343,24 @@ const username = ref('')
 const loadUsername = async () => {
   try { username.value = (await api.get('/api/auth/me')).data.username || 'admin' } catch { /* ignore */ }
 }
+const { canInstall, isIosSafari, promptInstall } = usePwaInstall()
+const handleInstall = () => {
+  if (canInstall.value) {
+    promptInstall()
+  } else if (isIosSafari) {
+    ElMessageBox.alert(
+      '在 iPhone / iPad Safari 上安装为独立 App：\n\n1. 点击 Safari 底部工具栏的【分享】图标（方框带向上箭头）；\n2. 向上滑动菜单，点击【添加到主屏幕】；\n3. 点击右上角【添加】即可！',
+      '添加到主屏幕',
+      { confirmButtonText: '我知道了' }
+    )
+  }
+}
+
 const onCommand = async (cmd) => {
+  if (cmd === 'install') {
+    handleInstall()
+    return
+  }
   if (cmd === 'pwd') {
     pwdForm.username = username.value
     pwdForm.old = ''; pwdForm.new = ''; pwdForm.confirm = ''
@@ -452,6 +484,18 @@ const changePwd = async () => {
   /* 防顶栏重叠：间距收紧。标题可收缩省略（.header-title/.title-text），
      状态标在省略区外始终可见；任何屏宽下运行按钮都不会再被右侧压住 */
   .header, .header-left { gap: 5px; }
+}
+
+/* PWA 独立全屏 / 移动端刘海与状态栏避让 */
+@supports (padding-top: env(safe-area-inset-top)) {
+  .header {
+    padding-top: env(safe-area-inset-top);
+    height: calc(52px + env(safe-area-inset-top)) !important;
+  }
+  .menu-drawer .aside {
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
 }
 </style>
 

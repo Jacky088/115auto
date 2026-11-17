@@ -1549,6 +1549,24 @@ def batch_delete_transfers(body: dict, _=Depends(require_user)):
     return {"ok": True, "deleted": n, "skipped": skipped}
 
 
+@router.post("/transfers/manual")
+def manual_transfer(body: dict, _=Depends(require_user)):
+    """网页手动输入或 PWA 系统分享链接直接入队转存。"""
+    text = str(body.get("text") or body.get("share_url") or "").strip()
+    if not text:
+        raise HTTPException(400, "请提供转存链接或包含链接的文本")
+    force_category = str(body.get("category") or "").strip()
+    mid = int(time.time() * 1000) % 1000000000
+    try:
+        res = pipeline.process_message(channel="web", message_id=mid,
+                                       text=text, bypass=True,
+                                       force_category=force_category)
+    except Exception as e:
+        logstream.error("transfer", f"网页手动转存失败: {logstream.exc(e)}")
+        raise HTTPException(500, f"处理失败: {str(e)[:120]}")
+    return {"ok": True, "result": res}
+
+
 @router.delete("/transfers/{t_id}")
 def cancel_transfer(t_id: int, _=Depends(require_user)):
     row = db.query("SELECT status FROM transfers WHERE id=?", (t_id,), one=True)

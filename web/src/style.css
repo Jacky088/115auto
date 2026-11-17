@@ -1580,3 +1580,10 @@ html.dark .dp-radio { border-color: #4c5b7d; }
     scroll-behavior: auto !important;
   }
 }
+
+/* PWA 独立窗口模式与刘海屏/手势条安全避让 */
+@supports (padding-bottom: env(safe-area-inset-bottom)) {
+  .page-card {
+    margin-bottom: calc(14px + env(safe-area-inset-bottom)) !important;
+  }
+}

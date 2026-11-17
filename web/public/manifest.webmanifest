@@ -1,24 +1,50 @@
 {
+  "id": "/",
   "name": "115 自动转存助手",
   "short_name": "115转存",
-  "description": "Telegram 频道 → 115 网盘自动转存",
+  "description": "Telegram 频道 → 115 网盘自动转存与媒体整理",
   "start_url": "/",
+  "scope": "/",
   "display": "standalone",
-  "background_color": "#ffffff",
-  "theme_color": "#ffffff",
+  "orientation": "any",
+  "background_color": "#0c2456",
+  "theme_color": "#0c2456",
   "lang": "zh-CN",
+  "categories": ["utilities", "productivity"],
   "icons": [
     {
       "src": "/favicon.svg",
-      "sizes": "192x192",
+      "sizes": "any",
       "type": "image/svg+xml",
       "purpose": "any"
     },
     {
-      "src": "/favicon.svg",
-      "sizes": "512x512",
-      "type": "image/svg+xml",
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
       "purpose": "any"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
     }
-  ]
+  ],
+  "share_target": {
+    "action": "/#/transfers",
+    "method": "GET",
+    "enctype": "application/x-www-form-urlencoded",
+    "params": {
+      "title": "share_title",
+      "text": "share_text",
+      "url": "share_url"
+    }
+  }
 }
