@@ -80,6 +80,7 @@
 <script setup>
 import { computed, onMounted, onUnmounted, provide, ref } from 'vue'
 import { api, errMsg, toast } from '../api'
+import { confirmAction } from '../composables/confirmDialog'
 import '../components/media/media.css'
 import OrganizeTab from '../components/media/OrganizeTab.vue'
 import ScrapeTab from '../components/media/ScrapeTab.vue'
@@ -187,6 +188,12 @@ async function loadRules() {
 }
 
 async function stopMedia() {
+  if (!await confirmAction({
+    title: '确认中断当前后台任务？',
+    message: '将在处理完当前文件后安全停止，已完成的改动保留，未处理的条目下次可继续。',
+    confirmText: '确认中断',
+    danger: true,
+  })) return
   stopping.value = true
   try {
     const { data } = await api.post('/api/media/stop')

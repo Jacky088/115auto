@@ -191,6 +191,7 @@ import { api, errMsg, saveOk, clearLoggedIn } from '../api'
 import { resetWizardCache } from '../router'
 import { usePolling } from '../composables/usePolling'
 import { usePwaInstall } from '../composables/usePwaInstall'
+import { confirmAction } from '../composables/confirmDialog'
 
 const route = useRoute()
 const router = useRouter()
@@ -244,20 +245,12 @@ const resumeSystem = async () => {
   } catch (e) { ElMessage.error(errMsg(e)) } finally { toggling.value = false }
 }
 const stopSystem = async () => {
-  try {
-    await ElMessageBox.confirm(
-      '停止后将暂停频道监听、自动转存与定时整理（配置与排队任务保留，随时可重新启动）。',
-      '确定停止系统运行？',
-      {
-        type: 'warning',
-        confirmButtonText: '确认停止',
-        cancelButtonText: '取消',
-        confirmButtonClass: 'danger-confirm-btn',
-      },
-    )
-  } catch {
-    return
-  }
+  if (!await confirmAction({
+    title: '确定停止系统运行？',
+    message: '停止后将暂停频道监听、自动转存与定时整理（配置与排队任务保留，随时可重新启动）。',
+    confirmText: '确认停止',
+    danger: true,
+  })) return
   toggling.value = true
   try {
     await api.post('/api/system/stop')
@@ -382,6 +375,12 @@ const onCommand = async (cmd) => {
     nextTick(() => pwdFormRef.value?.clearValidate())
   }
   if (cmd === 'logout') {
+    if (!await confirmAction({
+      title: '确认退出当前账号？',
+      message: '退出后需重新输入用户名和密码登录管理面板（后台服务运行状态不受影响）。',
+      confirmText: '确认退出',
+      danger: true,
+    })) return
     // 同时清除服务端海报 HttpOnly Cookie；网络失败不影响前端退出
     try { await api.post('/api/auth/logout') } catch { /* ignore */ }
     clearLoggedIn()  // 登出时服务端已吊销全部 token 并清除 HttpOnly Cookie

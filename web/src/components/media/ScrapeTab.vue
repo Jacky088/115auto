@@ -499,6 +499,11 @@ async function onTaskFilterChange() {
 }
 
 async function runScrape() {
+  if (!await confirmAction({
+    title: '确认开始媒体刮削？',
+    message: `将按已启用的 ${activeScrapeRules.value.length} 条刮削目录扫描并匹配 TMDB（执行期间短暂暂停自动转存，结束后自动恢复）。`,
+    confirmText: '开始刮削',
+  })) return
   startingScrape.value = true
   try {
     const { data } = await api.post('/api/media/scrape/run', {})
@@ -552,6 +557,12 @@ async function ignoreTask(task) {
 }
 
 async function batchStageTop1() {
+  if (!await confirmAction({
+    title: '确认批量暂存首选项？',
+    message: '将为所有待确认且首选项得分 ≥ 50 的条目自动选定首位候选并移入「已选待提交」（暂不改盘，提交队列前仍可逐条调整）。',
+    confirmText: '确认暂存',
+    type: 'info',
+  })) return
   try {
     const { data } = await api.post('/api/media/tasks/batch-stage', { mode: 'auto_top1', min_score: 50 })
     toast.success(data.msg)
@@ -560,6 +571,12 @@ async function batchStageTop1() {
 }
 
 async function commitStaged() {
+  const count = status.value.counts.staged || 0
+  if (!await confirmAction({
+    title: `确认提交已选的 ${count} 条刮削任务？`,
+    message: '提交后将按顺序重命名/移动文件并在本地生成 NFO 与海报（执行期间短暂暂停自动转存）。',
+    confirmText: '确认提交',
+  })) return
   committing.value = true
   try {
     const { data } = await api.post('/api/media/tasks/commit', {})

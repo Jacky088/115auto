@@ -446,9 +446,9 @@ const changeType = async (row, v) => {
 
 const reset = async (row) => {
   if (!await confirmAction({
-    title: '重置该频道？',
-    message: '去重记录将清除，并从最新消息重新抓取。',
-    confirmText: '重置',
+    title: `确认重置频道 @${row.name}？`,
+    message: '将清除该频道已处理与去重记录，并从最新消息重新开始抓取。',
+    confirmText: '确认重置',
   })) return
   try {
     const { data } = await api.post(`/api/channels/${row.id}/reset`)
@@ -460,9 +460,9 @@ const reset = async (row) => {
 
 const del = async (row) => {
   if (!await confirmAction({
-    title: '删除这条频道监控？',
-    message: '删除后将不再监控该频道，记录一并清除。',
-    confirmText: '删除',
+    title: `确认删除频道 @${row.name}？`,
+    message: '删除后将停止监控该频道，相关抓取记录一并清除。',
+    confirmText: '确认删除',
     danger: true,
   })) return
   try {
@@ -483,6 +483,11 @@ const preview = async (row) => {
 }
 
 const transferMsg = async (m) => {
+  if (!await confirmAction({
+    title: '确认转存这条频道消息？',
+    message: `将立即提取消息 #${m.message_id} 中的有效链接并加入转存队列。`,
+    confirmText: '确认转存',
+  })) return
   transferingId.value = m.message_id
   try {
     const { data } = await api.post(`/api/channels/${previewChId.value}/messages/${m.message_id}/transfer`)

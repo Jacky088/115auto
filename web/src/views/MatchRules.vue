@@ -512,9 +512,9 @@ const delBlacklistItem = async (row) => {
 }
 const releaseHit = async (row) => {
   if (!await confirmAction({
-    title: '放行这条消息？',
-    message: '将忽略黑名单重新处理。',
-    confirmText: '放行',
+    title: '确认放行这条被拦截的消息？',
+    message: `将忽略黑名单规则，把来自 @${row.channel || '未知频道'} 的这条消息重新交给转存流程处理。`,
+    confirmText: '确认放行',
   })) return false
   try {
     await api.post(`/api/blacklist/hits/${row.id}/release`)

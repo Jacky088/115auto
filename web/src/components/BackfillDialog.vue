@@ -13,7 +13,7 @@
       <!-- 转存记录模式：支持手动校准当前集数与频道 -->
       <template v-if="form.mode === 'transfer'">
         <el-form-item label="当前集数">
-          <el-input-number v-model="form.ep" :min="1" style="width: 130px" />
+          <el-input-number v-model="form.ep" :min="1" :max="9999" :precision="0" :value-on-clear="1" style="width: 130px" />
           <span class="bf-line" style="margin-left: 8px">{{ epRange }}</span>
         </el-form-item>
         <el-form-item label="频道">
@@ -37,7 +37,7 @@
 
     <template #footer>
       <el-button @click="visible = false">取消</el-button>
-      <el-button type="primary" :loading="loading" @click="submit">开始补全</el-button>
+      <el-button type="primary" :loading="loading" @click="submit">确认补全</el-button>
     </template>
   </el-dialog>
 </template>

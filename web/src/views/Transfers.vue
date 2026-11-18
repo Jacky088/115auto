@@ -361,6 +361,11 @@ const delSelected = async () => {
   } catch (e) { ElMessage.error(errMsg(e)) }
 }
 const retry = async (row) => {
+  if (!await confirmAction({
+    title: '确认重试这条任务？',
+    message: `将把「${row.title || row.share_code}」重新加入处理队列。`,
+    confirmText: '确认重试',
+  })) return
   try {
     await api.post(`/api/transfers/${row.id}/retry`)
     ElMessage.success('已重新入队')

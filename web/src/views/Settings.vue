@@ -575,6 +575,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { FolderOpened } from '@element-plus/icons-vue'
 import { api, errMsg, fmtSize, saveOk, SECRET_MASK } from '../api'
 import { useUnsavedGuard } from '../composables/unsavedGuard'
+import { confirmAction } from '../composables/confirmDialog'
 
 const f = ref({})
 const loaded = ref(false)
@@ -1234,7 +1235,13 @@ const testDigest = async () => {
   }
 }
 // 生成随机对外 API Token（32 位十六进制），点击「保存设置」后才落库生效
-const genToken = () => {
+const genToken = async () => {
+  if (f.value.api_token && !await confirmAction({
+    title: '确认重新生成 API Token？',
+    message: '将覆盖当前已配置的 Token；保存设置后旧 Token 立即失效，外部调用方需同步更新。',
+    confirmText: '重新生成',
+    danger: true,
+  })) return
   const bytes = new Uint8Array(16)
   crypto.getRandomValues(bytes)
   f.value.api_token = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')

@@ -415,9 +415,9 @@ const setMinQuality = async (row, v) => {
 
 const resetProgress = async (row) => {
   if (!await confirmAction({
-    title: '重置追更进度？',
-    message: '进度记录将清空，下次命中重新记录。',
-    confirmText: '重置',
+    title: `确认重置「${row.keyword}」的追更进度？`,
+    message: '已记录的追更集数进度将被清空，下次命中资源时重新记录。',
+    confirmText: '确认重置',
   })) return
   try {
     await api.put(`/api/subscriptions/${row.id}`, { reset_progress: true })
@@ -431,9 +431,9 @@ const openBackfill = (row) => backfillDialogRef.value?.openForSubscription(row)
 
 const del = async (row) => {
   if (!await confirmAction({
-    title: '删除这条订阅？',
-    message: '删除后不再按该关键词自动追剧。',
-    confirmText: '删除',
+    title: `确认删除订阅「${row.keyword}」？`,
+    message: '删除后将不再按该关键词自动追剧与推送进度通知。',
+    confirmText: '确认删除',
     danger: true,
   })) return
   try {
