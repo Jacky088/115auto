@@ -12,16 +12,16 @@ _runtime_flags: dict[str, bool] = {}
 def process_message(channel: str, message_id: int, text: str,
                     bypass: bool = False, increment: bool = False,
                     priority: int = 0, anchor: dict | None = None,
-                    force_category: str = "") -> dict:
+                    force_category: str = "", force_target: str = "") -> dict:
     """处理一条 TG 消息，返回处理摘要（供测试与调试）。
 
-    bypass=True 时跳过消息级黑名单；increment=True 时生成的转存任务带增量标记
+    bypass=True 时跳过消息级黑名单与订阅过滤；increment=True 时生成的转存任务带增量标记
     （只转存目标目录里没有的文件，已存过的不重复）；priority>0 的任务在队列中
     优先领取（向前补全用：额度有限时优先补全剧集）；
     anchor={category, target_dir} 时（向前补全的历史分集帖），沿用锚点任务的分类
     与目标目录（同剧不同帖标题格式不一，各自分类会漂移），并绕过订阅过滤。
-    force_category 仅供「管理员直发链接」使用：指令头后写了分类名时直接采用；
-    默认空串，分类仍由标题规则决定，行为与旧版一致。
+    force_category 供「管理员直发/手动转存」指定分类；
+    force_target 供「网页手动转存」直接指定 115 目标目录（优先于分类路由与未分类动作）。
     """
     result = {"channel": channel, "message_id": message_id, "links": 0, "queued": 0,
               "duplicates": 0, "blocked": False, "skipped": 0}
@@ -95,7 +95,7 @@ def process_message(channel: str, message_id: int, text: str,
     sub_hits = subscribe.match_all(f"{display_title}\n{text or ''}")
     ch_row = db.query("SELECT sub_only FROM channels WHERE name=?", (channel,), one=True)
     sub_only = bool(ch_row["sub_only"]) if ch_row else subscribe.subscription_only()
-    if sub_only and not sub_hits and anchor is None:
+    if sub_only and not sub_hits and anchor is None and not bypass:
         key = f"_sub_skip_logged_{channel}"
         if not _runtime_flags.get(key):
             _runtime_flags[key] = True
@@ -144,7 +144,9 @@ def process_message(channel: str, message_id: int, text: str,
                 prev_row = dict(r)
         cat_i = anchor_cat or (str((prev_row or {}).get("category") or "") if prev_row else "") \
             or category
-        if anchor_dir:
+        if force_target:
+            base_dir = force_target
+        elif anchor_dir:
             base_dir = anchor_dir
         elif prev_row and str((prev_row or {}).get("target_dir") or ""):
             base_dir = str(prev_row["target_dir"])
@@ -153,8 +155,10 @@ def process_message(channel: str, message_id: int, text: str,
             if not cat_i:
                 action = db.get_setting("unclassified_action", "skip")
                 base_dir = "" if action == "skip" else str(action)
-        target = (classifier.resolve_target(cat_i, kind="offline") or base_dir) \
+        target = force_target if force_target else (
+            (classifier.resolve_target(cat_i, kind="offline") or base_dir)
             if kind == "offline" else base_dir
+        )
         prev_done = prev_row is not None
 
         # 5. 分享码去重：

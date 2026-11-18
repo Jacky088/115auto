@@ -106,11 +106,22 @@ def manual_transfer(body: dict, _=Depends(require_user)):
     if not text:
         raise HTTPException(400, "请提供转存链接或包含链接的文本")
     force_category = str(body.get("category") or "").strip()
+    raw_target = str(body.get("target_dir") or "").strip()
+    force_target = ""
+    if raw_target:
+        if not raw_target.startswith("/") or not raw_target.strip("/"):
+            raise HTTPException(400, "目标目录不能为网盘根目录 /，请选择具体子目录")
+        if any(seg == ".." for seg in raw_target.split("/")):
+            raise HTTPException(400, "目标目录格式无效")
+        if len(raw_target) > 200:
+            raise HTTPException(400, "目标目录路径过长（最多 200 字符）")
+        force_target = "/" + raw_target.strip("/")
     mid = int(time.time() * 1000) % 1000000000
     try:
         res = pipeline.process_message(channel="web", message_id=mid,
                                        text=text, bypass=True,
-                                       force_category=force_category)
+                                       force_category=force_category,
+                                       force_target=force_target)
     except Exception as e:
         logstream.error("transfer", f"网页手动转存失败: {logstream.exc(e)}")
         raise HTTPException(500, f"处理失败: {str(e)[:120]}")

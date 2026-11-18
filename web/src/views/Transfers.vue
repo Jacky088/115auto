@@ -92,15 +92,41 @@
 
         <!-- 手动转存 / Web Share Target 接收弹窗 -->
         <el-dialog v-model="manualDialog.open" title="手动添加转存" width="min(540px, 94vw)" class="pc-dialog">
-          <el-form :model="manualDialog" label-width="80px" @submit.prevent>
+          <el-form :model="manualDialog" label-width="84px" @submit.prevent>
             <el-form-item label="转存内容" required>
               <el-input v-model="manualDialog.text" type="textarea" :rows="4"
                         placeholder="支持粘贴 115 分享链接（含提取码）、磁力链接 (magnet:?)、电驴链接 (ed2k://)，或包含链接的整段消息文本..." />
             </el-form-item>
-            <el-form-item label="指定分类">
+            <el-form-item label="保存方式">
+              <el-radio-group v-model="manualDialog.mode">
+                <el-radio value="route">按分类路由</el-radio>
+                <el-radio value="dir">指定 115 目录</el-radio>
+              </el-radio-group>
+            </el-form-item>
+            <el-form-item v-if="manualDialog.mode === 'route'" label="指定分类">
               <el-select v-model="manualDialog.category" placeholder="默认按标题规则自动分类" clearable style="width: 100%">
-                <el-option v-for="c in categories" :key="c" :label="c" :value="c" />
+                <el-option v-for="r in routeOptions" :key="r.category" :label="r.category" :value="r.category">
+                  <div class="route-opt-row">
+                    <span>{{ r.category }}</span>
+                    <span class="route-opt-dir" :class="{ skip: r.target_dir === 'skip' }">
+                      {{ r.target_dir === 'skip' ? '跳过（不转存）' : (r.target_dir || '未设置') }}
+                    </span>
+                  </div>
+                </el-option>
               </el-select>
+            </el-form-item>
+            <el-form-item v-else label="目标目录" required>
+              <div class="manual-dir-row">
+                <el-button class="manual-dir-btn" @click="manualDirPicker = true">
+                  <el-icon><FolderOpened /></el-icon>
+                  <span class="manual-dir-text" :class="{ empty: !manualDialog.target_dir }">
+                    {{ manualDialog.target_dir || '点击选择 115 网盘目录' }}
+                  </span>
+                </el-button>
+                <el-button v-if="manualDialog.target_dir" text type="info" @click="manualDialog.target_dir = ''">
+                  清空
+                </el-button>
+              </div>
             </el-form-item>
           </el-form>
           <template #footer>
@@ -112,6 +138,8 @@
             </div>
           </template>
         </el-dialog>
+
+        <DirPicker v-model="manualDirPicker" title="选择手动转存目标目录" @pick="onPickManualDir" />
 
         <el-pagination style="margin-top: 14px; justify-content: flex-end" layout="total, sizes, prev, pager, next"
                        :total="total" :page-size="size" :page-sizes="[20, 50, 100]"
@@ -210,23 +238,41 @@ import { Search } from '@element-plus/icons-vue'
 import { api, errMsg, fmtSize, fmtTime, saveOk, statusLabel } from '../api'
 import { confirmAction } from '../composables/confirmDialog'
 import BackfillDialog from '../components/BackfillDialog.vue'
+import DirPicker from '../components/DirPicker.vue'
 
 const route = useRoute()
 const router = useRouter()
-const categories = ref([])
-const manualDialog = reactive({ open: false, text: '', category: '', submitting: false })
+const routeOptions = ref([])
+const manualDirPicker = ref(false)
+const manualDialog = reactive({
+  open: false,
+  text: '',
+  mode: 'route',
+  category: '',
+  target_dir: '',
+  submitting: false,
+})
 
-const loadCategories = async () => {
-  if (categories.value.length) return
+const loadRoutes = async () => {
   try {
     const { data } = await api.get('/api/rules')
-    categories.value = Object.keys(data.routes || {})
+    routeOptions.value = Array.isArray(data.routes)
+      ? data.routes.filter((r) => r && r.category)
+      : []
   } catch { /* ignore */ }
+}
+
+const onPickManualDir = (path) => {
+  if (!path || path === '/') {
+    ElMessage.warning('不能选择网盘根目录 /，请选择具体子目录')
+    return
+  }
+  manualDialog.target_dir = path
 }
 
 const openManualDialog = () => {
   manualDialog.open = true
-  loadCategories()
+  loadRoutes()
 }
 
 const submitManualTransfer = async () => {
@@ -235,12 +281,16 @@ const submitManualTransfer = async () => {
     ElMessage.warning('请输入转存链接或包含链接的文本')
     return
   }
+  if (manualDialog.mode === 'dir' && !manualDialog.target_dir) {
+    ElMessage.warning('请先选择 115 目标目录')
+    return
+  }
   manualDialog.submitting = true
   try {
-    const { data } = await api.post('/api/transfers/manual', {
-      text,
-      category: manualDialog.category,
-    })
+    const payload = manualDialog.mode === 'dir'
+      ? { text, target_dir: manualDialog.target_dir }
+      : { text, category: manualDialog.category }
+    const { data } = await api.post('/api/transfers/manual', payload)
     const res = data.result || {}
     if (res.queued > 0) {
       saveOk('转存任务已入队', `已添加 ${res.queued} 个任务${res.duplicates ? `，重复跳过 ${res.duplicates} 个` : ''}`)
@@ -254,6 +304,8 @@ const submitManualTransfer = async () => {
       loadFromFirstPage()
     } else if (res.blocked) {
       ElMessage.error('链接命中黑名单规则被拦截')
+    } else if (res.skipped > 0) {
+      ElMessage.warning('未匹配到有效目标目录（未命中分类或该分类设为「跳过」），请指定分类或切换到「指定 115 目录」后重试')
     } else {
       ElMessage.warning('未能识别到有效的 115 分享或离线下载链接')
     }
@@ -505,7 +557,7 @@ onMounted(() => {
   if (sharedText) {
     manualDialog.text = String(sharedText).trim()
     manualDialog.open = true
-    loadCategories()
+    loadRoutes()
     router.replace({ path: '/transfers', query: {} })
   }
 })
@@ -515,4 +567,11 @@ onMounted(() => {
 .card-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; }
 .title-with-badge { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .card-title { font-weight: 700; font-size: var(--fs-title); color: var(--saas-text-main); }
+.route-opt-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; }
+.route-opt-dir { font-size: var(--fs-caption); color: var(--text-muted); max-width: 240px; overflow: hidden; text-overflow: ellipsis; }
+.route-opt-dir.skip { color: var(--el-color-warning); }
+.manual-dir-row { display: flex; align-items: center; gap: 8px; width: 100%; }
+.manual-dir-btn { flex: 1; min-width: 0; justify-content: flex-start; }
+.manual-dir-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.manual-dir-text.empty { color: var(--text-muted); }
 </style>
