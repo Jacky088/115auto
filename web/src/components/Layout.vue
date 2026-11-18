@@ -244,6 +244,20 @@ const resumeSystem = async () => {
   } catch (e) { ElMessage.error(errMsg(e)) } finally { toggling.value = false }
 }
 const stopSystem = async () => {
+  try {
+    await ElMessageBox.confirm(
+      '停止后将暂停频道监听、自动转存与定时整理（配置与排队任务保留，随时可重新启动）。',
+      '确定停止系统运行？',
+      {
+        type: 'warning',
+        confirmButtonText: '确认停止',
+        cancelButtonText: '取消',
+        confirmButtonClass: 'danger-confirm-btn',
+      },
+    )
+  } catch {
+    return
+  }
   toggling.value = true
   try {
     await api.post('/api/system/stop')
