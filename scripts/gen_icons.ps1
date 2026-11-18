@@ -123,14 +123,96 @@ function Generate-Icon([int]$size, [string]$outPath, [bool]$maskable = $false) {
     Write-Output "Generated $outPath ($size x $size)"
 }
 
+function Generate-Android-Adaptive-Foreground([int]$size, [string]$outPath) {
+    # Android 8+ 自适应图标规范：总画布 108dp，桌面实际裁切展示中心 72dp×72dp（占 66.67%），
+    # 圆形安全区 66dp（占 61.1%）。将完整视觉设计映射到中心 72dp 视口内，同时让白底与底部蓝山
+    # 全幅出血至画布四边，避免任何圆角矩形/圆形/水滴形桌面裁切出白边或切掉云朵与文字。
+    $bmp = [System.Drawing.Bitmap]::new($size, $size)
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+    $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+    $g.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+    $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::AntiAliasGridFit
+
+    # 1. 纯白底全幅铺满（108dp）
+    $g.Clear([System.Drawing.Color]::White)
+
+    # 将 512 基准坐标线性映射到中心 72/108 视口（再留约 2% 呼吸边，使圆角与圆形裁切都从容）
+    $vRatio = 68.0 / 108.0
+    $vSize = $size * $vRatio
+    $vOff = ($size - $vSize) / 2.0
+    $scale = $vSize / 512.0
+
+    function VX([double]$x) { return [float]($vOff + $x * $scale) }
+    function VY([double]$y) { return [float]($vOff + $y * $scale) }
+
+    # 2. 底部品牌蓝底山峰曲线：全幅横向贯穿 0..size 并向下出血至 size，杜绝底部露白
+    $blueColor = [System.Drawing.ColorTranslator]::FromHtml("#2278f8")
+    $blueBrush = [System.Drawing.SolidBrush]::new($blueColor)
+
+    $apexY = VY 336.0
+    $edgeY = VY 392.0
+    $hillPath = [System.Drawing.Drawing2D.GraphicsPath]::new()
+    $hillPath.AddLine(0.0, [float]$size, [float]$size, [float]$size)
+    $hillPath.AddLine([float]$size, [float]$size, [float]$size, $edgeY)
+    $hillPath.AddBezier(
+        [float]$size, $edgeY,
+        (VX 400.0), $apexY,
+        (VX 112.0), $apexY,
+        0.0, $edgeY
+    )
+    $hillPath.CloseFigure()
+    $g.FillPath($blueBrush, $hillPath)
+
+    # 3. 115 经典官方云朵几何造型（完整落在 68dp 安全区内）
+    $cloudScale = 1.72 * $scale
+    $cloudCenterY = VY 176.0
+
+    function CX([double]$x) { return [float](($size / 2.0) + ($x - 127.5) * $cloudScale) }
+    function CY([double]$y) { return [float]($cloudCenterY + ($y - 107.0) * $cloudScale) }
+
+    $cPath = [System.Drawing.Drawing2D.GraphicsPath]::new()
+    $rL = 38.0 * $cloudScale
+    $rR = 38.0 * $cloudScale
+    $rT = 42.0 * $cloudScale
+
+    $cPath.AddArc((CX 165.5) - [float]$rR, (CY 127.0) - [float]$rR, [float]($rR * 2), [float]($rR * 2), 180.0, 270.0)
+    $cPath.AddLine((CX 165.5), (CY 165.0), (CX 89.5), (CY 165.0))
+    $swL = Sweep 90.0 264.35
+    $cPath.AddArc((CX 89.5) - [float]$rL, (CY 127.0) - [float]$rL, [float]($rL * 2), [float]($rL * 2), 90.0, [float]$swL)
+    $swT = Sweep 173.6 6.4
+    $cPath.AddArc((CX 127.5) - [float]$rT, (CY 84.5) - [float]$rT, [float]($rT * 2), [float]($rT * 2), 173.6, [float]$swT)
+
+    $strokeW = [float](17.0 * $cloudScale)
+    $cloudPen = [System.Drawing.Pen]::new($blueColor, $strokeW)
+    $cloudPen.StartCap = [System.Drawing.Drawing2D.LineCap]::Round
+    $cloudPen.EndCap = [System.Drawing.Drawing2D.LineCap]::Round
+    $cloudPen.LineJoin = [System.Drawing.Drawing2D.LineJoin]::Round
+    $g.DrawPath($cloudPen, $cPath)
+
+    # 4. 下半部文本：“115转存助手”（落在圆形与圆角矩形安全区内部）
+    $fontSize = [float](41.0 * $scale)
+    $font = [System.Drawing.Font]::new("Microsoft YaHei", $fontSize, [System.Drawing.FontStyle]::Bold)
+    $sf = [System.Drawing.StringFormat]::new()
+    $sf.Alignment = [System.Drawing.StringAlignment]::Center
+    $sf.LineAlignment = [System.Drawing.StringAlignment]::Center
+    $whiteBrush = [System.Drawing.SolidBrush]::new([System.Drawing.Color]::White)
+    $g.DrawString("115转存助手", $font, $whiteBrush, [float]($size / 2.0), (VY 424.0), $sf)
+
+    $g.Dispose()
+    $bmp.Save($outPath, [System.Drawing.Imaging.ImageFormat]::Png)
+    $bmp.Dispose()
+    Write-Output "Generated Android adaptive foreground $outPath ($size x $size)"
+}
+
 Generate-Icon 192 "web\public\icon-192.png" $false
 Generate-Icon 512 "web\public\icon-512.png" $false
 Generate-Icon 512 "web\public\icon-maskable-512.png" $true
 Generate-Icon 180 "web\public\apple-touch-icon.png" $false
 
-# 同步到 Android 启动图标资源，确保全端图标完全一致
+# 同步到 Android 启动图标资源（API 24-25 使用圆角图标，API 26+ 使用 108dp 自适应安全区前景）
 $androidDrawable = "android\app\src\main\res\drawable-nodpi"
 if (-not (Test-Path $androidDrawable)) { New-Item -ItemType Directory -Path $androidDrawable -Force | Out-Null }
 Copy-Item "web\public\icon-512.png" "$androidDrawable\ic_app.png" -Force
-Copy-Item "web\public\icon-maskable-512.png" "$androidDrawable\ic_app_foreground.png" -Force
+Generate-Android-Adaptive-Foreground 512 "$androidDrawable\ic_app_foreground.png"
 Write-Output "Synced Android launcher icons to $androidDrawable"
