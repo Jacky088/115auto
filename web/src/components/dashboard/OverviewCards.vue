@@ -107,7 +107,7 @@
               <div class="cat-bar-track">
                 <div
                   class="cat-bar-fill"
-                  :style="{ width: `${item.barWidth}%`, background: item.color }"
+                  :style="{ width: `${item.barWidth}%`, background: item.gradient }"
                 ></div>
               </div>
             </div>
@@ -154,7 +154,16 @@ const props = defineProps({
   },
 })
 
-const PALETTE = ['#4f6bff', '#8b5cf6', '#06b6d4', '#10b981', '#f59e0b', '#ec4899', '#6366f1', '#14b8a6']
+const PALETTE = [
+  { color: '#4f6bff', gradient: 'linear-gradient(90deg, #4f6bff 0%, #6f87ff 100%)' },
+  { color: '#8b5cf6', gradient: 'linear-gradient(90deg, #8b5cf6 0%, #a78bfa 100%)' },
+  { color: '#06b6d4', gradient: 'linear-gradient(90deg, #06b6d4 0%, #22d3ee 100%)' },
+  { color: '#10b981', gradient: 'linear-gradient(90deg, #10b981 0%, #34d399 100%)' },
+  { color: '#f59e0b', gradient: 'linear-gradient(90deg, #f59e0b 0%, #fbbf24 100%)' },
+  { color: '#ec4899', gradient: 'linear-gradient(90deg, #ec4899 0%, #f472b6 100%)' },
+  { color: '#6366f1', gradient: 'linear-gradient(90deg, #6366f1 0%, #818cf8 100%)' },
+  { color: '#14b8a6', gradient: 'linear-gradient(90deg, #14b8a6 0%, #2dd4bf 100%)' },
+]
 const RANGE_OPTIONS = [
   { key: 'all', label: '全部', subtext: '累计条数' },
   { key: '30d', label: '近30天', subtext: '近30天条数' },
@@ -200,9 +209,11 @@ const rankedItems = computed(() => {
   if (!total) return []
   return currentBucket.value.items.map((item, idx) => {
     const pct = (item.count / total) * 100
+    const tone = PALETTE[idx % PALETTE.length]
     return {
       ...item,
-      color: PALETTE[idx % PALETTE.length],
+      color: tone.color,
+      gradient: tone.gradient,
       pct,
       pctText: pct >= 10 || Number.isInteger(pct) ? pct.toFixed(1).replace(/\.0$/, '') : pct.toFixed(1),
       barWidth: Math.max(2, pct),
@@ -249,21 +260,21 @@ const renderPie = () => {
       text: totalText,
       subtext: currentRangeMeta.value.subtext,
       left: 'center',
-      top: '36%',
+      top: '36.5%',
       itemGap: 4,
       textStyle: {
-        fontSize: totalText.length >= 5 ? 18 : 22,
+        fontSize: totalText.length >= 5 ? 18 : 23,
         fontWeight: 700,
         color: chartMainColor(),
       },
       subtextStyle: {
-        fontSize: 11,
+        fontSize: 11.5,
         color: chartSubColor(),
       },
     },
     series: [{
       type: 'pie',
-      radius: ['62%', '84%'],
+      radius: ['54%', '88%'],
       center: ['50%', '50%'],
       avoidLabelOverlap: false,
       label: { show: false },
@@ -272,9 +283,9 @@ const renderPie = () => {
         scaleSize: 4,
       },
       itemStyle: {
-        borderRadius: 5,
+        borderRadius: 7,
         borderColor: chartBorderColor(),
-        borderWidth: 2,
+        borderWidth: 2.5,
       },
       data: items.map((it) => ({
         name: it.category,
@@ -462,14 +473,16 @@ html.dark .space-badge.danger { color: #f87171; background: rgba(239, 68, 68, .2
 }
 
 .space-track {
-  height: 11px;
+  height: 18px;
   border-radius: var(--r-pill);
-  background: rgba(79, 107, 255, .11);
+  background: rgba(79, 107, 255, .13);
+  box-shadow: inset 0 1px 2px rgba(31, 45, 90, .06);
   overflow: hidden;
-  padding: 1px;
+  padding: 2px;
 }
 html.dark .space-track {
-  background: rgba(148, 163, 184, .16);
+  background: rgba(148, 163, 184, .18);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, .25);
 }
 .space-fill {
   height: 100%;
@@ -478,15 +491,15 @@ html.dark .space-track {
 }
 .space-fill.ok {
   background: var(--grad-brand);
-  box-shadow: 0 0 12px rgba(79, 107, 255, .36);
+  box-shadow: 0 2px 12px rgba(79, 107, 255, .36), inset 0 1px 0 rgba(255, 255, 255, .32);
 }
 .space-fill.warn {
   background: linear-gradient(90deg, #f59e0b 0%, #fb923c 100%);
-  box-shadow: 0 0 12px rgba(245, 158, 11, .34);
+  box-shadow: 0 2px 12px rgba(245, 158, 11, .34), inset 0 1px 0 rgba(255, 255, 255, .32);
 }
 .space-fill.danger {
   background: linear-gradient(90deg, #ef4444 0%, #f43f5e 100%);
-  box-shadow: 0 0 12px rgba(239, 68, 68, .36);
+  box-shadow: 0 2px 12px rgba(239, 68, 68, .36), inset 0 1px 0 rgba(255, 255, 255, .32);
 }
 
 .space-metrics {
@@ -501,7 +514,7 @@ html.dark .space-track {
   padding: 10px 12px;
   border-radius: var(--r-md);
   background: var(--subcard-bg);
-  border: 1px solid var(--saas-line);
+  border: 1.5px solid var(--saas-line);
 }
 .sm-label {
   font-size: var(--fs-caption);
@@ -575,8 +588,8 @@ html.dark .range-switch {
   gap: 22px;
 }
 .cat-donut {
-  width: 148px;
-  height: 148px;
+  width: 162px;
+  height: 162px;
   flex: none;
 }
 .cat-list {
@@ -584,17 +597,19 @@ html.dark .range-switch {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  max-height: 156px;
+  gap: 6px;
+  max-height: 168px;
   overflow-y: auto;
   overflow-x: hidden;
   padding-right: 4px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(126, 146, 196, .35) transparent;
 }
 .cat-row {
   display: flex;
   flex-direction: column;
-  gap: 5px;
-  padding: 5px 8px;
+  gap: 6px;
+  padding: 6px 8px;
   border-radius: var(--r-sm);
   transition: background .15s ease;
 }
@@ -616,8 +631,8 @@ html.dark .range-switch {
   min-width: 0;
 }
 .cat-dot {
-  width: 8px;
-  height: 8px;
+  width: 9px;
+  height: 9px;
   border-radius: 50%;
   flex: none;
 }
@@ -650,17 +665,21 @@ html.dark .range-switch {
 }
 
 .cat-bar-track {
-  height: 5px;
+  height: 10px;
   border-radius: var(--r-pill);
-  background: rgba(79, 107, 255, .1);
+  background: rgba(79, 107, 255, .12);
+  box-shadow: inset 0 1px 2px rgba(31, 45, 90, .05);
   overflow: hidden;
 }
 html.dark .cat-bar-track {
-  background: rgba(148, 163, 184, .16);
+  background: rgba(148, 163, 184, .18);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, .24);
 }
 .cat-bar-fill {
   height: 100%;
+  min-width: 10px;
   border-radius: var(--r-pill);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .28);
   transition: width .45s cubic-bezier(.22, 1, .36, 1);
 }
 
@@ -669,7 +688,7 @@ html.dark .cat-bar-track {
   align-items: center;
   justify-content: space-between;
   padding-top: 8px;
-  border-top: 1px dashed var(--saas-line);
+  border-top: 1.5px dashed var(--saas-line);
   font-size: var(--fs-caption);
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;
@@ -685,12 +704,12 @@ html.dark .cat-bar-track {
     gap: 14px;
   }
   .cat-donut {
-    width: 136px;
-    height: 136px;
+    width: 146px;
+    height: 146px;
   }
   .cat-list {
     width: 100%;
-    max-height: 190px;
+    max-height: 196px;
   }
 }
 </style>
