@@ -73,15 +73,6 @@
         <span class="step-meta">
           启用规则 {{ activeDedupeRules.length }} 条 · 上次清理：{{ status.last_run.dedupe ? fmtTime(status.last_run.dedupe) : '尚未执行' }}
         </span>
-        <el-select
-          v-model="dedupeSelectedRule"
-          placeholder="选择清理规则"
-          size="default"
-          style="width: 190px"
-          :disabled="isBusy"
-        >
-          <el-option v-for="r in activeDedupeRules" :key="r.id" :value="r.id" :label="r.name || r.source_dir" />
-        </el-select>
         <el-tooltip :content="dedupeBtnTip" :disabled="!dedupeBtnDisabled" placement="top">
           <span>
             <el-button
@@ -89,7 +80,7 @@
               size="default"
               :disabled="dedupeBtnDisabled"
               :loading="dedupePreviewing"
-              @click="openDedupePreview"
+              @click="openDedupePreview()"
             >
               🔍 扫描并预览重复文件
             </el-button>
@@ -227,9 +218,12 @@
         </el-radio-group>
       </el-form-item>
       <el-form-item label="忽略小于">
-        <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap">
-          <el-input-number v-model="dedupeRuleDialog.min_size_mb" :min="0" :max="1024000" :step="10" controls-position="right" style="width: 150px" />
-          <span class="step-meta">MB（0 表示不忽略任何大小；小文件不参与判重）</span>
+        <div class="min-size-field">
+          <div class="min-size-row">
+            <el-input-number v-model="dedupeRuleDialog.min_size_mb" :min="0" :max="1024000" :step="10" style="width: 150px" />
+            <span class="min-size-unit">MB</span>
+          </div>
+          <div class="tip-block">0 表示不忽略任何大小；小文件不参与判重</div>
         </div>
       </el-form-item>
       <el-form-item label="启用">
@@ -331,7 +325,7 @@
 </template>
 
 <script setup>
-import { computed, inject, ref, watch } from 'vue'
+import { computed, inject, ref } from 'vue'
 import { api, errMsg, fmtTime, toast } from '../../api'
 import { runPreviewJob } from '../../composables/previewJob'
 import DirPicker from '../DirPicker.vue'
@@ -364,7 +358,6 @@ function onDedupeDirPicked(pickedPath) {
 // ---------- 重复清理状态 ----------
 const dedupeRules = ref([])
 const activeDedupeRules = computed(() => dedupeRules.value.filter(r => !!r.enabled))
-const dedupeSelectedRule = ref(null)
 const dedupePreviewing = ref(false)
 const dedupeRunning = ref(false)
 const savingDedupeRule = ref(false)
@@ -372,23 +365,12 @@ const dedupeRecords = ref([])
 const dedupeBatches = ref([])
 const dedupeBatchFilter = ref('')
 
-watch(activeDedupeRules, (list) => {
-  if (!list.length) {
-    dedupeSelectedRule.value = null
-    return
-  }
-  if (!list.some(r => r.id === dedupeSelectedRule.value)) {
-    dedupeSelectedRule.value = list[0].id
-  }
-}, { immediate: true })
-
 const dedupeBtnDisabled = computed(() =>
-  !status.value.running || isBusy.value || !activeDedupeRules.value.length || !dedupeSelectedRule.value)
+  !status.value.running || isBusy.value || !activeDedupeRules.value.length)
 
 const dedupeBtnTip = computed(() => {
   if (!status.value.running) return '顶栏系统处于停止状态，请先启动系统'
   if (activeDedupeRules.value.length === 0) return '暂无启用的清理规则，请先点击上方添加'
-  if (!dedupeSelectedRule.value) return '请选择要扫描的清理规则'
   if (isBusy.value) return '已有独占整理、刮削或清理任务运行中（严格互斥），请等待结束'
   return ''
 })
@@ -476,7 +458,7 @@ async function delDedupeRule(id) {
 }
 
 // ---------- 重复清理：扫描预览与确认执行 ----------
-const dedupePreview = ref({ visible: false, ruleId: 0, groups: [], stats: {} })
+const dedupePreview = ref({ visible: false, ruleIds: [], groups: [], stats: {} })
 const dedupeKeep = ref({})
 const dedupeDel = ref({})
 const dedupeSkip = ref({})
@@ -526,7 +508,7 @@ const onDedupeKeepChange = (g, keepId) => {
   dedupeDel.value = next
 }
 
-function applyDedupePreview(data, ruleId) {
+function applyDedupePreview(data, ruleIds) {
   const keep = {}
   const del = {}
   const skip = {}
@@ -540,7 +522,7 @@ function applyDedupePreview(data, ruleId) {
   dedupeSkip.value = skip
   dedupePreview.value = {
     visible: true,
-    ruleId,
+    ruleIds: [...ruleIds],
     groups: data.groups || [],
     stats: data.stats || {},
   }
@@ -549,20 +531,21 @@ function applyDedupePreview(data, ruleId) {
 }
 
 async function previewDedupeRule(row) {
-  dedupeSelectedRule.value = row.id
-  await openDedupePreview()
+  await openDedupePreview([row.id])
 }
 
-async function openDedupePreview() {
+async function openDedupePreview(targetRuleIds = null) {
   if (dedupePreviewing.value) return
-  const ruleId = dedupeSelectedRule.value
-  if (!ruleId) {
-    toast.warning('请先选择要扫描的清理规则')
+  const ruleIds = Array.isArray(targetRuleIds) && targetRuleIds.length
+    ? targetRuleIds
+    : activeDedupeRules.value.map(r => r.id)
+  if (!ruleIds.length) {
+    toast.warning('暂无启用的清理规则，请先添加并启用规则')
     return
   }
   dedupePreviewing.value = true
   try {
-    const data = await runPreviewJob('/api/media/dedupe/preview', { rule_ids: [ruleId] },
+    const data = await runPreviewJob('/api/media/dedupe/preview', { rule_ids: ruleIds },
       { text: '正在扫描重复文件，请勿进行其他操作……（按 Esc 可取消扫描）' })
     if (!data.ok) {
       toast.error(data.msg || '预览失败')
@@ -578,7 +561,7 @@ async function openDedupePreview() {
       toast.info(`未发现 sha1 完全相同的重复文件（已扫描 ${data.stats?.scanned || 0} 个文件）`)
       return
     }
-    applyDedupePreview(data, ruleId)
+    applyDedupePreview(data, ruleIds)
   } catch (e) {
     if (e?.silent) return  // 等待超时：已由预览任务给出提示，扫描仍在后台继续
     if (e?.cancelled) toast.info('已取消扫描')
@@ -588,8 +571,9 @@ async function openDedupePreview() {
 }
 
 async function rescanDedupe() {
+  const ruleIds = dedupePreview.value.ruleIds || []
   dedupePreview.value.visible = false
-  await openDedupePreview()
+  await openDedupePreview(ruleIds.length ? ruleIds : null)
 }
 
 async function confirmDedupe() {
@@ -600,7 +584,7 @@ async function confirmDedupe() {
   dedupeRunning.value = true
   try {
     const { data } = await api.post('/api/media/dedupe/run', {
-      rule_id: dedupePreview.value.ruleId,
+      rule_ids: dedupePreview.value.ruleIds,
       delete_items: dedupeDeleteItems.value,
     })
     dedupePreview.value.visible = false

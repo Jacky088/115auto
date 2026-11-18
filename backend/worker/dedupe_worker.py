@@ -191,13 +191,13 @@ async def preview_dedupe(rule_ids: list[int] | None = None, ctx=None) -> dict:
     }
 
 
-def start_dedupe(rule_id: int, delete_items: list[dict]) -> dict:
+def start_dedupe(rule_ids: int | list[int], delete_items: list[dict]) -> dict:
     """生成批次号并后台启动清理任务，立即返回 batch_id 供前端轮询。"""
     t = _ACTIVE_TASK_REF.get("dedupe")
     if t and not t.done():
         return {"ok": False, "msg": "重复清理已在执行中，请等待当前批次结束"}
     batch_id = f"ded_{uuid.uuid4().hex[:10]}"
-    task = asyncio.create_task(_run_dedupe(rule_id, delete_items, batch_id))
+    task = asyncio.create_task(_run_dedupe(rule_ids, delete_items, batch_id))
     _ACTIVE_TASK_REF["dedupe"] = task
     return {"ok": True, "batch_id": batch_id, "msg": "已发起重复文件清理：正在排空转存队列后移入回收站"}
 
@@ -244,10 +244,13 @@ def _select_valid_deletions(groups: list[dict], delete_items: list[dict]) -> tup
     return filtered, stale, protected
 
 
-async def _run_dedupe(rule_id: int, delete_items: list[dict], batch_id: str) -> dict:
+async def _run_dedupe(rule_ids: int | list[int], delete_items: list[dict], batch_id: str) -> dict:
     """执行重复清理：重新扫描校验 → 分批移入 115 回收站 → 逐条落账。"""
     if _TASK_LOCK.locked():
         return {"ok": False, "msg": "重复清理正在执行中，请勿重复发起"}
+    rids = [int(rule_ids)] if isinstance(rule_ids, int) else [int(x) for x in rule_ids if int(x) > 0]
+    if not rids:
+        return {"ok": False, "msg": "未指定有效的清理规则"}
     ok, busy_msg = transfer_gate.try_begin_exclusive("dedupe")
     if not ok:
         logstream.warn("dedupe", busy_msg)
@@ -278,7 +281,7 @@ async def _run_dedupe(rule_id: int, delete_items: list[dict], batch_id: str) -> 
                 "mode": "dedupe", "phase": "scanning", "current": 0, "total": 0,
                 "label": "正在重新扫描并校验重复文件",
             })
-            _, groups, _ = await client.run_pan_thread(_scan_rules_sync, [int(rule_id)], False)
+            _, groups, _ = await client.run_pan_thread(_scan_rules_sync, rids, False)
             valid, stale, protected = _select_valid_deletions(groups, delete_items)
             total_valid = len(valid)
             if not valid:
@@ -288,6 +291,7 @@ async def _run_dedupe(rule_id: int, delete_items: list[dict], batch_id: str) -> 
                 logstream.info("dedupe", f"▶ 开始执行重复清理（批次 {batch_id}，待删除 {total_valid} 项）")
                 now = time.time()
                 processed = 0
+                per_rule_deleted: dict[int, int] = {rid: 0 for rid in rids}
                 for start in range(0, total_valid, DELETE_BATCH_SIZE):
                     _check_not_cancelled()
                     chunk = valid[start:start + DELETE_BATCH_SIZE]
@@ -307,22 +311,26 @@ async def _run_dedupe(rule_id: int, delete_items: list[dict], batch_id: str) -> 
                         status, note = "failed", str(e)[:300]
                         logstream.warn("dedupe", f"批量移入回收站失败（{len(chunk)} 项）: {e}")
                     for rec in chunk:
+                        rec_rid = int(rec.get("rule_id") or rids[0])
+                        if status == "deleted":
+                            per_rule_deleted[rec_rid] = per_rule_deleted.get(rec_rid, 0) + 1
                         await asyncio.to_thread(
                             db.insert,
                             "INSERT INTO dedupe_records(batch_id,rule_id,file_id,file_name,file_path,sha1,size,status,note,created_at) "
                             "VALUES(?,?,?,?,?,?,?,?,?,?)",
-                            (batch_id, int(rec.get("rule_id") or rule_id), rec["file_id"], rec["file_name"],
+                            (batch_id, rec_rid, rec["file_id"], rec["file_name"],
                              rec["file_path"], rec["sha1"], int(rec["size"]), status, note, now),
                         )
                     if processed < total_valid:
                         await asyncio.sleep(0.8 * max(1.0, client.pace_factor()))
 
                 now = time.time()
-                await asyncio.to_thread(
-                    db.execute,
-                    "UPDATE dedupe_rules SET last_run_at=?, last_deleted_count=? WHERE id=?",
-                    (now, deleted, int(rule_id)),
-                )
+                for rid in rids:
+                    await asyncio.to_thread(
+                        db.execute,
+                        "UPDATE dedupe_rules SET last_run_at=?, last_deleted_count=? WHERE id=?",
+                        (now, per_rule_deleted.get(rid, 0), rid),
+                    )
                 await asyncio.to_thread(db.set_setting, "dedupe_last_run", now)
                 logstream.info(
                     "dedupe",

@@ -379,6 +379,9 @@ html.dark .media-page .rule-dialog-hint {
 .media-page .cfg-card-body { padding-top: 6px; }
 .media-page .tip-inline { margin-left: 10px; font-size: var(--fs-caption); color: var(--saas-text-sub); }
 .media-page .tip-block { font-size: var(--fs-caption); color: var(--saas-text-sub); opacity: .85; margin-top: 4px; line-height: 1.4; }
+.media-page .min-size-field { display: flex; flex-direction: column; width: 100%; }
+.media-page .min-size-row { display: inline-flex; align-items: center; gap: 8px; flex-wrap: nowrap; }
+.media-page .min-size-unit { font-size: var(--fs-body, 14px); color: var(--saas-text-sub); white-space: nowrap; }
 .media-page .inline-switches { display: flex; gap: 18px; flex-wrap: wrap; }
 
 .media-page .slider-row { width: 100%; max-width: 480px; }

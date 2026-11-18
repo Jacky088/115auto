@@ -191,6 +191,53 @@ def test_execute_deletes_only_non_keep_and_writes_ledger(monkeypatch):
     assert int(rule["last_deleted_count"]) == 1
 
 
+def test_execute_multi_rules_updates_each_rule_stats(monkeypatch):
+    import asyncio
+
+    r1 = _mk_rule(source="/媒体库/电影", include_subdirs=1, min_size_mb=0)
+    r2 = _mk_rule(source="/媒体库/剧集", include_subdirs=1, min_size_mb=0)
+    db.set_setting("running", True)
+    files_by_cid = {
+        1: [_file("f1", "电影A.mkv", "shaA", 100), _file("f2", "电影A_dup.mkv", "shaA", 100)],
+        2: [_file("f3", "剧集B.mkv", "shaB", 100), _file("f4", "剧集B_dup.mkv", "shaB", 100)],
+    }
+    monkeypatch.setattr(dedupe_worker.client, "resolve_dir_cid", lambda path: 1 if "电影" in path else 2)
+    monkeypatch.setattr(dedupe_worker.client, "list_entries", lambda cid, limit=2000: files_by_cid.get(int(cid), []))
+    deleted_batches: list[list[str]] = []
+    monkeypatch.setattr(dedupe_worker.client, "delete_entries", lambda fids: deleted_batches.append(list(fids)))
+
+    async def fake_run(fn, *args, **kwargs):
+        return fn(*args, **kwargs)
+
+    monkeypatch.setattr(dedupe_worker.client, "run_pan_thread", fake_run)
+    monkeypatch.setattr(dedupe_worker.transfer_gate, "try_begin_exclusive", lambda mode: (True, ""))
+    monkeypatch.setattr(dedupe_worker.transfer_gate, "clear_cancel", lambda: None)
+    monkeypatch.setattr(dedupe_worker.transfer_gate, "resume_all", lambda: None)
+    monkeypatch.setattr(dedupe_worker.transfer_gate, "set_media_progress", lambda info: None)
+    monkeypatch.setattr(dedupe_worker.transfer_gate, "is_cancel_requested", lambda: False)
+
+    async def fake_drain(max_wait_seconds=3600.0, mode="auto_move"):
+        return True
+
+    monkeypatch.setattr(dedupe_worker.transfer_gate, "prepare_and_drain_transfers", fake_drain)
+
+    res = asyncio.run(dedupe_worker._run_dedupe(
+        [r1, r2],
+        [
+            {"file_id": "f2", "sha1": "shaA", "size": 100 * 1024 * 1024},
+            {"file_id": "f4", "sha1": "shaB", "size": 100 * 1024 * 1024},
+        ],
+        "ded_multi01",
+    ))
+    assert res["ok"] is True
+    assert res["deleted"] == 2
+    assert set(deleted_batches[0]) == {"f2", "f4"}
+    rows = db.query("SELECT * FROM dedupe_records WHERE batch_id='ded_multi01'")
+    assert {r["rule_id"] for r in rows} == {r1, r2}
+    assert int(db.query("SELECT last_deleted_count FROM dedupe_rules WHERE id=?", (r1,), one=True)["last_deleted_count"]) == 1
+    assert int(db.query("SELECT last_deleted_count FROM dedupe_rules WHERE id=?", (r2,), one=True)["last_deleted_count"]) == 1
+
+
 def test_record_table_created():
     cols = {r["name"] for r in db.query("PRAGMA table_info(dedupe_records)")}
     assert {"batch_id", "file_id", "file_name", "file_path", "sha1", "size", "status"} <= cols

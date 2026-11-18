@@ -34,7 +34,8 @@ class DedupeDeleteItem(BaseModel):
 
 
 class DedupeRunIn(BaseModel):
-    rule_id: int
+    rule_id: int | None = None
+    rule_ids: list[int] | None = None
     delete_items: list[DedupeDeleteItem]
 
 
@@ -144,12 +145,25 @@ async def run(body: DedupeRunIn):
     if transfer_gate.is_exclusive_busy():
         mode = transfer_gate.get_active_mode()
         raise HTTPException(409, f"当前有互斥任务（{mode}）正在排队或执行中，请勿同时启动！")
-    rule = db.query("SELECT * FROM dedupe_rules WHERE id=? AND enabled=1", (int(body.rule_id),), one=True)
-    if not rule:
+    req_ids: list[int] = []
+    if body.rule_ids:
+        req_ids = [int(x) for x in body.rule_ids if int(x) > 0]
+    elif body.rule_id is not None and int(body.rule_id) > 0:
+        req_ids = [int(body.rule_id)]
+    if req_ids:
+        placeholders = ",".join("?" for _ in req_ids)
+        rows = db.query(
+            f"SELECT id FROM dedupe_rules WHERE enabled=1 AND id IN ({placeholders}) ORDER BY id ASC",
+            tuple(req_ids),
+        )
+    else:
+        rows = db.query("SELECT id FROM dedupe_rules WHERE enabled=1 ORDER BY id ASC")
+    active_ids = [int(r["id"]) for r in rows]
+    if not active_ids:
         raise HTTPException(400, "清理规则不存在或已停用，请刷新后重试")
     if not body.delete_items:
         raise HTTPException(400, "请至少选择一个需要移入回收站的重复文件")
-    res = dedupe_worker.start_dedupe(int(body.rule_id), [x.model_dump() for x in body.delete_items])
+    res = dedupe_worker.start_dedupe(active_ids, [x.model_dump() for x in body.delete_items])
     if not res.get("ok"):
         raise HTTPException(409, res.get("msg") or "重复清理发起失败")
     return res
