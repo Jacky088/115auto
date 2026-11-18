@@ -703,10 +703,25 @@ html.dark .el-tag--info.is-plain {
   .el-dialog { background: #fbfcff !important; }
   html.dark .el-dialog { background: #182338 !important; }
 }
+.el-dialog__header,
+.el-message-box__header {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+  gap: 12px !important;
+}
+.el-dialog__header.show-close,
+.el-message-box__header.show-close {
+  padding-right: 0 !important;
+}
 .el-dialog__header { margin-right: 0; padding-bottom: 12px; border-bottom: 1px solid rgba(126, 146, 196, .18); }
-.el-dialog__title { font-weight: 600; font-size: var(--fs-title); color: var(--saas-text-main); }
+.el-dialog__title { flex: 1; min-width: 0; font-weight: 600; font-size: var(--fs-title); color: var(--saas-text-main); line-height: 1.4; }
 .el-dialog__body { padding-top: 18px; }
-.el-drawer__header { margin-bottom: 0; padding: 16px 20px; border-bottom: 1px solid rgba(126, 146, 196, .18);
+.el-message-box__header { padding-bottom: 12px !important; }
+.el-message-box__title { flex: 1; min-width: 0; font-weight: 600; line-height: 1.4; justify-content: flex-start; }
+.el-message-box--center .el-message-box__title { justify-content: center; }
+.el-drawer__header { display: flex !important; align-items: center !important; justify-content: space-between !important; gap: 12px !important;
+                     margin-bottom: 0; padding: 16px 20px; border-bottom: 1px solid rgba(126, 146, 196, .18);
                      color: var(--saas-text-main); font-weight: 600; }
 .el-drawer { background: var(--glass-bg-strong) !important; }
 .el-notification {
@@ -858,9 +873,8 @@ html.dark .el-empty__description p {
 .el-dialog__headerbtn,
 .el-drawer__close-btn,
 .el-message-box__headerbtn {
-  position: absolute !important;
-  top: 14px !important;
-  right: 16px !important;
+  position: static !important;
+  flex-shrink: 0 !important;
   width: 32px !important;
   height: 32px !important;
   border-radius: 50% !important;
@@ -1488,12 +1502,10 @@ html.dark .dp-radio { border-color: #4c5b7d; }
   .el-tabs__item { height: 42px; line-height: 42px; padding: 0 14px; }
   /* 顶部 user-chip 可点区加大 */
   .user-chip { padding: 8px; }
-  /* 弹窗关闭按钮触摸优化：适度加大触控面积，保持安全边距防异形裁剪 */
+  /* 弹窗关闭按钮触摸优化：适度加大触控面积，流式居中与标题严格对齐 */
   .el-dialog__headerbtn, .el-drawer__close-btn, .el-message-box__headerbtn {
     width: 36px !important;
     height: 36px !important;
-    top: 12px !important;
-    right: 14px !important;
   }
   /* popconfirm 确认按钮加大 */
   .el-popconfirm__action .el-button { min-height: 34px; padding: 6px 14px; }
