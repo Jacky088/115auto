@@ -3,7 +3,7 @@ name: CI
 on:
   push:
     branches: [main]
-    paths: [backend/**, tests/**, web/src/**, web/public/sw.js, web/eslint.config.js, web/package*.json, pyproject.toml, .github/workflows/ci.yml]
+    paths: [backend/**, tests/**, scripts/check_file_sizes.py, web/src/**, web/public/sw.js, web/eslint.config.js, web/package*.json, pyproject.toml, .github/workflows/ci.yml]
   pull_request:
 
 jobs:
@@ -17,6 +17,8 @@ jobs:
       - run: pip install -r backend/requirements.txt pytest ruff
       - name: Lint (pyflakes / syntax errors)
         run: ruff check backend tests
+      - name: Modularity guard (file size ceiling)
+        run: python scripts/check_file_sizes.py
       - run: python -m pytest tests --ignore=tests/test_api_integration.py --ignore=tests/test_worker_mock.py -q
       - run: python tests/test_worker_mock.py
 
