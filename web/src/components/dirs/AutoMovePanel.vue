@@ -368,7 +368,8 @@
       </el-table-column>
       <el-table-column width="120">
         <template #header>
-          <span>媒体类型
+          <span class="info-tip-label">
+            <span>媒体类型</span>
             <el-tooltip placement="top" effect="dark">
               <template #content>
                 按标题匹配时的文件归属判别（配合两库同名场景）：<br />
@@ -377,7 +378,7 @@
                 · 自动：不区分，与历史行为一致。<br />
                 与规则顺序无关，无论哪条规则先执行结果一致。
               </template>
-              <el-icon class="q-icon"><QuestionFilled /></el-icon>
+              <el-icon class="info-tip-icon" :size="14" tabindex="0"><InfoFilled /></el-icon>
             </el-tooltip>
           </span>
         </template>
@@ -395,7 +396,8 @@
       </el-table-column>
       <el-table-column width="88">
         <template #header>
-          <span>云下载
+          <span class="info-tip-label">
+            <span>云下载</span>
             <el-tooltip placement="top" effect="dark">
               <template #content>
                 云下载目录专用模式：<br />
@@ -403,7 +405,7 @@
                 电影/剧集按集数标识自动判别；广告域名/微小体积文件自动过滤不入库；<br />
                 仅当源目录是分类路由配置的云下载目录时可开启，配置变更后失效会自动拦下并告警。
               </template>
-              <el-icon class="q-icon"><QuestionFilled /></el-icon>
+              <el-icon class="info-tip-icon" :size="14" tabindex="0"><InfoFilled /></el-icon>
             </el-tooltip>
           </span>
         </template>
@@ -481,21 +483,23 @@
       <el-form-item label="云下载模式">
         <div style="display: flex; flex-direction: column; gap: 4px; width: 100%">
           <el-checkbox v-model="newRuleForm.dir_match" :disabled="!sourceIsCloudDir">
-            按父目录名匹配
-            <el-tooltip placement="top" effect="dark">
-              <template #content>
-                适用场景：115 云下载的中文标题只在任务目录名上（如「【广告www..】奥德赛[简繁英字幕].The.Odyssey.2026…」），<br />
-                目录内文件多为纯英文名（The.Odyssey.2026….mkv）。<br /><br />
-                开启后的行为变化：<br />
-                · 匹配对象从文件名换成任务子目录名（自动剥除含网址的广告括号段）；<br />
-                · 目录内纯英文文件继承目录归属，电影/剧集按集数标识自动判别；<br />
-                · 广告域名/微小体积（&lt;10MB）文件自动过滤，不入媒体库；<br />
-                · 源目录根部散落的单文件（如 a.mp4）不参与，留待手动处理；<br />
-                · 字幕不跟移（留给整理刮削配对）。<br /><br />
-                仅当源目录 = 分类路由配置的云下载目录时可开启；配置变更后自动失效并告警。
-              </template>
-              <el-icon class="q-icon"><QuestionFilled /></el-icon>
-            </el-tooltip>
+            <span class="info-tip-label">
+              <span>按父目录名匹配</span>
+              <el-tooltip placement="top" effect="dark">
+                <template #content>
+                  适用场景：115 云下载的中文标题只在任务目录名上（如「【广告www..】奥德赛[简繁英字幕].The.Odyssey.2026…」），<br />
+                  目录内文件多为纯英文名（The.Odyssey.2026….mkv）。<br /><br />
+                  开启后的行为变化：<br />
+                  · 匹配对象从文件名换成任务子目录名（自动剥除含网址的广告括号段）；<br />
+                  · 目录内纯英文文件继承目录归属，电影/剧集按集数标识自动判别；<br />
+                  · 广告域名/微小体积（&lt;10MB）文件自动过滤，不入媒体库；<br />
+                  · 源目录根部散落的单文件（如 a.mp4）不参与，留待手动处理；<br />
+                  · 字幕不跟移（留给整理刮削配对）。<br /><br />
+                  仅当源目录 = 分类路由配置的云下载目录时可开启；配置变更后自动失效并告警。
+                </template>
+                <el-icon class="info-tip-icon" :size="14" tabindex="0"><InfoFilled /></el-icon>
+              </el-tooltip>
+            </span>
           </el-checkbox>
           <span v-if="sourceIsCloudDir" style="color: var(--el-color-success); font-size: var(--fs-caption)">
             已匹配云下载目录 {{ normPath(newRuleForm.source_dir) }}

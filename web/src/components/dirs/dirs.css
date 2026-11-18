@@ -5,7 +5,6 @@
   line-height: 1.6;
   font-size: var(--fs-caption);
 }
-.dirs-page .q-icon { color: var(--saas-text-sub); cursor: help; margin-left: 2px; font-size: var(--fs-caption); }
 /* 弹窗内目录选择按钮：与表单输入框同高同圆角，保持整体主题一致（覆盖主题对 small 按钮的统一加高） */
 .dirs-page .dir-btn .el-icon {
   margin-right: 0;
@@ -449,53 +448,19 @@
 .dirs-page .unclassified-row {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 2px;
   color: var(--text-muted);
   font-size: var(--fs-caption);
 }
 .dirs-page .unclassified-label {
+  display: inline-flex;
+  align-items: center;
   white-space: nowrap;
   flex: none;
   font-size: var(--el-font-size-base);
 }
-.dirs-page .unclassified-help {
-  flex: none;
-  width: 20px;
-  height: 20px;
-  padding: 0;
-  border: 1px solid var(--el-color-primary-light-5);
-  border-radius: 50%;
-  background: var(--el-color-primary-light-9);
-  color: var(--el-color-primary);
-  font-size: 12px;
-  font-weight: 700;
-  line-height: 1;
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-}
-html.dark .dirs-page .unclassified-help {
-  border-color: rgba(129, 152, 255, .65);
-  background: rgba(94, 124, 255, .22);
-  color: #b8c4ff;
-}
-.dirs-page .unclassified-help:hover, .dirs-page .unclassified-help:focus-visible {
-  background: var(--el-color-primary);
-  border-color: var(--el-color-primary);
-  color: #fff;
-  outline: none;
-}
-.unclassified-tip-popper {
-  max-width: calc(100vw - 32px);
-}
-.unclassified-tip-popper .unclassified-tip-text {
-  width: 420px;
-  max-width: calc(100vw - 48px);
-  white-space: normal;
-  color: var(--el-text-color-regular);
-  font-size: var(--el-font-size-base);
-  line-height: 1.7;
+.dirs-page .unclassified-label .info-tip-icon {
+  margin: 0 1px 0 4px;
 }
 .dirs-page .unclassified-select {
   width: 220px;

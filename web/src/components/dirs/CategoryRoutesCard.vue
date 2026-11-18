@@ -18,13 +18,13 @@
         </div>
         <div class="unclassified-block">
           <div class="unclassified-row">
-            <span class="unclassified-label">未分类动作：</span>
-            <el-tooltip trigger="click" effect="light" placement="bottom-end" popper-class="unclassified-tip-popper">
-              <template #content>
-                <div class="unclassified-tip-text">{{ unclassifiedTip }}</div>
-              </template>
-              <button type="button" class="unclassified-help" aria-label="查看未分类动作说明">?</button>
-            </el-tooltip>
+            <span class="unclassified-label">
+              <span>未分类动作</span>
+              <el-tooltip :content="unclassifiedTip" placement="top" effect="dark">
+                <el-icon class="info-tip-icon" :size="14" tabindex="0" aria-label="查看未分类动作说明"><InfoFilled /></el-icon>
+              </el-tooltip>
+              <span>：</span>
+            </span>
             <el-select v-model="unclassifiedAction" class="unclassified-select" filterable allow-create
                        fit-input-width default-first-option @change="onUnclassifiedChange">
               <el-option label="跳过（不转存、不云下载）" value="skip" />

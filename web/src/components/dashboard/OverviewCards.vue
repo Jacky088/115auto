@@ -56,8 +56,8 @@
         <div class="ov-header">
           <div class="ov-title-group">
             <span class="ov-title">转存分类占比</span>
-            <el-tooltip content="统计已成功转存及已提交云下载的有效记录" placement="top">
-              <el-icon class="scope-tip-icon" :size="14"><InfoFilled /></el-icon>
+            <el-tooltip content="统计已成功转存及已提交云下载的有效记录" placement="top" effect="dark">
+              <el-icon class="info-tip-icon" :size="14" tabindex="0"><InfoFilled /></el-icon>
             </el-tooltip>
           </div>
           <div class="range-switch" role="group" aria-label="统计时间范围">
@@ -386,14 +386,6 @@ onUnmounted(() => {
 }
 .ov-title {
   font-weight: 600;
-}
-.scope-tip-icon {
-  color: var(--text-muted);
-  cursor: help;
-  transition: color .15s ease;
-}
-.scope-tip-icon:hover {
-  color: var(--el-color-primary);
 }
 
 .ov-empty {

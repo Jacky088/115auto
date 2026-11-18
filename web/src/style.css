@@ -1617,6 +1617,25 @@ html.dark .dp-radio { border-color: #4c5b7d; }
   line-height: 1.5;
 }
 
+/* 全站统一的字段/标题旁说明图标（i 图标 + 深色悬浮提示气泡） */
+.info-tip-icon {
+  color: var(--text-muted);
+  cursor: help;
+  vertical-align: middle;
+  flex: none;
+  transition: color .15s ease;
+}
+.info-tip-icon:hover,
+.info-tip-icon:focus-visible {
+  color: var(--el-color-primary);
+  outline: none;
+}
+.info-tip-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
 /* ================== 触摸优化（手机端可点性） ================== */
 @media (max-width: 768px) {
   /* 提高点击目标：text 按钮（删除/详情/放行/重试等）最小 36px 高，带背景便于辨识 */
