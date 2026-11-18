@@ -12,7 +12,7 @@
   <div v-if="previewCountdown > 0" class="stat-line">
     ⏱ {{ Math.floor(previewCountdown / 60) }} 分 {{ previewCountdown % 60 }} 秒后自动暂存
   </div>
-  <div style="display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 8px">
+  <div v-if="previewGroups.length" style="display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 8px">
     <span style="font-size: var(--fs-caption); color: var(--saas-text-sub)">按规则整组：</span>
     <el-checkbox
       v-for="g in previewGroups"
@@ -21,7 +21,21 @@
       @change="(v) => togglePreviewGroup(g, v)"
     >{{ g.label }}（{{ g.ids.length }}）</el-checkbox>
   </div>
-  <el-table :data="previewRows" size="small" max-height="46vh">
+  <div v-if="previewRows.length" style="display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 8px">
+    <el-input
+      v-model="previewSearch"
+      placeholder="搜索文件名 / 路径 / 命中词"
+      clearable
+      size="small"
+      style="width: 240px"
+      @input="previewPage = 1"
+    />
+    <span style="font-size: var(--fs-caption); color: var(--saas-text-sub)">
+      {{ previewSearch.trim() ? `匹配 ${previewFilteredRows.length} / 共 ${previewRows.length} 条` : `共 ${previewRows.length} 条` }} · 已勾选 {{ previewSelectedCount }} 条
+    </span>
+  </div>
+  <el-table :data="previewPagedRows" size="small" max-height="46vh">
+    <template #empty><el-empty :image-size="60" :description="previewSearch.trim() ? '无匹配文件' : '暂无待移动文件'" /></template>
     <el-table-column width="50" align="center">
       <template #header>
         <el-checkbox
@@ -34,7 +48,7 @@
         <el-checkbox v-model="previewSelected[row.id]" />
       </template>
     </el-table-column>
-    <el-table-column type="index" label="#" width="50" />
+    <el-table-column type="index" :index="(i) => (previewPage - 1) * previewPageSize + i + 1" label="#" width="55" />
     <el-table-column prop="name" label="文件名" min-width="220" show-overflow-tooltip />
     <el-table-column prop="from_path" label="源位置" width="150" show-overflow-tooltip />
     <el-table-column prop="dest_path" label="目标位置" min-width="220" show-overflow-tooltip />
@@ -44,6 +58,14 @@
     <el-table-column prop="matched" label="命中词" width="120" show-overflow-tooltip />
     <el-table-column prop="rule_label" label="规则" width="170" show-overflow-tooltip />
   </el-table>
+  <el-pagination
+    v-if="previewPageCount > 1"
+    style="margin-top: 10px; justify-content: flex-end"
+    layout="total, prev, pager, next"
+    :total="previewFilteredRows.length"
+    :page-size="previewPageSize"
+    v-model:current-page="previewPage"
+  />
   <div v-if="previewData?.rules?.some((r) => r.skip_ep > 0 || r.skip_movie > 0 || r.skip_ambiguous > 0 || r.skip_junk > 0 || r.error)" style="margin-top: 10px">
     <div v-for="r in previewData.rules" :key="r.rule_id" style="font-size: var(--fs-caption); color: var(--saas-text-sub); line-height: 1.7">
       <span v-if="r.skip_ep > 0">「{{ r.target_dir }}」按季集防重将跳过 {{ r.skip_ep }} 个文件{{ r.skip_ep_samples?.length ? `（如 ${r.skip_ep_samples.slice(0, 2).join('、')}）` : '' }}；</span>
@@ -97,6 +119,8 @@ const openPreviewDialog = (data, fromCache) => {
     for (const it of (r.planned || [])) sel[it.id] = true
   }
   previewSelected.value = sel
+  previewSearch.value = ''
+  previewPage.value = 1
   previewVisible.value = true
   startPreviewCountdown()
 }
@@ -169,6 +193,24 @@ const previewRows = computed(() => {
   }
   return rows
 })
+
+const previewSearch = ref('')
+const previewPage = ref(1)
+const previewPageSize = 50
+const previewFilteredRows = computed(() => {
+  const kw = previewSearch.value.trim().toLowerCase()
+  if (!kw) return previewRows.value
+  return previewRows.value.filter((r) =>
+    [r.name, r.from_path, r.dest_path, r.matched, r.rule_label]
+      .some((s) => String(s || '').toLowerCase().includes(kw)))
+})
+const previewPageCount = computed(() =>
+  Math.max(1, Math.ceil(previewFilteredRows.value.length / previewPageSize)))
+const previewPagedRows = computed(() =>
+  previewFilteredRows.value.slice(
+    (previewPage.value - 1) * previewPageSize,
+    previewPage.value * previewPageSize,
+  ))
 
 const previewSelected = ref({})
 const previewGroups = computed(() => {

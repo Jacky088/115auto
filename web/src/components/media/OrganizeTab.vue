@@ -222,7 +222,25 @@
         其他规则认领 {{ previewDrawer.scan_stats.dedup_seen }}
       </div>
     </div>
-    <el-table :data="previewDrawer.items" size="small" stripe max-height="72vh">
+    <div v-if="previewDrawer.items.length" class="mb12" style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center">
+      <el-input
+        v-model="drawerSearch"
+        placeholder="搜索文件名 / 路径"
+        clearable
+        size="small"
+        style="width: 240px"
+        @input="drawerPage = 1"
+      />
+      <el-radio-group v-model="drawerStatus" size="small" @change="drawerPage = 1">
+        <el-radio-button value="all">全部 ({{ previewDrawer.items.length }})</el-radio-button>
+        <el-radio-button value="pending">待调整 ({{ previewDrawer.pending_count }})</el-radio-button>
+        <el-radio-button value="ok">已规范 ({{ Math.max(0, previewDrawer.total - previewDrawer.pending_count) }})</el-radio-button>
+      </el-radio-group>
+      <span class="step-meta">匹配 {{ drawerFilteredItems.length }} 条</span>
+    </div>
+    <el-table :data="drawerPagedItems" size="small" stripe max-height="66vh">
+      <template #empty><el-empty :image-size="60" description="无匹配条目" /></template>
+      <el-table-column type="index" :index="(i) => (drawerPage - 1) * drawerPageSize + i + 1" label="#" width="55" />
       <el-table-column prop="orig_path" label="当前 115 路径" min-width="230" show-overflow-tooltip />
       <el-table-column label="整理后规范路径" min-width="250" show-overflow-tooltip>
         <template #default="{ row }">{{ row.target_path }}/{{ row.target_name }}</template>
@@ -239,6 +257,14 @@
         </template>
       </el-table-column>
     </el-table>
+    <el-pagination
+      v-if="drawerPageCount > 1"
+      style="margin-top: 12px; justify-content: flex-end"
+      layout="total, prev, pager, next"
+      :total="drawerFilteredItems.length"
+      :page-size="drawerPageSize"
+      v-model:current-page="drawerPage"
+    />
   </el-drawer>
 
 
@@ -258,15 +284,6 @@
       其他规则认领 {{ orgPreview.scan_stats.dedup_seen }}
     </div>
     <div v-if="orgCountdown > 0" class="stat-line">
-      ⏱ {{ Math.floor(orgCountdown / 60) }} 分 {{ orgCountdown % 60 }} 秒后自动暂存
-    </div>
-    <div v-if="orgPreview.scan_stats" style="margin-bottom: 8px; font-size: var(--fs-caption); color: var(--saas-text-sub)">
-      已过滤：非视频 {{ orgPreview.scan_stats.non_video }} ·
-      类型互斥 {{ orgPreview.scan_stats.media_type_skip }} ·
-      花絮广告 {{ orgPreview.scan_stats.extra_skip }} ·
-      其他规则认领 {{ orgPreview.scan_stats.dedup_seen }}
-    </div>
-    <div v-if="orgCountdown > 0" style="margin-bottom: 8px; font-size: var(--fs-caption); color: var(--saas-text-sub)">
       ⏱ {{ Math.floor(orgCountdown / 60) }} 分 {{ orgCountdown % 60 }} 秒后自动暂存
     </div>
 
@@ -612,8 +629,29 @@ const confirmRunOrganize = async () => {
   finally { orgConfirming.value = false }
 }
 
-// ---------- Dry-Run 预览 ----------
+// ---------- 只读预览抽屉（搜索 + 状态筛选 + 前端分页） ----------
 const previewDrawer = ref({ open: false, total: 0, pending_count: 0, items: [] })
+const drawerSearch = ref('')
+const drawerStatus = ref('all')
+const drawerPage = ref(1)
+const drawerPageSize = 50
+const drawerFilteredItems = computed(() => {
+  const kw = drawerSearch.value.trim().toLowerCase()
+  return (previewDrawer.value.items || []).filter((it) => {
+    if (drawerStatus.value === 'pending' && it.already_ok) return false
+    if (drawerStatus.value === 'ok' && !it.already_ok) return false
+    if (!kw) return true
+    return [it.orig_name, it.orig_path, it.target_path, it.target_name]
+      .some((s) => String(s || '').toLowerCase().includes(kw))
+  })
+})
+const drawerPageCount = computed(() =>
+  Math.max(1, Math.ceil(drawerFilteredItems.value.length / drawerPageSize)))
+const drawerPagedItems = computed(() =>
+  drawerFilteredItems.value.slice(
+    (drawerPage.value - 1) * drawerPageSize,
+    drawerPage.value * drawerPageSize,
+  ))
 
 async function openPreview() {
   if (previewing.value) return
@@ -631,6 +669,9 @@ async function openPreview() {
       toast.warning(blockedRules[0].msg || '源目录设置不合法，已跳过扫描')
       return
     }
+    drawerSearch.value = ''
+    drawerStatus.value = 'all'
+    drawerPage.value = 1
     previewDrawer.value = { open: true, total: data.total, pending_count: data.pending_count,
                             items: data.items || [], scan_stats: data.scan_stats || null }
   } catch (e) {
