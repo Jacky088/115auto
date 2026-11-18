@@ -340,10 +340,14 @@ const channelLines = computed(() => {
     const m = line.trim().match(/t\.me\/(?:s\/)?@?([0-9A-Za-z_]+)/)
     const name = (m ? m[1] : line.trim().replace(/^@/, '')).trim()
     if (name && !out.includes(name)) out.push(name)
-    if (name && !(name in chTypes)) chTypes[name] = 'polling'
   }
   return out
 })
+watch(channelLines, (names) => {
+  for (const name of names) {
+    if (!(name in chTypes)) chTypes[name] = 'polling'
+  }
+}, { immediate: true })
 const addChannels = async () => {
   if (wizardSubOnly.value === null) { ElMessage.warning('请先选择订阅模式（全盘转存 / 仅订阅）'); return }
   adding.value = true

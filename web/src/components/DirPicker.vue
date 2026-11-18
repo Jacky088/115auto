@@ -143,7 +143,7 @@ const goTo = (i) => {
 }
 
 const showMkdir = async () => {
-  let name = ''
+  let name
   try {
     const r = await ElMessageBox.prompt(
       `将在「${currentPath.value}」下创建文件夹`, '新建文件夹',

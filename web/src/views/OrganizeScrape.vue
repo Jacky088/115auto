@@ -2052,7 +2052,7 @@ async function runOrganize() {
   // 两段式执行：先 dry-run 预览待整理清单，用户在弹窗确认后才真正发起。
   // 异步扫描任务 + 轮询进度：大目录不再阻塞请求超时，按 Esc 可取消
   startingOrganize.value = true
-  let data = null
+  let data
   try {
     data = await runPreviewJob('/api/media/organize/preview', {},
       { text: '正在扫描待整理媒体，请勿进行其他操作……（按 Esc 可取消扫描）' })

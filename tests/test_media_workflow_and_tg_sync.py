@@ -582,7 +582,9 @@ def test_tg_notify_worker_sends_cards_and_edits_sequentially_and_local_poster_ap
         assert r_meta.status_code == 200 and r_meta.json()["has_poster"] is True
         assert "狂飙" in r_meta.json()["nfos"][0]["content"]
 
-        r_img = tc.get("/api/media/poster/local", params={"task_id": tid, "file": "poster.jpg"}, cookies={"sa_poster": token})
+        tc.cookies.set("sa_poster", token)
+        r_img = tc.get("/api/media/poster/local", params={"task_id": tid, "file": "poster.jpg"})
+        tc.cookies.clear()
         assert r_img.status_code == 200 and r_img.content.startswith(b"\xff\xd8\xff")
 
         r_bad = tc.get("/api/media/meta/inspect", params={"task_id": bad_tid}, headers={"Authorization": f"Bearer {token}"})

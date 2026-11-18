@@ -12,21 +12,27 @@ from backend.api import manage
 client = TestClient(app)
 
 
+def _get(url: str, *, cookies: dict | None = None, headers: dict | None = None):
+    c = TestClient(app, cookies=cookies) if cookies is not None else TestClient(app)
+    return c.get(url, headers=headers)
+
+
 @pytest.fixture(autouse=True)
 def init_database():
     db.init()
     manage._POSTER_CACHE.clear()
+    client.cookies.clear()
 
 
 def test_poster_auth_levels():
     token = auth.make_token("admin")
 
     # 1. 未带任何凭据 -> 401
-    r = client.get("/api/tmdb/poster?path=/test.jpg")
+    r = _get("/api/tmdb/poster?path=/test.jpg")
     assert r.status_code == 401
 
     # 2. 错误 token -> 401
-    r = client.get("/api/tmdb/poster?path=/test.jpg", cookies={"sa_auth": "bad_token_123"})
+    r = _get("/api/tmdb/poster?path=/test.jpg", cookies={"sa_auth": "bad_token_123"})
     assert r.status_code == 401
 
     # 预设缓存以验证各种鉴权方式均可通过
@@ -34,24 +40,24 @@ def test_poster_auth_levels():
     manage._POSTER_CACHE["/test.jpg"] = (fake_png, "image/png")
 
     # 3. 登录态 Cookie 鉴权（sa_auth：前端登录后的主通路）
-    r = client.get("/api/tmdb/poster?path=/test.jpg", cookies={"sa_auth": token})
+    r = _get("/api/tmdb/poster?path=/test.jpg", cookies={"sa_auth": token})
     assert r.status_code == 200
     assert r.content == fake_png
     assert r.headers.get("X-Poster-Cache") == "HIT"
 
     # 4. Bearer Header 鉴权
-    r = client.get("/api/tmdb/poster?path=/test.jpg", headers={"Authorization": f"Bearer {token}"})
+    r = _get("/api/tmdb/poster?path=/test.jpg", headers={"Authorization": f"Bearer {token}"})
     assert r.status_code == 200
 
     # 5. 海报专用 Cookie 鉴权
-    r = client.get("/api/tmdb/poster?path=/test.jpg", cookies={"sa_poster": token})
+    r = _get("/api/tmdb/poster?path=/test.jpg", cookies={"sa_poster": token})
     assert r.status_code == 200
 
     # 6. URL ?token= 查询参数已移除：携带无效查询参数不影响 Cookie 鉴权，也不再作为凭据
-    r = client.get(f"/api/tmdb/poster?path=/test.jpg&token={token}",
-                   cookies={"sa_auth": token})
+    r = _get(f"/api/tmdb/poster?path=/test.jpg&token={token}",
+             cookies={"sa_auth": token})
     assert r.status_code == 200  # 200 来自 sa_auth Cookie，而非 query 参数
-    r = client.get(f"/api/tmdb/poster?path=/test.jpg&token={token}")
+    r = _get(f"/api/tmdb/poster?path=/test.jpg&token={token}")
     assert r.status_code == 401  # 无 Cookie/Bearer 时 query 中的 token 不再生效
 
 
@@ -59,16 +65,16 @@ def test_poster_path_validation():
     token = auth.make_token("admin")
 
     # 路径穿越测试 -> 400
-    r = client.get("/api/tmdb/poster?path=/../../etc/passwd", cookies={"sa_auth": token})
+    r = _get("/api/tmdb/poster?path=/../../etc/passwd", cookies={"sa_auth": token})
     assert r.status_code == 400
 
     # 非法扩展名 -> 400
-    r = client.get("/api/tmdb/poster?path=/test.exe", cookies={"sa_auth": token})
+    r = _get("/api/tmdb/poster?path=/test.exe", cookies={"sa_auth": token})
     assert r.status_code == 400
 
     # 缺少前置斜杠时自动补全规范化
     manage._POSTER_CACHE["/normalized.jpg"] = (b"image_data", "image/jpeg")
-    r = client.get("/api/tmdb/poster?path=normalized.jpg", cookies={"sa_auth": token})
+    r = _get("/api/tmdb/poster?path=normalized.jpg", cookies={"sa_auth": token})
     assert r.status_code == 200
     assert r.content == b"image_data"
 
@@ -92,7 +98,7 @@ def test_poster_proxy_fallback_to_direct():
 
     with patch("backend.worker.jobs._tg_proxy", return_value="http://127.0.0.1:8888"):
         with patch("httpx.get", side_effect=fake_httpx_get):
-            r = client.get("/api/tmdb/poster?path=/fallback.jpg", cookies={"sa_auth": token})
+            r = _get("/api/tmdb/poster?path=/fallback.jpg", cookies={"sa_auth": token})
             assert r.status_code == 200
             assert r.content == b"downloaded_poster_bytes"
             assert call_count["count"] == 2  # 第一次代理失败，第二次直连成功
@@ -139,8 +145,7 @@ def test_login_sets_poster_cookie_for_tmdb_and_local_media_paths(tmp_path):
     assert any("path=/api/tmdb/poster" in c.lower() for c in del_cookies)
     assert any("path=/api/media/poster" in c.lower() for c in del_cookies)
     assert auth.check_token(pre_logout_token) is None
-    r = client.get("/api/auth/me", headers={"Authorization": f"Bearer {pre_logout_token}"},
-                   cookies={"sa_auth": None, "sa_poster": None})
+    r = _get("/api/auth/me", headers={"Authorization": f"Bearer {pre_logout_token}"})
     assert r.status_code == 401  # 登出前的旧 token 已被版本号吊销
 
 

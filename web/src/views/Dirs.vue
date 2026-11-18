@@ -890,7 +890,7 @@ const extractKeyword = (path) => {
     idx -= 1
   }
   const candidate = parts[idx]
-  const cleaned = candidate.replace(/[\(\[\{（【]?\s*(?:19\d{2}|20\d{2})\s*[\)\]\}）】]?/g, '').trim()
+  const cleaned = candidate.replace(/[([{（【]?\s*(?:19\d{2}|20\d{2})\s*[)\]}）】]?/g, '').trim()
   return cleaned || candidate
 }
 
@@ -1214,7 +1214,7 @@ const runAutoMoveNow = async () => {
   }
   // 两段式执行：异步扫描任务 + 轮询进度，避免大目录扫描把请求拖到超时；按 Esc 可取消
   runningMove.value = true
-  let pv = null
+  let pv
   try {
     pv = await runPreviewJob('/api/auto-move/preview', null,
       { text: '正在扫描待整理文件，请勿进行其他操作……（按 Esc 可取消扫描）' })

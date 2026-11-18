@@ -2,7 +2,7 @@
   <div class="saas-hero-bg login-wrap">
     <el-card class="login-card">
       <div class="login-head">
-        <img src="/favicon.svg" alt="115" class="login-mark" />
+        <img src="/icon-192.png" alt="115" class="login-mark" />
         <h2>115 自动转存助手</h2>
         <p>Telegram 频道资源 · 自动分类转存</p>
       </div>

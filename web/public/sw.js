@@ -7,7 +7,7 @@
  * 4. API 接口 (/api/*) 与 WebSocket (/ws)：绝不拦截缓存，保持 100% 实时直连。
  */
 
-const CACHE_NAME = 'autosave115-pwa-v2'
+const CACHE_NAME = 'autosave115-pwa-v3'
 const PRECACHE_ASSETS = [
   '/',
   '/index.html',
@@ -15,6 +15,7 @@ const PRECACHE_ASSETS = [
   '/favicon.svg',
   '/icon-192.png',
   '/icon-512.png',
+  '/icon-maskable-512.png',
   '/apple-touch-icon.png'
 ]
 

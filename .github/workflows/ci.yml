@@ -3,7 +3,7 @@ name: CI
 on:
   push:
     branches: [main]
-    paths: [backend/**, tests/**, web/src/**, web/package*.json, pyproject.toml, .github/workflows/ci.yml]
+    paths: [backend/**, tests/**, web/src/**, web/public/sw.js, web/eslint.config.js, web/package*.json, pyproject.toml, .github/workflows/ci.yml]
   pull_request:
 
 jobs:
@@ -30,6 +30,8 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
       - run: npm ci
+        working-directory: web
+      - run: npm run lint
         working-directory: web
       - run: npm run build
         working-directory: web

@@ -5,5 +5,7 @@ line-length = 120
 extend-exclude = [".venv", "data", "scratch", "web", "android", "backend/static"]
 
 [tool.ruff.lint]
-# E9 = 语法/运行期错误，F = pyflakes（未定义名、未使用导入、重复定义等）
-select = ["E9", "F"]
+# 仅做「能抓出真实故障」的静态检查：E9 语法错误、F pyflakes、B bugbear 高价值缺陷规则
+select = ["E9", "F", "B"]
+# B008: FastAPI Depends/Query 默认参数写法；其余为风格或已确认安全项，避免无关 diff
+ignore = ["B008", "B011", "B023", "B904", "B905"]

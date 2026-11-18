@@ -71,7 +71,7 @@ export async function runPreviewJob(base, body = {}, opts = {}) {
         // 网络抖动/代理瞬时中断：重试 3 次，避免一次失败就把长时间扫描判死
         pollFailures += 1
         if (pollFailures >= 3) {
-          throw new Error('扫描进度查询连续失败（网络或服务异常），请稍后重新点击预览查看结果')
+          throw new Error('扫描进度查询连续失败（网络或服务异常），请稍后重新点击预览查看结果', { cause: e })
         }
         if (mask && typeof mask.setText === 'function') {
           mask.setText(`进度查询失败，正在重试（${pollFailures}/3）……`)

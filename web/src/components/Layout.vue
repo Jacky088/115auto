@@ -5,7 +5,7 @@
                class="menu-drawer">
       <div class="aside" style="height: 100%">
         <div class="logo">
-          <img src="/favicon.svg" alt="115" class="logo-mark" />
+          <img src="/icon-192.png" alt="115" class="logo-mark" />
           <div class="logo-text">115 自动转存</div>
         </div>
         <el-menu :default-active="$route.path" router class="aside-menu" @select="menuOpen = false">
@@ -33,7 +33,7 @@
     <!-- 桌面端侧边栏 -->
     <el-aside width="216px" class="aside pc-only">
       <div class="logo">
-        <img src="/favicon.svg" alt="115" class="logo-mark" />
+        <img src="/icon-192.png" alt="115" class="logo-mark" />
         <div class="logo-text">115 自动转存</div>
       </div>
       <el-menu :default-active="$route.path" router class="aside-menu">

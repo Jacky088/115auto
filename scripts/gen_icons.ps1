@@ -127,3 +127,10 @@ Generate-Icon 192 "web\public\icon-192.png" $false
 Generate-Icon 512 "web\public\icon-512.png" $false
 Generate-Icon 512 "web\public\icon-maskable-512.png" $true
 Generate-Icon 180 "web\public\apple-touch-icon.png" $false
+
+# 同步到 Android 启动图标资源，确保全端图标完全一致
+$androidDrawable = "android\app\src\main\res\drawable-nodpi"
+if (-not (Test-Path $androidDrawable)) { New-Item -ItemType Directory -Path $androidDrawable -Force | Out-Null }
+Copy-Item "web\public\icon-512.png" "$androidDrawable\ic_app.png" -Force
+Copy-Item "web\public\icon-maskable-512.png" "$androidDrawable\ic_app_foreground.png" -Force
+Write-Output "Synced Android launcher icons to $androidDrawable"
