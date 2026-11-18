@@ -137,17 +137,8 @@
           <template #default="{ row }">
             <div class="table-actions">
               <el-button type="primary" text @click="preview(row)">预览</el-button>
-              <el-popconfirm
-                title="重置该频道？去重记录将清除，并从最新消息重新抓取。"
-                confirm-button-text="重置" cancel-button-text="取消" confirm-button-type="warning"
-                width="300" @confirm="reset(row)">
-                <template #reference><el-button type="warning" text>重置</el-button></template>
-              </el-popconfirm>
-              <el-popconfirm title="删除这条频道监控？删除后将不再监控该频道，记录一并清除。"
-                             confirm-button-text="删除" cancel-button-text="取消" confirm-button-type="danger"
-                             width="300" @confirm="del(row)">
-                <template #reference><el-button type="danger" text>删除</el-button></template>
-              </el-popconfirm>
+              <el-button type="warning" text @click="reset(row)">重置</el-button>
+              <el-button type="danger" text @click="del(row)">删除</el-button>
             </div>
           </template>
         </el-table-column>
@@ -244,6 +235,7 @@ import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, CircleCheckFilled, CircleCloseFilled } from '@element-plus/icons-vue'
 import { api, errMsg, fmtTime, highlightLinks, statusLabel, statusTagType } from '../api'
+import { confirmAction } from '../composables/confirmDialog'
 import CookieImportDialog from '../components/CookieImportDialog.vue'
 import UserbotLogin from '../components/UserbotLogin.vue'
 
@@ -453,6 +445,11 @@ const changeType = async (row, v) => {
 }
 
 const reset = async (row) => {
+  if (!await confirmAction({
+    title: '重置该频道？',
+    message: '去重记录将清除，并从最新消息重新抓取。',
+    confirmText: '重置',
+  })) return
   try {
     const { data } = await api.post(`/api/channels/${row.id}/reset`)
     ElMessage.success(`已重置 @${row.name}：清除已处理记录，从最新消息开始抓取`)
@@ -462,6 +459,12 @@ const reset = async (row) => {
 }
 
 const del = async (row) => {
+  if (!await confirmAction({
+    title: '删除这条频道监控？',
+    message: '删除后将不再监控该频道，记录一并清除。',
+    confirmText: '删除',
+    danger: true,
+  })) return
   try {
     await api.delete(`/api/channels/${row.id}`)
     ElMessage.success(`已删除频道 @${row.name}`)

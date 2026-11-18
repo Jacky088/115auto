@@ -60,16 +60,8 @@
           <template #default="{ row }">
             <div class="table-actions">
               <el-button type="primary" text @click="openBackfill(row)">补全</el-button>
-              <el-popconfirm title="重置追更进度？进度记录将清空，下次命中重新记录。"
-                             confirm-button-text="重置" cancel-button-text="取消" confirm-button-type="warning"
-                             width="280" @confirm="resetProgress(row)">
-                <template #reference><el-button type="warning" text>重置</el-button></template>
-              </el-popconfirm>
-              <el-popconfirm title="删除这条订阅？删除后不再按该关键词自动追剧。"
-                             confirm-button-text="删除" cancel-button-text="取消" confirm-button-type="danger"
-                             width="260" @confirm="del(row)">
-                <template #reference><el-button type="danger" text>删除</el-button></template>
-              </el-popconfirm>
+              <el-button type="warning" text @click="resetProgress(row)">重置</el-button>
+              <el-button type="danger" text @click="del(row)">删除</el-button>
             </div>
           </template>
         </el-table-column>
@@ -197,6 +189,7 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Search, Close, RefreshRight } from '@element-plus/icons-vue'
 import { api, errMsg, fmtTime, saveOk } from '../api'
+import { confirmAction } from '../composables/confirmDialog'
 import BackfillDialog from '../components/BackfillDialog.vue'
 
 const items = ref([])
@@ -421,6 +414,11 @@ const setMinQuality = async (row, v) => {
 }
 
 const resetProgress = async (row) => {
+  if (!await confirmAction({
+    title: '重置追更进度？',
+    message: '进度记录将清空，下次命中重新记录。',
+    confirmText: '重置',
+  })) return
   try {
     await api.put(`/api/subscriptions/${row.id}`, { reset_progress: true })
     ElMessage.success(`已重置「${row.keyword}」的追更进度`)
@@ -432,6 +430,12 @@ const backfillDialogRef = ref(null)
 const openBackfill = (row) => backfillDialogRef.value?.openForSubscription(row)
 
 const del = async (row) => {
+  if (!await confirmAction({
+    title: '删除这条订阅？',
+    message: '删除后不再按该关键词自动追剧。',
+    confirmText: '删除',
+    danger: true,
+  })) return
   try {
     await api.delete(`/api/subscriptions/${row.id}`)
     ElMessage.success(`已删除订阅「${row.keyword}」`)

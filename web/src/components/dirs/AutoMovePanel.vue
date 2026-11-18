@@ -447,10 +447,7 @@
       </el-table-column>
       <el-table-column label="操作" width="84" fixed="right">
         <template #default="{ row }">
-          <el-popconfirm title="删除这条整理映射？删除后该规则立即失效。" confirm-button-text="删除" cancel-button-text="取消"
-                         confirm-button-type="danger" width="200" @confirm="deleteMoveRule(row.id)">
-            <template #reference><el-button type="danger" text>删除</el-button></template>
-          </el-popconfirm>
+          <el-button type="danger" text @click="deleteMoveRule(row.id)">删除</el-button>
         </template>
       </el-table-column>
     </el-table>
@@ -556,6 +553,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { api, errMsg, saveOk } from '../../api'
 import { usePolling } from '../../composables/usePolling'
+import { confirmAction } from '../../composables/confirmDialog'
 import DirPicker from '../DirPicker.vue'
 import AutoMovePreviewDialog from './AutoMovePreviewDialog.vue'
 
@@ -921,6 +919,12 @@ const toggleDirMatch = async (row) => {
 }
 
 const deleteMoveRule = async (id) => {
+  if (!await confirmAction({
+    title: '删除这条整理映射？',
+    message: '删除后该规则立即失效。',
+    confirmText: '删除',
+    danger: true,
+  })) return
   try {
     await api.delete(`/api/auto-move/rules/${id}`)
     ElMessage.success('整理规则已删除')

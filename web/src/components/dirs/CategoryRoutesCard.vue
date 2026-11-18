@@ -60,11 +60,7 @@
       </el-table-column>
       <el-table-column label="操作" width="84" fixed="right">
         <template #default="{ $index }">
-          <el-popconfirm title="删除这条分类映射？保存后立即生效。" confirm-button-text="删除"
-                         cancel-button-text="取消" confirm-button-type="danger" width="230"
-                         @confirm="routes.splice($index, 1); dirtyRoutes = true">
-            <template #reference><el-button type="danger" text>删除</el-button></template>
-          </el-popconfirm>
+          <el-button type="danger" text @click="removeRoute($index)">删除</el-button>
         </template>
       </el-table-column>
     </el-table>
@@ -84,6 +80,7 @@ import { computed, nextTick, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { api, errMsg, saveOk } from '../../api'
 import { useUnsavedGuard } from '../../composables/unsavedGuard'
+import { confirmAction } from '../../composables/confirmDialog'
 import DirPicker from '../DirPicker.vue'
 
 const emit = defineEmits(['saved'])
@@ -170,6 +167,17 @@ const onPickDir = (val) => {
   if (!pickerRow) return
   if (pickerKind.value === 'target') pickerRow.target_dir = val
   else if (pickerKind.value === 'offline') pickerRow.offline_dir = val
+}
+
+const removeRoute = async (idx) => {
+  if (!await confirmAction({
+    title: '删除这条分类映射？',
+    message: '保存后立即生效。',
+    confirmText: '删除',
+    danger: true,
+  })) return
+  routes.value.splice(idx, 1)
+  dirtyRoutes.value = true
 }
 
 const addRoute = () => {

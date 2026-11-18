@@ -38,18 +38,7 @@
           <template #default="{ row }">
             <el-button link type="primary" size="small" :disabled="!row.enabled" @click="previewDedupeRule(row)">扫描预览</el-button>
             <el-button link type="primary" size="small" @click="openDedupeRuleDialog(row)">编辑</el-button>
-            <el-popconfirm
-              title="删除这条清理规则？已产生的清理记录不会被删除。"
-              confirm-button-text="删除"
-              cancel-button-text="取消"
-              confirm-button-type="danger"
-              width="240"
-              @confirm="delDedupeRule(row.id)"
-            >
-              <template #reference>
-                <el-button link type="danger" size="small">删除</el-button>
-              </template>
-            </el-popconfirm>
+            <el-button link type="danger" size="small" @click="delDedupeRule(row.id)">删除</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -336,6 +325,7 @@
 import { computed, inject, ref } from 'vue'
 import { api, errMsg, fmtTime, toast } from '../../api'
 import { runPreviewJob } from '../../composables/previewJob'
+import { confirmAction } from '../../composables/confirmDialog'
 import DirPicker from '../DirPicker.vue'
 
 const {
@@ -465,6 +455,12 @@ async function toggleDedupeRule(row, val) {
 }
 
 async function delDedupeRule(id) {
+  if (!await confirmAction({
+    title: '删除这条清理规则？',
+    message: '已产生的清理记录不会被删除。',
+    confirmText: '删除',
+    danger: true,
+  })) return
   try {
     await api.delete(`/api/media/dedupe/rules/${id}`)
     toast.success('已删除清理规则')

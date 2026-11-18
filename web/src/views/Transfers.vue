@@ -29,13 +29,7 @@
           <el-button type="danger" plain :disabled="!selected.length" @click="delSelected">
             批量删除{{ selected.length ? `（${selected.length}）` : '' }}
           </el-button>
-          <el-popconfirm title="重试全部失败任务？任务将重新入队。" confirm-button-text="重试"
-                         cancel-button-text="取消" confirm-button-type="primary" width="240"
-                         @confirm="retryAll">
-            <template #reference>
-              <el-button type="warning" plain :loading="retrying">批量重试失败任务</el-button>
-            </template>
-          </el-popconfirm>
+          <el-button type="warning" plain :loading="retrying" @click="retryAll">批量重试失败任务</el-button>
         </div>
 
         <el-alert v-if="loadError" type="error" :title="loadError" :closable="false" show-icon
@@ -87,12 +81,8 @@
                 <el-button v-if="row.status === 'success' && row.kind === 'share'
                                 && row.channel && row.message_id"
                            type="primary" text @click="openBackfill(row)">补全</el-button>
-                <el-popconfirm v-if="['queued', 'submitted', 'failed', 'skipped', 'duplicate'].includes(row.status)"
-                               title="删除这条任务记录？仅移除本地记录，115 中的文件不受影响。"
-                               confirm-button-text="删除" cancel-button-text="取消" confirm-button-type="danger"
-                               @confirm="del(row)">
-                  <template #reference><el-button type="danger" text>删除</el-button></template>
-                </el-popconfirm>
+                <el-button v-if="['queued', 'submitted', 'failed', 'skipped', 'duplicate'].includes(row.status)"
+                           type="danger" text @click="del(row)">删除</el-button>
               </div>
             </template>
           </el-table-column>
@@ -152,14 +142,9 @@
             <template #prefix><el-icon><Search /></el-icon></template>
           </el-input>
           <el-button @click="loadLedgerFromFirstPage">查询</el-button>
-          <el-popconfirm v-if="ledgerFilter.batch_id && ledgerBatchAlive > 0"
-                         title="撤销本批次全部已归档文件？文件将移回整理前的源目录。"
-                         confirm-button-text="撤销本批" cancel-button-text="取消" confirm-button-type="danger"
-                         width="300" @confirm="openUndoBatch">
-            <template #reference>
-              <el-button type="danger" plain>撤销本批{{ ledgerBatchAlive ? `（${ledgerBatchAlive}）` : '' }}</el-button>
-            </template>
-          </el-popconfirm>
+          <el-button v-if="ledgerFilter.batch_id && ledgerBatchAlive > 0" type="danger" plain @click="openUndoBatch">
+            撤销本批{{ ledgerBatchAlive ? `（${ledgerBatchAlive}）` : '' }}
+          </el-button>
         </div>
 
         <el-alert type="info" :closable="false" show-icon style="margin-bottom: 10px"
@@ -223,6 +208,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Search } from '@element-plus/icons-vue'
 import { api, errMsg, fmtSize, fmtTime, saveOk, statusLabel } from '../api'
+import { confirmAction } from '../composables/confirmDialog'
 import BackfillDialog from '../components/BackfillDialog.vue'
 
 const route = useRoute()
@@ -333,6 +319,11 @@ const loadFromFirstPage = () => { page.value = 1; load() }
 // 切换每页条数：回到第 1 页并重新加载
 const onSizeChange = () => { page.value = 1; load() }
 const retryAll = async () => {
+  if (!await confirmAction({
+    title: '重试全部失败任务？',
+    message: '所有失败任务将重新进入处理队列。',
+    confirmText: '重试',
+  })) return
   retrying.value = true
   try {
     const { data } = await api.post('/api/transfers/retry-failed')
@@ -381,6 +372,12 @@ const backfillDialogRef = ref(null)
 const openBackfill = (row) => backfillDialogRef.value?.openForTransfer(row)
 
 const del = async (row) => {
+  if (!await confirmAction({
+    title: '删除这条任务记录？',
+    message: '仅移除本地记录，115 中的文件不受影响。',
+    confirmText: '删除',
+    danger: true,
+  })) return
   try {
     await api.delete(`/api/transfers/${row.id}`)
     ElMessage.success('任务记录已删除')

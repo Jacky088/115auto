@@ -10,13 +10,7 @@
           </div>
           <el-tag v-if="dirtyRules" type="danger" effect="plain" size="small">● 有未保存的更改</el-tag>
           <el-button v-if="dirtyRules" type="primary" size="small" style="margin-left: 6px" @click="saveRules">保存规则</el-button>
-          <el-popconfirm title="恢复默认规则？自定义规则将被覆盖，目录映射保留。"
-                         confirm-button-text="恢复默认" cancel-button-text="取消"
-                         confirm-button-type="danger" width="260" @confirm="resetRules">
-            <template #reference>
-              <el-button>恢复默认</el-button>
-            </template>
-          </el-popconfirm>
+          <el-button @click="resetRules">恢复默认</el-button>
           <el-button type="primary" plain @click="helpVisible = true">使用帮助</el-button>
           <el-button type="primary" @click="addRule">添加规则</el-button>
         </div>
@@ -40,11 +34,7 @@
         </el-table-column>
         <el-table-column label="操作" width="84" fixed="right">
           <template #default="{ $index }">
-            <el-popconfirm title="删除这条规则？保存后立即生效。" confirm-button-text="删除"
-                           cancel-button-text="取消" confirm-button-type="danger" width="220"
-                           @confirm="rules.splice($index, 1); dirtyRules = true">
-              <template #reference><el-button type="danger" text>删除</el-button></template>
-            </el-popconfirm>
+            <el-button type="danger" text @click="removeRule($index)">删除</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -108,13 +98,7 @@
           <el-input v-model="blNewValue" class="bl-add-input" type="textarea" :autosize="{ minRows: 1, maxRows: 8 }"
                     :placeholder="blPlaceholder" />
           <el-button type="primary" @click="addBlacklistItem">添加</el-button>
-          <el-popconfirm v-if="blTab === 'keyword'" title="恢复默认关键词？只补齐缺失项，不会删除你添加的内容。"
-                         confirm-button-text="恢复默认" cancel-button-text="取消" confirm-button-type="primary"
-                         width="270" @confirm="blRestoreDefaults">
-            <template #reference>
-              <el-button>恢复默认</el-button>
-            </template>
-          </el-popconfirm>
+          <el-button v-if="blTab === 'keyword'" @click="blRestoreDefaults">恢复默认</el-button>
           <el-button v-if="blTab === 'file_pattern'" @click="regexHelpVisible = true">正则说明</el-button>
         </div>
         <p style="color:var(--text-muted); font-size:var(--fs-caption); margin-top: 0">
@@ -131,11 +115,7 @@
           </el-table-column>
           <el-table-column label="操作" width="84" fixed="right">
             <template #default="{ row }">
-              <el-popconfirm title="删除这条黑名单？删除后不再拦截相关内容。" confirm-button-text="删除"
-                             cancel-button-text="取消" confirm-button-type="danger" width="220"
-                             @confirm="delBlacklistItem(row)">
-                <template #reference><el-button type="danger" text>删除</el-button></template>
-              </el-popconfirm>
+              <el-button type="danger" text @click="delBlacklistItem(row)">删除</el-button>
             </template>
           </el-table-column>
         </el-table>
@@ -173,11 +153,7 @@
             <template #default="{ row }">
               <div class="table-actions">
                 <el-button text type="primary" @click="openDetail(row)">详情</el-button>
-                <el-popconfirm title="放行这条消息？将忽略黑名单重新处理。" confirm-button-text="放行"
-                               cancel-button-text="取消" confirm-button-type="primary" width="240"
-                               @confirm="releaseHit(row)">
-                  <template #reference><el-button type="primary" text>放行</el-button></template>
-                </el-popconfirm>
+                <el-button type="primary" text @click="releaseHit(row)">放行</el-button>
               </div>
             </template>
           </el-table-column>
@@ -271,13 +247,7 @@
           <el-button text @click="copyLinks">复制消息中的资源链接</el-button>
           <div style="display: flex; align-items: center; gap: 10px">
             <el-button @click="detailVisible = false">关闭</el-button>
-            <el-popconfirm title="放行这条消息？将忽略黑名单重新处理。" confirm-button-text="放行"
-                           cancel-button-text="取消" confirm-button-type="primary" width="240"
-                           @confirm="releaseFromDetail">
-              <template #reference>
-                <el-button type="primary">放行并转存</el-button>
-              </template>
-            </el-popconfirm>
+            <el-button type="primary" @click="releaseFromDetail">放行并转存</el-button>
           </div>
         </div>
       </template>
@@ -325,6 +295,7 @@
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { api, errMsg, fmtTime, saveOk, highlightLinks } from '../api'
+import { confirmAction } from '../composables/confirmDialog'
 import { useUnsavedGuard } from '../composables/unsavedGuard'
 
 // ---------- 匹配规则 ----------
@@ -383,6 +354,16 @@ const loadRules = async () => {
   dirtyRules.value = false
 }
 
+const removeRule = async (idx) => {
+  if (!await confirmAction({
+    title: '删除这条规则？',
+    message: '保存后立即生效。',
+    confirmText: '删除',
+    danger: true,
+  })) return
+  rules.value.splice(idx, 1)
+  dirtyRules.value = true
+}
 const addRule = () => {
   rules.value.push({ pattern: '', category: '', priority: 50, enabled: 1 })
   dirtyRules.value = true
@@ -407,6 +388,12 @@ const saveRules = async () => {
   } catch (e) { ElMessage.error(errMsg(e)) }
 }
 const resetRules = async () => {
+  if (!await confirmAction({
+    title: '恢复默认规则？',
+    message: '自定义规则将被覆盖，目录映射保留。',
+    confirmText: '恢复默认',
+    danger: true,
+  })) return
   try {
     const { data } = await api.post('/api/rules/reset')
     await loadRules()
@@ -498,6 +485,12 @@ const addBlacklistItem = async () => {
   } catch (e) { ElMessage.error(errMsg(e)) }
 }
 const blRestoreDefaults = async () => {
+  if (!await confirmAction({
+    title: '恢复默认关键词？',
+    message: '只补齐缺失项，不会删除你添加的内容。',
+    confirmText: '恢复默认',
+    type: 'info',
+  })) return
   try {
     const { data } = await api.post('/api/blacklist/restore-defaults')
     saveOk('已恢复默认', `已补齐 ${data.added} 条缺失的默认关键词`)
@@ -505,6 +498,12 @@ const blRestoreDefaults = async () => {
   } catch (e) { ElMessage.error(errMsg(e)) }
 }
 const delBlacklistItem = async (row) => {
+  if (!await confirmAction({
+    title: '删除这条黑名单？',
+    message: '删除后不再拦截相关内容。',
+    confirmText: '删除',
+    danger: true,
+  })) return
   try {
     await api.delete(`/api/blacklist/${blTab.value}/${row.id}`)
     ElMessage.success('已删除')
@@ -512,11 +511,20 @@ const delBlacklistItem = async (row) => {
   } catch (e) { ElMessage.error(errMsg(e)) }
 }
 const releaseHit = async (row) => {
+  if (!await confirmAction({
+    title: '放行这条消息？',
+    message: '将忽略黑名单重新处理。',
+    confirmText: '放行',
+  })) return false
   try {
     await api.post(`/api/blacklist/hits/${row.id}/release`)
     ElMessage.success('已放行，将忽略黑名单并重新处理该消息')
     loadBlacklist()
-  } catch (e) { ElMessage.error(errMsg(e)) }
+    return true
+  } catch (e) {
+    ElMessage.error(errMsg(e))
+    return false
+  }
 }
 const openDetail = (row) => {
   detailRow.value = row
@@ -524,8 +532,7 @@ const openDetail = (row) => {
 }
 const releaseFromDetail = async () => {
   if (!detailRow.value) return
-  await releaseHit(detailRow.value)
-  detailVisible.value = false
+  if (await releaseHit(detailRow.value)) detailVisible.value = false
 }
 const copyLinks = async () => {
   const text = detailRow.value?.text || ''

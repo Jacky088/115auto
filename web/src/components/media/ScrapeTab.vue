@@ -31,18 +31,7 @@
         <el-table-column label="操作" width="120" align="center">
           <template #default="{ row }">
             <el-button link type="primary" size="small" @click="openScrapeRuleDialog(row)">编辑</el-button>
-            <el-popconfirm
-              title="删除这条刮削目录规则？删除后无法恢复。"
-              confirm-button-text="删除"
-              cancel-button-text="取消"
-              confirm-button-type="danger"
-              width="220"
-              @confirm="delRule(row.id)"
-            >
-              <template #reference>
-                <el-button link type="danger" size="small">删除</el-button>
-              </template>
-            </el-popconfirm>
+            <el-button link type="danger" size="small" @click="confirmDelRule(row.id)">删除</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -136,18 +125,7 @@
         >
           ✨ 批量暂存首选项 (≥50分)
         </el-button>
-        <el-popconfirm
-          title="清理已完结和已忽略的刮削记录？未处理任务将保留。"
-          confirm-button-text="清理"
-          cancel-button-text="取消"
-          confirm-button-type="danger"
-          width="280"
-          @confirm="clearFinishedTasks"
-        >
-          <template #reference>
-            <el-button size="small">清理已完结</el-button>
-          </template>
-        </el-popconfirm>
+        <el-button size="small" @click="clearFinishedTasks">清理已完结</el-button>
         <el-tooltip
           :content="!status.running ? '顶栏系统开关已停止，暂不允许提交执行' : ((status.counts.staged||0)===0 ? '请先在下方至少点选一部影视（状态变为「已选待提交」），再点击此按钮统一入队执行' : '当前有互斥任务正在执行，请稍候')"
           :disabled="!commitDisabled"
@@ -211,19 +189,12 @@
             >
               ↩ 撤销暂存
             </el-button>
-            <el-popconfirm
+            <el-button
               v-if="t.status === 'need_confirm' || t.status === 'staged'"
-              title="忽略这条视频？本轮及后续刮削将不再处理。"
-              confirm-button-text="忽略"
-              cancel-button-text="取消"
-              confirm-button-type="info"
-              width="240"
-              @confirm="ignoreTask(t)"
-            >
-              <template #reference>
-                <el-button size="small" plain>忽略</el-button>
-              </template>
-            </el-popconfirm>
+              size="small"
+              plain
+              @click="ignoreTask(t)"
+            >忽略</el-button>
             <el-button
               v-if="t.local_meta_dir"
               size="small"
@@ -431,6 +402,7 @@
 <script setup>
 import { computed, inject, ref } from 'vue'
 import { api, errMsg, fmtTime, toast } from '../../api'
+import { confirmAction } from '../../composables/confirmDialog'
 
 const {
   status,
@@ -555,7 +527,23 @@ async function unstageTask(task) {
   } catch (e) { toast.error(errMsg(e)) }
 }
 
+async function confirmDelRule(id) {
+  if (!await confirmAction({
+    title: '删除这条刮削目录规则？',
+    message: '删除后无法恢复。',
+    confirmText: '删除',
+    danger: true,
+  })) return
+  await delRule(id)
+}
+
 async function ignoreTask(task) {
+  if (!await confirmAction({
+    title: '忽略这条视频？',
+    message: '本轮及后续刮削将不再处理。',
+    confirmText: '忽略',
+    type: 'info',
+  })) return
   try {
     const { data } = await api.post(`/api/media/tasks/${task.id}/ignore`)
     toast.info(data.msg)
@@ -582,6 +570,12 @@ async function commitStaged() {
 }
 
 async function clearFinishedTasks() {
+  if (!await confirmAction({
+    title: '清理已完结和已忽略的刮削记录？',
+    message: '未处理任务将保留。',
+    confirmText: '清理',
+    danger: true,
+  })) return
   try {
     await api.delete('/api/media/tasks/clear')
     toast.success('已清理历史完结记录')

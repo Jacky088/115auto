@@ -42,7 +42,7 @@
 3. **交互、校验与文案一致性**
    - **禁止面向用户的开发英文术语**：按钮、标题、提示中不得出现 `Dry-Run`、内部变量名（如 `pace_factor`）等开发术语；保留常见行业缩写（如 `TMDB`、`NFO`、`SHA1`、`Cookie`、`MB/GB/TB`）。
    - **数字输入**：统一使用主题默认的左右 `-` / `+` 胶囊步进器（`el-input-number` **禁止**加 `controls-position="right"`），单位紧贴步进器右侧不换行，同时做前端整数/上下界校验与后端 Pydantic 严格校验。
-   - **危险操作视觉规范**：所有删除、清空、覆盖类按钮与二次确认按钮统一使用红色 `danger` 样式。
+   - **二次确认与危险操作视觉规范**：全站所有二次确认统一使用 `confirmAction`（[confirmDialog.js](web/src/composables/confirmDialog.js)）弹出居中 Aurora Glass 确认框（禁止再使用零散的 `el-popconfirm` 气泡）；所有删除、清空、覆盖、停止类确认按钮统一使用红色 `danger` 样式。
 
 ---
 

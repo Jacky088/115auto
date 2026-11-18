@@ -42,18 +42,7 @@
         <el-table-column label="操作" width="120" align="center">
           <template #default="{ row }">
             <el-button link type="primary" size="small" @click="openOrganizeRuleDialog(row)">编辑</el-button>
-            <el-popconfirm
-              title="删除这条整理规则？删除后无法恢复。"
-              confirm-button-text="删除"
-              cancel-button-text="取消"
-              confirm-button-type="danger"
-              width="220"
-              @confirm="delRule(row.id)"
-            >
-              <template #reference>
-                <el-button link type="danger" size="small">删除</el-button>
-              </template>
-            </el-popconfirm>
+            <el-button link type="danger" size="small" @click="confirmDelRule(row.id)">删除</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -161,30 +150,8 @@
         <el-table-column label="操作" width="150" fixed="right">
           <template #default="{ row }">
             <template v-if="!row.undone">
-              <el-popconfirm
-                title="撤销这条整理？文件将重命名并移回源目录。"
-                confirm-button-text="撤销"
-                cancel-button-text="取消"
-                confirm-button-type="warning"
-                width="240"
-                @confirm="undoOne(row.id)"
-              >
-                <template #reference>
-                  <el-button link type="warning" size="small">撤销此条</el-button>
-                </template>
-              </el-popconfirm>
-              <el-popconfirm
-                title="撤销本批次全部整理？文件将批量移回源目录。"
-                confirm-button-text="撤销同批"
-                cancel-button-text="取消"
-                confirm-button-type="danger"
-                width="260"
-                @confirm="undoBatch(row.batch_id)"
-              >
-                <template #reference>
-                  <el-button link type="danger" size="small">撤销同批</el-button>
-                </template>
-              </el-popconfirm>
+              <el-button link type="warning" size="small" @click="undoOne(row.id)">撤销此条</el-button>
+              <el-button link type="danger" size="small" @click="undoBatch(row.batch_id)">撤销同批</el-button>
             </template>
           </template>
         </el-table-column>
@@ -383,6 +350,7 @@
 import { computed, inject, onUnmounted, ref, watch } from 'vue'
 import { api, errMsg, fmtTime, toast } from '../../api'
 import { runPreviewJob } from '../../composables/previewJob'
+import { confirmAction } from '../../composables/confirmDialog'
 
 const {
   status,
@@ -682,8 +650,23 @@ async function openPreview() {
   finally { previewing.value = false }
 }
 
+async function confirmDelRule(id) {
+  if (!await confirmAction({
+    title: '删除这条整理规则？',
+    message: '删除后无法恢复。',
+    confirmText: '删除',
+    danger: true,
+  })) return
+  await delRule(id)
+}
+
 // ---------- 账本撤销 & 本地 NFO 查看 ----------
 async function undoOne(recordId) {
+  if (!await confirmAction({
+    title: '撤销这条整理？',
+    message: '文件将重命名并移回源目录。',
+    confirmText: '撤销',
+  })) return
   try {
     const { data } = await api.post('/api/media/records/undo', { record_id: recordId })
     toast.success(data.msg)
@@ -692,6 +675,12 @@ async function undoOne(recordId) {
 }
 
 async function undoBatch(batchId) {
+  if (!await confirmAction({
+    title: '撤销本批次全部整理？',
+    message: '文件将批量移回源目录。',
+    confirmText: '撤销同批',
+    danger: true,
+  })) return
   try {
     const { data } = await api.post('/api/media/records/undo', { batch_id: batchId })
     toast.success(data.msg)
