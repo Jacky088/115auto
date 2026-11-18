@@ -91,14 +91,12 @@ let previewTimer = null
 
 const openPreviewDialog = (data, fromCache) => {
   previewData.value = data
+  previewFromCache.value = !!fromCache
   const sel = {}
   for (const r of (data?.rules || [])) {
-    for (const it of (r.items || [])) {
-      if (it.id) sel[it.id] = true
-    }
+    for (const it of (r.planned || [])) sel[it.id] = true
   }
   previewSelected.value = sel
-  previewFromCache.value = !!fromCache
   previewVisible.value = true
   startPreviewCountdown()
 }
@@ -112,7 +110,7 @@ const startPreviewCountdown = () => {
     if (remainMs <= 0) {
       stopPreviewCountdown()
       previewVisible.value = false
-      ElMessage.info('预览已暂存：缓存有效期内再次点击「立即排队执行」可直接调出，无需重新扫描')
+      ElMessage.info('预览已暂存，期内点击「立即排队执行」可直接调出')
     }
   }
   tick()
@@ -135,7 +133,7 @@ const runPreview = async () => {
     pv = await runPreviewJob('/api/auto-move/preview', null,
       { text: '正在扫描待整理文件，请勿进行其他操作……（按 Esc 可取消扫描）' })
   } catch (e) {
-    if (e?.silent) return
+    if (e?.silent) return  // 等待超时：已由预览任务给出提示，扫描仍在后台继续
     if (e?.cancelled) ElMessage.info('已取消扫描')
     else ElMessage.error(errMsg(e))
     return
@@ -149,26 +147,27 @@ const runPreview = async () => {
   if (pv.truncated) ElMessage.warning(pv.msg || '本轮扫描达到预算上限，已返回部分结果')
   previewCache.value = { ts: Date.now(), data: pv }
   if (!pv.total_planned) {
-    const anySkip = (pv.rules || []).some(
-      (r) => r.skip_ep > 0 || r.skip_movie > 0 || r.skip_ambiguous > 0 || r.skip_junk > 0 || r.error,
-    )
-    if (!anySkip) {
-      ElMessage.info('预览结果：当前所有启用的规则均没有待移动的文件')
-      return
+    // 0 计划但存在拦截/跳过时仍然弹窗展示统计——帮助定位“为什么没分流”
+    const hasSkips = (pv.rules || []).some((r) =>
+      r.skip_ep > 0 || r.skip_movie > 0 || r.skip_ambiguous > 0 || r.skip_junk > 0 || r.skip_dedup > 0 || r.error)
+    if (hasSkips) {
+      openPreviewDialog(pv, false)
+    } else {
+      ElMessage.info('当前没有需要移动的文件')
     }
+    return
   }
   openPreviewDialog(pv, false)
 }
 
 const previewRows = computed(() => {
-  const out = []
+  const rows = []
   for (const r of (previewData.value?.rules || [])) {
-    const ruleLabel = `${r.source_dir} → ${r.target_dir}`
-    for (const it of (r.items || [])) {
-      out.push({ ...it, rule_label: ruleLabel })
+    for (const it of (r.planned || [])) {
+      rows.push({ rule_label: `${r.source_dir} ➔ ${r.target_dir}`, ...it })
     }
   }
-  return out
+  return rows
 })
 
 const previewSelected = ref({})
@@ -205,7 +204,7 @@ const togglePreviewGroup = (group, val) => {
 
 const confirmRunAfterPreview = async () => {
   if (!previewSelectedIds.value.length) {
-    ElMessage.warning('请至少勾选一个需要移动的文件')
+    ElMessage.warning('请至少勾选一个需要执行分流整理的文件')
     return
   }
   previewConfirming.value = true
@@ -213,11 +212,11 @@ const confirmRunAfterPreview = async () => {
     const { data } = await api.post('/api/auto-move/run', {
       include_ids: previewSelectedIds.value,
     })
-    previewVisible.value = false
-    previewCache.value = null
-    stopPreviewCountdown()
     if (data.ok) {
-      ElMessage.success(data.msg || '已触发文件整理排队执行')
+      previewVisible.value = false
+      previewCache.value = null
+      stopPreviewCountdown()
+      ElMessage.info(data.msg || '已发起排队整理，正在等待转存/云下载队列终点...')
       emit('started', {
         gate_state: data.gate_state || 'draining',
         drain_status: data.drain_status || null,

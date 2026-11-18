@@ -486,10 +486,10 @@ html.dark .dirs-page .unclassified-help {
   color: #fff;
   outline: none;
 }
-.dirs-page :global(.unclassified-tip-popper) {
+.unclassified-tip-popper {
   max-width: calc(100vw - 32px);
 }
-.dirs-page .unclassified-tip-text {
+.unclassified-tip-popper .unclassified-tip-text {
   width: 420px;
   max-width: calc(100vw - 48px);
   white-space: normal;

@@ -956,12 +956,9 @@ const confirmAddMoveRule = async () => {
 
 
 const runAutoMoveNow = async () => {
-  if (!systemRunning.value) {
-    ElMessage.warning('系统处于停止状态，请先点击顶栏「运行」按钮后再执行整理')
-    return
-  }
-  if (moveRules.value.filter(r => r.enabled).length === 0) {
-    ElMessage.warning('当前没有启用的文件整理规则，请先添加或启用规则')
+  if (runningMove.value) return
+  if (!moveSettings.value.auto_move_enabled) {
+    ElMessage.warning('定时文件整理功能尚未开启，请先打开功能总开关！')
     return
   }
   runningMove.value = true
