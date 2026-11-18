@@ -11,35 +11,12 @@
         <div class="stat-value" :style="{ color: c.color }">{{ c.value }}</div>
       </el-card>
     </div>
-    <!-- 第二行：115 空间（环形）+ 分类占比（环形），左右等高并排 -->
-    <div class="charts-grid page-card">
-      <el-card shadow="never" class="chart-card">
-        <template #header>
-          <div class="toolbar" style="margin-bottom: 0">
-            <span>115 空间</span>
-            <span v-if="space.total" class="space-ratio-tag" :style="{ color: spaceColor }">
-              {{ spaceRatioLabel }}
-            </span>
-          </div>
-        </template>
-        <template v-if="space.total">
-          <div ref="spaceRef" class="ring-chart"></div>
-          <div class="space-text center">
-            已用 {{ fmtSize(space.use) }} / {{ fmtSize(space.total) }}
-          </div>
-        </template>
-        <div v-else class="space-empty">{{ space.total === 0 ? '-' : '未登录或读取失败' }}</div>
-      </el-card>
-
-      <el-card shadow="never" class="chart-card">
-        <template #header>
-          <div class="toolbar" style="margin-bottom: 0">
-            <span>最近 20 条转存的分类占比</span>
-          </div>
-        </template>
-        <div ref="pieRef" class="ring-chart"></div>
-      </el-card>
-    </div>
+    <!-- 第二行：115 空间（胶囊进度条 + 三项指标）+ 全历史分类占比（左紧凑圆环 + 右分类明细榜） -->
+    <OverviewCards
+      :space="space"
+      :space-loaded="spaceLoaded"
+      :categories="stats.categories || {}"
+    />
 
     <el-card shadow="never" class="page-card">
       <template #header>
@@ -112,26 +89,19 @@
 </template>
 
 <script setup>
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import { api, fmtSize, fmtTime, statusLabel } from '../api'
 import { usePolling } from '../composables/usePolling'
-// ECharts 按需引入：仪表盘只用饼图 + 标题/提示/图例，避免整库打进来（体积约为原来的 1/4）
-import * as echarts from 'echarts/core'
-import { PieChart } from 'echarts/charts'
-import { LegendComponent, TitleComponent, TooltipComponent } from 'echarts/components'
-import { CanvasRenderer } from 'echarts/renderers'
-
-echarts.use([PieChart, TitleComponent, TooltipComponent, LegendComponent, CanvasRenderer])
+import OverviewCards from '../components/dashboard/OverviewCards.vue'
 
 const stats = ref({})
 const space = ref({ total: 0, use: 0, free: 0, ratio: 0 })
+const spaceLoaded = ref(false)
 const recent = ref([])
 const lines = ref([])
 const wsOk = ref(false)
 const autoScroll = ref(true)
 const logBox = ref(null)
-const pieRef = ref(null)
-let pieChart = null
 
 // ---- 模块筛选：从日志流中出现过的 module 动态收集 ----
 const modFilter = ref('')
@@ -139,12 +109,6 @@ const logModules = ref([])
 const shownLines = computed(() => modFilter.value
   ? lines.value.filter((l) => l.module === modFilter.value)
   : lines.value)
-
-// 空间颜色：<70% 蓝、70~90% 橙、>90% 红
-const spaceColor = computed(() => {
-  const r = space.value.ratio || 0
-  return r >= 90 ? '#ef4444' : r >= 70 ? '#f59e0b' : '#2f6bff'
-})
 
 const cards = computed(() => {
   const s = stats.value
@@ -209,9 +173,6 @@ const load = async () => {
     const [s, r] = await Promise.all([api.get('/api/dashboard/stats'), api.get('/api/dashboard/recent')])
     stats.value = s.data
     recent.value = r.data
-    // 分类占比只用本地数据，先画出来：不能等待 115 空间接口（它会打 115，慢的时候要好几秒）
-    renderPie()
-    retryRender()
   } catch { /* 网络抖动时保留上次数据，不打断定时刷新 */ } finally {
     loading = false
     pageLoading.value = false
@@ -228,110 +189,11 @@ const loadSpace = async () => {
     if (sp.data.space) space.value = sp.data.space
   } catch { /* 未登录或读取失败时保持上次数据 */ } finally {
     spaceLoading = false
+    spaceLoaded.value = true
   }
 }
-
-// ---- 图表渲染公共逻辑 ----
-// 空白修复：容器处于 0 尺寸时（首屏布局未完成/卡片被隐藏/切回标签页等）echarts.init
-// 会得到 0×0 空白画布且不会自愈。这里改为：① 尺寸未就绪时不渲染，由 ResizeObserver
-// 在尺寸可用/变化时触发重画；② 主题切换（html.dark 变化）时用深色配色重画。
-const chartSizeOk = (el) => !!(el && el.clientWidth > 0 && el.clientHeight > 0)
-const chartIsDark = () => document.documentElement.classList.contains('dark')
-const chartTextColor = () => (chartIsDark() ? '#8a97b3' : '#44506b')
-const chartEmptyColor = () => (chartIsDark() ? '#5d6b85' : '#999')
-const chartCardBorder = () => (chartIsDark() ? '#26303f' : '#fff')
-const chartTrackColor = () => (chartIsDark() ? '#26303f' : '#e9eefb')
-
-const renderPie = () => {
-  const el = pieRef.value
-  if (!el || !chartSizeOk(el)) return // 尺寸未就绪：等 ResizeObserver 触发
-  if (!pieChart) pieChart = echarts.init(el)
-  const agg = {}
-  for (const t of recent.value) {
-    const k = t.category || '未分类'
-    agg[k] = (agg[k] || 0) + 1
-  }
-  const data = Object.entries(agg).map(([name, value]) => ({ name, value }))
-  if (!data.length) {
-    pieChart.clear()
-    pieChart.setOption({ title: { text: '暂无数据', left: 'center', top: 'middle',
-      textStyle: { color: chartEmptyColor(), fontSize: 13, fontWeight: 400 } } })
-    return
-  }
-  pieChart.setOption({
-    tooltip: { trigger: 'item', formatter: '{b}: {c} 条 ({d}%)' },
-    legend: { bottom: 0, icon: 'circle', itemWidth: 8, itemHeight: 8,
-              textStyle: { fontSize: 12, color: chartTextColor() } },
-    series: [{
-      type: 'pie', radius: ['48%', '70%'], center: ['50%', '44%'],
-      itemStyle: { borderRadius: 6, borderColor: chartCardBorder(), borderWidth: 2 },
-      label: { show: false },
-      data,
-      color: ['#4f6bff', '#8b5cf6', '#22c1dc', '#f59e0b', '#ef4444', '#5d8bff', '#10b981'],
-    }],
-  }, true)
-}
-
-// 115 空间环形图（与分类占比同款圆环风格；颜色按占用率：<70 蓝 / 70~90 黄 / ≥90 红）
-let spaceChart = null
-const spaceRef = ref(null)
-const spaceRatioLabel = computed(() => {
-  const r = space.value.ratio || 0
-  return r >= 90 ? '空间告急' : r >= 70 ? '空间较满' : '空间充足'
-})
-const renderSpace = () => {
-  const el = spaceRef.value
-  if (!el || !chartSizeOk(el) || !space.value.total) return // 尺寸未就绪或无数据：等 ResizeObserver
-  if (!spaceChart) spaceChart = echarts.init(el)
-  const used = space.value.ratio || 0
-  spaceChart.setOption({
-    tooltip: { trigger: 'item', formatter: `{d}% 已使用（${fmtSize(space.value.use)} / ${fmtSize(space.value.total)}）` },
-    title: {
-      text: `${used}%`, subtext: '已使用',
-      left: 'center', top: '36%',
-      textStyle: { fontSize: 24, fontWeight: 700, color: spaceColor.value },
-      subtextStyle: { fontSize: 12, color: chartEmptyColor() },
-    },
-    series: [{
-      type: 'pie', radius: ['62%', '80%'], center: ['50%', '48%'],
-      startAngle: 90, silent: false, label: { show: false },
-      itemStyle: { borderRadius: 8, borderColor: chartCardBorder(), borderWidth: 2 },
-      data: [
-        { value: used, itemStyle: { color: spaceColor.value } },
-        { value: Math.max(100 - used, 0), itemStyle: { color: chartTrackColor() } },
-      ],
-    }],
-  }, true)
-}
-
-const renderAll = () => { renderPie(); renderSpace() }
-
-// 路由切换/首屏布局未完成时容器可能是 0 尺寸：短间隔重试几次，避免图表空白且不再触发 ResizeObserver
-let renderRetryTimer = null
-const retryRender = (tries = 5) => {
-  clearTimeout(renderRetryTimer)
-  // 实例若在 0×0 容器上初始化过，setOption 不会自愈，必须显式 resize
-  if (pieChart && chartSizeOk(pieRef.value)) pieChart.resize()
-  if (spaceChart && chartSizeOk(spaceRef.value)) spaceChart.resize()
-  renderAll()
-  const piePending = !chartSizeOk(pieRef.value)
-  const spacePending = !!space.value.total && !chartSizeOk(spaceRef.value)
-  if ((piePending || spacePending) && tries > 0) {
-    renderRetryTimer = setTimeout(() => retryRender(tries - 1), 150)
-  }
-}
-
-// 空间图容器只在有数据时才渲染出来：挂载后补观察，否则尺寸变化不会触发重画
-watch(spaceRef, (el) => {
-  if (!el) return
-  if (ro) ro.observe(el)
-  nextTick(() => retryRender())
-})
 
 let tick = 0
-let ro = null
-let roTimer = null
-let themeObs = null
 // 10 秒刷新统计/最近记录；115 空间每 60 秒才查一次，避免频繁请求 115 接口。
 // 页面不可见时轮询自动暂停（切回标签页立即补一次）
 const statPoll = usePolling(() => {
@@ -344,50 +206,20 @@ onMounted(() => {
   loadSpace()
   connectWs()
   statPoll.start()
-  window.addEventListener('resize', onResize)
-  // ResizeObserver：容器尺寸从 0 变为可用（或任何尺寸变化）时自动重画 —— 空白修复的关键
-  ro = new ResizeObserver(() => {
-    clearTimeout(roTimer)
-    roTimer = setTimeout(() => retryRender(), 100) // 防抖，避免拖拽窗口时为频繁重画
-  })
-  if (pieRef.value) ro.observe(pieRef.value)
-  if (spaceRef.value) ro.observe(spaceRef.value)
-  nextTick(() => retryRender()) // 首屏补画：路由/卡片动画结束后尺寸才稳定
-  // 主题切换（html.dark 类变化）时用新配色重画图表
-  themeObs = new MutationObserver(() => renderAll())
-  themeObs.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] })
 })
 onUnmounted(() => {
   disposed = true
   statPoll.stop()
   clearTimeout(wsTimer)
-  clearTimeout(roTimer)
-  clearTimeout(renderRetryTimer)
-  window.removeEventListener('resize', onResize)
-  if (ro) ro.disconnect()
-  if (themeObs) themeObs.disconnect()
   if (ws) ws.onclose = null
   if (ws) ws.close()
-  if (pieChart) pieChart.dispose()
-  if (spaceChart) spaceChart.dispose()
 })
-const onResize = () => { if (pieChart) pieChart.resize(); if (spaceChart) spaceChart.resize() }
 </script>
 
 <style scoped>
 .stat-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
 @media (max-width: 1100px) { .stat-grid { grid-template-columns: repeat(2, 1fr); } }
 @media (max-width: 480px) { .stat-grid { grid-template-columns: 1fr; } }
-/* 图表行：空间（左）+ 分类占比（右）等高并排 */
-.charts-grid { display: grid; grid-template-columns: 1fr 1.4fr; gap: 16px; align-items: stretch; }
-@media (max-width: 900px) { .charts-grid { grid-template-columns: 1fr; } }
-.chart-card { display: flex; flex-direction: column; }
-.chart-card :deep(.el-card__body) { flex: 1; display: flex; flex-direction: column; }
-.ring-chart { width: 100%; height: 280px; flex: 1; min-height: 240px; }
-@media (max-width: 768px) { .ring-chart { height: 220px; min-height: 200px; } }
-.space-text.center { text-align: center; margin-top: 0; padding-bottom: 8px; }
-.space-ratio-tag { margin-left: auto; font-size: var(--fs-caption); font-weight: 600; }
-.space-empty { text-align: center; color: var(--text-muted); font-size: var(--fs-body); padding: 60px 0; }
 .stat-card :deep(.el-card__body) { padding: 18px; }
 .stat-top { display: flex; align-items: center; gap: 10px; }
 .stat-icon {
@@ -411,9 +243,4 @@ const onResize = () => { if (pieChart) pieChart.resize(); if (spaceChart) spaceC
   background: var(--grad-brand); border-color: transparent; color: #fff;
   box-shadow: 0 3px 10px rgba(79, 107, 255, .35);
 }
-.space-bar { height: 10px; border-radius: 5px; background: #e9eefb; margin-top: 16px; overflow: hidden; }
-.space-used { height: 100%; border-radius: 5px; transition: width .6s ease; min-width: 3%; }
-.space-text { font-size: var(--fs-caption); color: var(--saas-text-sub); margin-top: 8px; }
-.space-ratio { float: right; font-weight: 600; }
-.pie-chart { width: 100%; height: 280px; }
 </style>

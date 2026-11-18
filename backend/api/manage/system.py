@@ -301,6 +301,50 @@ def system_doctor(_=Depends(require_user)):
 
 
 # ---------- dashboard ----------
+def _category_breakdown() -> dict:
+    """按分类汇总有效转存（已成功 + 已提交云下载）的条数与累计体积。
+
+    单次聚合查询同时返回全部、近 30 天与近 7 天三个口径，零冗余存储、毫秒级开销。
+    """
+    now = time.time()
+    cut_30d = now - 30 * 86400
+    cut_7d = now - 7 * 86400
+    rows = db.query(
+        "SELECT COALESCE(NULLIF(TRIM(category), ''), '未分类') AS category,"
+        " COUNT(*) AS cnt_all,"
+        " COALESCE(SUM(CASE WHEN size > 0 THEN size ELSE 0 END), 0) AS size_all,"
+        " SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END) AS cnt_30d,"
+        " COALESCE(SUM(CASE WHEN created_at >= ? AND size > 0 THEN size ELSE 0 END), 0) AS size_30d,"
+        " SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END) AS cnt_7d,"
+        " COALESCE(SUM(CASE WHEN created_at >= ? AND size > 0 THEN size ELSE 0 END), 0) AS size_7d"
+        " FROM transfers"
+        " WHERE status IN ('success', 'submitted')"
+        " GROUP BY COALESCE(NULLIF(TRIM(category), ''), '未分类')",
+        (cut_30d, cut_30d, cut_7d, cut_7d),
+    )
+
+    def _pack(cnt_key: str, size_key: str) -> dict:
+        items = []
+        total = 0
+        total_size = 0
+        for r in rows:
+            cnt = int(r[cnt_key] or 0)
+            if cnt <= 0:
+                continue
+            sz = int(r[size_key] or 0)
+            items.append({"category": str(r["category"]), "count": cnt, "size": sz})
+            total += cnt
+            total_size += sz
+        items.sort(key=lambda x: (-x["count"], -x["size"], x["category"]))
+        return {"total": total, "total_size": total_size, "items": items}
+
+    return {
+        "all": _pack("cnt_all", "size_all"),
+        "30d": _pack("cnt_30d", "size_30d"),
+        "7d": _pack("cnt_7d", "size_7d"),
+    }
+
+
 @router.get("/dashboard/stats")
 def dashboard(_=Depends(require_user)):
     from datetime import datetime
@@ -323,6 +367,7 @@ def dashboard(_=Depends(require_user)):
         "channels": channels,
         "cookie_ok": db.get_setting("cookie_ok", None),
         "userbot_ok": db.get_setting("userbot_ok", None),
+        "categories": _category_breakdown(),
     }
 
 
