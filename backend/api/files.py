@@ -1,4 +1,8 @@
-"""115 文件浏览器 API：查阅/新建目录/重命名/删除/移动/复制（基于 p115client 官方自用接口）。"""
+"""115 文件浏览器 API：查阅/按需统计目录大小/排序筛选/新建目录/重命名/删除/移动/复制。"""
+import html
+import threading
+import time
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from p115pickcode import to_id as _pickcode_to_id
 
@@ -7,12 +11,44 @@ from .deps import require_user
 
 router = APIRouter(prefix="/api/files")
 
+# 允许的服务端排序字段（严格排除「按目录总大小排序」，115 列表接口本身不支持目录大小）
+_SORT_FIELD_MAP = {
+    "name": "file_name",
+    "mtime": "user_utime",
+    "ptime": "user_ptime",
+}
+
+# 按需目录统计缓存（fs_category_get）：单目录按需查 + 5 分钟缓存 + 轻量间隔节流，防止连点触发风控
+_STAT_TTL = 300.0
+_STAT_MAX_ENTRIES = 500
+_STAT_MIN_GAP = 0.5
+_stat_cache_lock = threading.Lock()
+_stat_cache: dict[int, tuple[float, dict]] = {}
+_name_cache: dict[int, tuple[float, str]] = {}
+_stat_call_lock = threading.Lock()
+_last_stat_at = 0.0
+
+
+def _clear_stat_cache():
+    with _stat_cache_lock:
+        _stat_cache.clear()
+        _name_cache.clear()
+
 
 def _int(v, default: int = 0) -> int:
     try:
         return int(v)
     except (TypeError, ValueError):
         return default
+
+
+def _opt_int(v) -> int | None:
+    if v is None or v == "":
+        return None
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
 
 
 def _numeric_id(f: dict, pick_code: str) -> int:
@@ -44,6 +80,7 @@ def _item(f: dict) -> dict:
         "size": _int(f.get("file_size") or f.get("fs") or f.get("s")),
         "mtime": _int(f.get("update_time") or f.get("user_utime")
                       or f.get("user_ptime") or f.get("t")),
+        "ctime": _int(f.get("user_ptime") or f.get("tp") or f.get("create_time")),
         "parent_id": str(f.get("pid") if f.get("pid") is not None
                          else f.get("parent_id") if f.get("parent_id") is not None
                          else f.get("cid") if f.get("cid") is not None else ""),
@@ -56,11 +93,9 @@ def _name(p: dict) -> str:
     return p.get("name") or p.get("n") or p.get("file_name") or p.get("fn") or ""
 
 
-def _sorted_items(raw) -> list[dict]:
-    """目录优先、同类按名称排序，保证前端展示稳定。"""
-    items = [_item(f) for f in (raw or []) if isinstance(f, dict)]
-    items.sort(key=lambda x: (not x["is_dir"], (x["name"] or "").lower()))
-    return items
+def _parse_items(raw) -> list[dict]:
+    """保留 115 服务端排序结果（fc_mix=0 已保证目录置顶），仅做字段归一。"""
+    return [_item(f) for f in (raw or []) if isinstance(f, dict)]
 
 
 def _breadcrumb(resp: dict, cid: int) -> list[dict]:
@@ -164,6 +199,16 @@ def _check(resp, action: str) -> dict:
     return resp
 
 
+def _check_category_resp(resp, action: str) -> dict:
+    """校验 fs_category_get 响应：115 /category/get 成功时默认不带 state 字段，失败才带 state=false 或 errno。"""
+    if not isinstance(resp, dict) or not resp:
+        raise HTTPException(400, f"{action}失败: 115 返回数据异常")
+    if resp.get("state") is False or resp.get("state") == 0 or _int(resp.get("errno"), 0) != 0:
+        msg = resp.get("error") or resp.get("message") or str(resp)[:200]
+        raise HTTPException(400, f"{action}失败: {msg}")
+    return resp
+
+
 def _call_impl(action: str, func, serialize: bool, *args, **kwargs) -> dict:
     """调用 115 接口并统一将网络/业务异常转成可读的 400 错误。"""
     try:
@@ -212,24 +257,181 @@ def _target(body: dict) -> int:
 
 
 @router.get("/list")
-def list_files(cid: int = Query(0, ge=0), search: str = Query("", max_length=200),
-               page: int = Query(1, ge=1), size: int = Query(100, ge=1, le=500),
-               _=Depends(require_user)):
-    """列出目录内容（或全局搜索）。"""
+def list_files(
+    cid: int = Query(0, ge=0),
+    search: str = Query("", max_length=200),
+    search_scope: str = Query("all"),
+    sort: str = Query("name"),
+    order: str = Query("asc"),
+    file_type: int = Query(0, ge=0, le=7),
+    page: int = Query(1, ge=1),
+    size: int = Query(100, ge=1, le=500),
+    _=Depends(require_user),
+):
+    """列出目录内容（支持服务端排序、类型筛选与当前目录/全盘搜索）。"""
     client = _client()
-    if search:
-        resp = _call_read("搜索", client.fs_search,
-                     {"search_value": search, "limit": size, "offset": (page - 1) * size})
-        items = _sorted_items(resp.get("data"))
-        return {"items": items, "total": _int(resp.get("count"), len(items)), "cid": -1, "path": []}
+    order_col = _SORT_FIELD_MAP.get((sort or "").strip().lower(), "file_name")
+    asc_flag = 0 if (order or "").strip().lower() == "desc" else 1
+    scope = "dir" if (search_scope or "").strip().lower() == "dir" else "all"
 
-    resp = _call_read("读取目录", client.fs_files,
-                 {"cid": cid, "limit": size, "offset": (page - 1) * size,
-                  "o": "file_name", "asc": 1, "show_dir": 1,
-                  "fc_mix": 0, "custom_order": 1})
-    items = _sorted_items(resp.get("data"))
-    return {"items": items, "total": _int(resp.get("count"), len(items)),
-            "cid": cid, "path": _breadcrumb(resp, cid)}
+    if search:
+        payload = {
+            "search_value": search,
+            "limit": size,
+            "offset": (page - 1) * size,
+            "o": order_col,
+            "asc": asc_flag,
+            "fc_mix": 0,
+            "count_folders": 1,
+        }
+        if scope == "dir" and cid > 0:
+            payload["cid"] = cid
+        if file_type > 0:
+            payload["type"] = file_type
+        resp = _call_read("搜索", client.fs_search, payload)
+        items = _parse_items(resp.get("data"))
+        return {
+            "items": items,
+            "total": _int(resp.get("count"), len(items)),
+            "folder_count": _opt_int(resp.get("folder_count")),
+            "file_count": _opt_int(resp.get("file_count")),
+            "cid": cid if scope == "dir" else -1,
+            "path": [],
+        }
+
+    payload = {
+        "cid": cid,
+        "limit": size,
+        "offset": (page - 1) * size,
+        "o": order_col,
+        "asc": asc_flag,
+        "show_dir": 1,
+        "fc_mix": 0,
+        "custom_order": 1,
+        "count_folders": 1,
+    }
+    if file_type > 0:
+        # 必须显式 cur=1：否则 115 在指定 type>0 时默认递归遍历整个目录树
+        payload["type"] = file_type
+        payload["cur"] = 1
+    resp = _call_read("读取目录", client.fs_files, payload)
+    items = _parse_items(resp.get("data"))
+    return {
+        "items": items,
+        "total": _int(resp.get("count"), len(items)),
+        "folder_count": _opt_int(resp.get("folder_count")),
+        "file_count": _opt_int(resp.get("file_count")),
+        "cid": cid,
+        "path": _breadcrumb(resp, cid),
+    }
+
+
+@router.get("/stat")
+def stat_dir(
+    cid: int = Query(..., gt=0),
+    refresh: bool = Query(False),
+    _=Depends(require_user),
+):
+    """按需统计单个目录的总大小、文件数与子目录数（带 5 分钟缓存与轻量间隔节流）。"""
+    global _last_stat_at
+    now = time.monotonic()
+    if not refresh:
+        with _stat_cache_lock:
+            hit = _stat_cache.get(cid)
+            if hit and hit[0] > now:
+                return {**hit[1], "cached": True}
+
+    client = _client()
+    with _stat_call_lock:
+        # 复查缓存：防止同目录并发点击重复打 115
+        now = time.monotonic()
+        if not refresh:
+            with _stat_cache_lock:
+                hit = _stat_cache.get(cid)
+                if hit and hit[0] > now:
+                    return {**hit[1], "cached": True}
+        wait = (_last_stat_at + _STAT_MIN_GAP) - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
+        try:
+            resp = client.fs_category_get({"cid": cid})
+        except Exception as e:
+            raise HTTPException(400, f"统计目录失败: {str(e)[:150]}")
+        finally:
+            _last_stat_at = time.monotonic()
+
+    checked = _check_category_resp(resp, "统计目录")
+    info = checked.get("data") if isinstance(checked.get("data"), dict) else checked
+    size_bytes = _int(info.get("size_byte") if info.get("size_byte") is not None else info.get("size"), 0)
+    raw_size_text = str(info.get("size") or "").strip()
+
+    # 从 paths 提取上级目录名与完整路径（搜索模式下可零额外请求补全上级名称与路径）
+    parent_name = ""
+    full_path = ""
+    raw_paths = info.get("paths")
+    if isinstance(raw_paths, list) and raw_paths:
+        segs: list[str] = []
+        last_id = 0
+        last_name = ""
+        for p in raw_paths:
+            if not isinstance(p, dict):
+                continue
+            pid = _int(p.get("file_id") if p.get("file_id") is not None else p.get("cid"), 0)
+            pname = html.unescape(str(p.get("file_name") or p.get("name") or "")).strip()
+            last_id, last_name = pid, pname
+            if pid != 0 and pname:
+                segs.append(pname)
+        parent_name = "根目录" if last_id == 0 else last_name
+        item_name = html.unescape(str(info.get("file_name") or "")).strip()
+        if item_name:
+            full_path = "/" + "/".join([*segs, item_name])
+
+    result = {
+        "cid": str(cid),
+        "size": size_bytes,
+        "size_text": raw_size_text if not raw_size_text.isdigit() else "",
+        "file_count": _int(info.get("count"), 0),
+        "folder_count": _int(info.get("folder_count"), 0),
+        "parent_name": parent_name,
+        "full_path": full_path,
+    }
+    with _stat_cache_lock:
+        if len(_stat_cache) >= _STAT_MAX_ENTRIES:
+            oldest_cid = min(_stat_cache, key=lambda k: _stat_cache[k][0])
+            _stat_cache.pop(oldest_cid, None)
+        _stat_cache[cid] = (time.monotonic() + _STAT_TTL, result)
+    return {**result, "cached": False}
+
+
+@router.get("/name")
+def get_item_name(
+    cid: int = Query(..., ge=0),
+    _=Depends(require_user),
+):
+    """按 ID 轻量查询单个目录/文件名称（走 fs_file_skim，不统计目录大小，带 5 分钟缓存）。"""
+    if cid == 0:
+        return {"cid": "0", "name": "根目录", "cached": True}
+    now = time.monotonic()
+    with _stat_cache_lock:
+        hit = _name_cache.get(cid)
+        if hit and hit[0] > now:
+            return {"cid": str(cid), "name": hit[1], "cached": True}
+
+    client = _client()
+    resp = _call_read("查询名称", client.fs_file_skim, cid)
+    rows = resp.get("data")
+    name = ""
+    if isinstance(rows, list) and rows and isinstance(rows[0], dict):
+        name = html.unescape(str(rows[0].get("file_name") or rows[0].get("fn") or rows[0].get("n") or "")).strip()
+    elif isinstance(rows, dict):
+        name = html.unescape(str(rows.get("file_name") or rows.get("fn") or rows.get("n") or "")).strip()
+    with _stat_cache_lock:
+        if len(_name_cache) >= _STAT_MAX_ENTRIES:
+            oldest_cid = min(_name_cache, key=lambda k: _name_cache[k][0])
+            _name_cache.pop(oldest_cid, None)
+        if name:
+            _name_cache[cid] = (time.monotonic() + _STAT_TTL, name)
+    return {"cid": str(cid), "name": name, "cached": False}
 
 
 @router.post("/mkdir")
@@ -244,6 +446,7 @@ def mkdir(body: dict, _=Depends(require_user)):
     resp = _call("新建目录", client.fs_mkdir,
                  {"cname": name, "pid": _int(body.get("pid"), 0)})
     pan.clear_dir_cache()
+    _clear_stat_cache()
     data = resp.get("data", {}) or {}
     cid = data.get("file_id") or data.get("cid") or data.get("fid") or resp.get("cid")
     return {"ok": True, "cid": cid, "name": name}
@@ -261,6 +464,7 @@ def rename(body: dict, _=Depends(require_user)):
         raise HTTPException(400, "文件名过长")
     _call("重命名", client.fs_rename, (fid, name))
     pan.clear_dir_cache()
+    _clear_stat_cache()
     return {"ok": True}
 
 
@@ -271,6 +475,7 @@ def delete(body: dict, _=Depends(require_user)):
     ids = _ids(body)
     _call("删除", client.fs_delete, ids)
     pan.clear_dir_cache()
+    _clear_stat_cache()
     return {"ok": True, "count": len(ids)}
 
 
@@ -283,6 +488,7 @@ def move(body: dict, _=Depends(require_user)):
         raise HTTPException(400, "不能将目录移动到其自身内部")
     _call("移动", client.fs_move, ids, pid=target)
     pan.clear_dir_cache()
+    _clear_stat_cache()
     return {"ok": True, "count": len(ids)}
 
 
@@ -294,4 +500,57 @@ def copy_files(body: dict, _=Depends(require_user)):
     if str(target) in ids:
         raise HTTPException(400, "不能将目录复制到其自身内部")
     _call("复制", client.fs_copy, ids, pid=target)
+    _clear_stat_cache()
+    return {"ok": True, "count": len(ids)}
+
+
+def _rb_item(it: dict) -> dict:
+    """统一回收站条目结构。"""
+    is_dir = (str(it.get("type") or "") == "2"
+              or str(it.get("ico") or "").lower() == "folder"
+              or it.get("fc") in (0, "0"))
+    return {
+        "id": str(it.get("id") or it.get("rid") or ""),
+        "name": html.unescape(str(it.get("file_name") or it.get("fn") or it.get("n") or "")).strip(),
+        "is_dir": is_dir,
+        "size": _int(it.get("file_size") or it.get("fs") or it.get("s"), 0),
+        "dtime": _int(it.get("dtime") or it.get("delete_time") or it.get("t"), 0),
+        "parent_name": html.unescape(str(it.get("parent_name") or "")).strip(),
+        "parent_id": str(it.get("cid") if it.get("cid") is not None else ""),
+    }
+
+
+@router.get("/recyclebin")
+def list_recyclebin(
+    page: int = Query(1, ge=1),
+    size: int = Query(50, ge=1, le=200),
+    _=Depends(require_user),
+):
+    """分页查看 115 回收站（按删除时间倒序，只读不触发清空）。"""
+    client = _client()
+    resp = _call_read(
+        "读取回收站",
+        client.recyclebin_list,
+        {"limit": size, "offset": (page - 1) * size, "o": "dtime", "asc": 0},
+    )
+    raw = resp.get("data")
+    if isinstance(raw, dict):
+        rows = list(raw.values())
+    elif isinstance(raw, list):
+        rows = raw
+    else:
+        rows = []
+    items = [_rb_item(x) for x in rows if isinstance(x, dict)]
+    items = [x for x in items if x["id"]]
+    return {"items": items, "total": _int(resp.get("count"), len(items))}
+
+
+@router.post("/recyclebin/revert")
+def revert_recyclebin(body: dict, _=Depends(require_user)):
+    """从 115 回收站还原选中的条目回原目录。body: {ids: [...]}"""
+    client = _client()
+    ids = _ids(body, max_items=100)
+    _call("还原文件", client.recyclebin_revert, ids)
+    pan.clear_dir_cache()
+    _clear_stat_cache()
     return {"ok": True, "count": len(ids)}

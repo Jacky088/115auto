@@ -826,6 +826,31 @@ html.dark .el-empty__description p {
   font-weight: 600;
 }
 
+/* ---- 危险操作统一醒目红（下拉菜单删除项 + MessageBox 红色确认按钮） ---- */
+.el-dropdown-menu__item.danger-dropdown-item {
+  color: var(--el-color-danger) !important;
+  font-weight: 500;
+}
+.el-dropdown-menu__item.danger-dropdown-item:hover,
+.el-dropdown-menu__item.danger-dropdown-item:focus {
+  background-color: rgba(245, 108, 108, .12) !important;
+  color: var(--el-color-danger) !important;
+}
+.el-button.danger-confirm-btn {
+  --btn-type-color: var(--el-color-danger);
+  background: var(--el-color-danger) !important;
+  border-color: var(--el-color-danger) !important;
+  color: #ffffff !important;
+  box-shadow: none !important;
+}
+.el-button.danger-confirm-btn:hover,
+.el-button.danger-confirm-btn:focus-visible,
+.el-button.danger-confirm-btn:active {
+  background: color-mix(in srgb, var(--el-color-danger) 84%, #000) !important;
+  border-color: transparent !important;
+  color: #ffffff !important;
+}
+
 /* ========================================================
    全局弹窗/抽屉关闭按钮（统一规范）：
    1:1 精致正圆、内收边距防裁剪、醒目红底 + 纯红图标、悬停烈焰红发光
@@ -1348,6 +1373,20 @@ html.dark .el-dropdown-menu__item:hover,
 html.dark .el-dropdown-menu__item:focus {
   background-color: rgba(79, 107, 255, .24) !important;
   color: #d1dcff !important;
+}
+html.dark .el-dropdown-menu__item.danger-dropdown-item {
+  color: #ff7878 !important;
+}
+html.dark .el-dropdown-menu__item.danger-dropdown-item:hover,
+html.dark .el-dropdown-menu__item.danger-dropdown-item:focus {
+  background-color: rgba(245, 108, 108, .22) !important;
+  color: #ff9494 !important;
+}
+html.dark .el-button.danger-confirm-btn:hover,
+html.dark .el-button.danger-confirm-btn:focus-visible,
+html.dark .el-button.danger-confirm-btn:active {
+  background: color-mix(in srgb, var(--el-color-danger) 85%, #fff) !important;
+  color: #ffffff !important;
 }
 html.dark .el-select-dropdown__item.is-selected {
   background-color: rgba(79, 107, 255, .36) !important;

@@ -67,7 +67,7 @@ const props = defineProps({
   allowSkip: Boolean,   // 是否提供「跳过（不转存）」选项
   allowEmpty: Boolean,  // 是否提供「清空」选项（如云下载目录留空 = 跟随分享转存）
 })
-const emit = defineEmits(['update:modelValue', 'pick'])
+const emit = defineEmits(['update:modelValue', 'pick', 'pick-node'])
 
 const router = useRouter()
 const loginErr = ref('')
@@ -76,6 +76,7 @@ const loadErr = ref('')
 const crumbs = ref([{ id: 0, name: '根目录' }])
 const dirs = ref([])
 const selectedPath = ref('')
+const selectedNode = ref(null)
 
 const currentCid = computed(() => crumbs.value[crumbs.value.length - 1].id)
 // 根目录表示为 /；其余按面包屑逐级拼接
@@ -93,6 +94,7 @@ const onOpen = () => {
   loginErr.value = ''
   loadErr.value = ''
   selectedPath.value = ''
+  selectedNode.value = null
   crumbs.value = [{ id: 0, name: '根目录' }]
   load(0)
 }
@@ -125,10 +127,11 @@ const load = async (cid = 0) => {
   }
 }
 
-const _resetPick = () => { selectedPath.value = '' }
+const _resetPick = () => { selectedPath.value = ''; selectedNode.value = null }
 
 const select = (d) => {
   selectedPath.value = rowPath(d)
+  selectedNode.value = { cid: String(d.id), name: d.name, path: selectedPath.value }
 }
 const enter = (d) => {
   crumbs.value = [...crumbs.value, { id: d.id, name: d.name }]
@@ -158,12 +161,23 @@ const showMkdir = async () => {
     // 创建成功后自动勾选新文件夹，方便直接确定
     if (data?.cid != null && String(data.cid) !== '0') {
       selectedPath.value = rowPath({ name })
+      selectedNode.value = { cid: String(data.cid), name, path: selectedPath.value }
     }
   } catch (e) { ElMessage.error(errMsg(e)) }
 }
 
 const pickSpecial = (val) => { emit('pick', val); emitVisible(false) }
-const confirm = () => { emit('pick', pendingValue.value); emitVisible(false) }
+const confirm = () => {
+  const cur = crumbs.value[crumbs.value.length - 1]
+  const node = selectedNode.value || {
+    cid: String(cur?.id ?? '0'),
+    name: cur?.name || '根目录',
+    path: currentPath.value,
+  }
+  emit('pick', pendingValue.value)
+  emit('pick-node', node)
+  emitVisible(false)
+}
 
 // 按钮禁用条件：仅当「当前确实因未登录而看不到任何目录」时才禁用。
 // 浏览正常（哪怕曾出现过瞬时登录错误）时一律可点，点击失败会有具体报错提示。

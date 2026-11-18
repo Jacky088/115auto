@@ -405,7 +405,7 @@
                   title="清理已完结和已忽略的刮削记录？未处理任务将保留。"
                   confirm-button-text="清理"
                   cancel-button-text="取消"
-                  confirm-button-type="info"
+                  confirm-button-type="danger"
                   width="280"
                   @confirm="clearFinishedTasks"
                 >
@@ -1373,7 +1373,7 @@
         <el-button :loading="dedupePreviewing" @click="rescanDedupe">重新扫描</el-button>
         <el-button @click="dedupePreview.visible = false">取消</el-button>
         <el-button
-          type="primary"
+          type="danger"
           :loading="dedupeRunning"
           :disabled="!dedupeDeleteCount"
           @click="confirmDedupe"

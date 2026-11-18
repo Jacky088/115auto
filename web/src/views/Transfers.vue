@@ -351,7 +351,8 @@ const delSelected = async () => {
   try {
     await ElMessageBox.confirm(
       '仪表盘的最近转存记录将同步移除。',
-      `删除选中的 ${n} 条任务记录？`, { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' })
+      `删除选中的 ${n} 条任务记录？`,
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消', confirmButtonClass: 'danger-confirm-btn' })
   } catch { return }  // 用户取消
   try {
     const { data } = await api.post('/api/transfers/batch-delete',

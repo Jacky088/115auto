@@ -805,7 +805,7 @@ const doRestore = async () => {
       `备份导出于 ${summary.exported_at || '未知时间'}（${kb} KB），包含：` +
       `设置 ${summary.settings || 0} 项、${fmtBackupCounts(summary)}。` +
       `恢复将覆盖当前全部业务数据（登录密码与通知密钥不变；新版备份含待刮削任务，旧版备份会清空现有队列）。恢复后系统将回到停止状态。`,
-      '恢复备份？', { confirmButtonText: '恢复', cancelButtonText: '取消', type: 'warning' })
+      '恢复备份？', { confirmButtonText: '恢复', cancelButtonText: '取消', type: 'warning', confirmButtonClass: 'danger-confirm-btn' })
     const { data: resp } = isCompressed
       ? await api.post('/api/backup/restore', rawBuf, {
           timeout: 120000,
@@ -962,7 +962,7 @@ const doBundleRestore = async () => {
       `${credLine}。\n${metaLine}。\n` +
       `恢复将整库替换当前数据，系统回到停止状态。`,
       '从整机迁移包恢复？',
-      { confirmButtonText: '覆盖恢复', cancelButtonText: '取消', type: 'warning' },
+      { confirmButtonText: '覆盖恢复', cancelButtonText: '取消', type: 'warning', confirmButtonClass: 'danger-confirm-btn' },
     )
 
     bundleProgress.value = 0
