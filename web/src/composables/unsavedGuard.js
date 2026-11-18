@@ -22,7 +22,7 @@ export function useUnsavedGuard(dirty) {
       await ElMessageBox.confirm(
         '未保存的修改将丢失。',
         '离开当前页面？',
-        { confirmButtonText: '离开并丢弃', cancelButtonText: '留在本页', type: 'warning' },
+        { confirmButtonText: '离开并丢弃', cancelButtonText: '留在本页', type: 'warning', confirmButtonClass: 'danger-confirm-btn' },
       )
       confirmed = true   // 用户确认：放行导航（更改即被丢弃）
       return true
