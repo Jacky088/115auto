@@ -4,7 +4,7 @@ from __future__ import annotations
 import time
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from .. import database as db
 from ..core import transfer_gate
@@ -14,12 +14,37 @@ from .manage import require_user
 router = APIRouter(prefix="/api/media/dedupe", dependencies=[Depends(require_user)])
 
 
+MAX_MIN_SIZE_MB = 1024000
+
+
 class DedupeRuleIn(BaseModel):
     name: str = ""
     source_dir: str
     include_subdirs: bool = True
     min_size_mb: int = 0
     enabled: bool = True
+
+    @field_validator("min_size_mb", mode="before")
+    @classmethod
+    def _validate_min_size_mb(cls, v):
+        if v is None or v == "":
+            return 0
+        if isinstance(v, bool):
+            raise ValueError(f"忽略体积必须为 0～{MAX_MIN_SIZE_MB} 之间的整数（MB）")
+        if isinstance(v, float):
+            if not v.is_integer():
+                raise ValueError("忽略体积必须为整数（MB）")
+            v = int(v)
+        elif isinstance(v, str):
+            s = v.strip()
+            if not s:
+                return 0
+            if not s.isdigit():
+                raise ValueError(f"忽略体积必须为 0～{MAX_MIN_SIZE_MB} 之间的整数（MB）")
+            v = int(s)
+        if not isinstance(v, int) or v < 0 or v > MAX_MIN_SIZE_MB:
+            raise ValueError(f"忽略体积必须在 0～{MAX_MIN_SIZE_MB} MB 之间")
+        return v
 
 
 class DedupePreviewIn(BaseModel):
@@ -47,7 +72,7 @@ def _norm_source(raw: str) -> str:
 
 
 def _norm_min_mb(raw: int) -> int:
-    return max(0, min(1024 * 1024, int(raw or 0)))
+    return max(0, min(MAX_MIN_SIZE_MB, int(raw or 0)))
 
 
 # ---------- 清理规则 ----------

@@ -34,9 +34,9 @@
     <div class="toolbar filter-toolbar" style="margin-top: 14px">
       <div class="filter-selects">
         <el-select v-model="filter.level" clearable placeholder="级别" class="filter-level" fit-input-width @change="loadFromFirstPage">
-          <el-option label="info" value="info" />
-          <el-option label="warn" value="warn" />
-          <el-option label="error" value="error" />
+          <el-option label="信息" value="info" />
+          <el-option label="警告" value="warn" />
+          <el-option label="错误" value="error" />
         </el-select>
         <el-select v-model="filter.module" clearable filterable placeholder="模块" class="filter-module" fit-input-width @change="loadFromFirstPage">
           <el-option v-for="m in modules" :key="m" :label="m" :value="m" />

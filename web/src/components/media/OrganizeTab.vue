@@ -70,7 +70,7 @@
         <span class="step-badge">步骤 2</span>
         <div>
           <div class="step-title">运行目录整理</div>
-          <div class="step-desc">按电影/剧集标准层级规范重命名与移动、配套字幕自动随动、单线程顺序防风控；建议先 Dry-Run 模拟预览。</div>
+          <div class="step-desc">按电影/剧集标准层级规范重命名与移动、配套字幕自动随动、单线程顺序防风控；建议先预览整理效果。</div>
         </div>
       </div>
       <div class="step-actions">
@@ -78,7 +78,7 @@
           启用规则 {{ organizeRules.length }} 条 · 上次运行：{{ status.last_run.organize ? fmtTime(status.last_run.organize) : '尚未执行' }}
         </span>
         <el-button size="default" :disabled="isBusy" :loading="previewing" @click="openPreview">
-          🔍 预览整理效果 (Dry-Run)
+          🔍 预览整理效果
         </el-button>
         <el-tooltip :content="organizeBtnTip" :disabled="!organizeBtnDisabled" placement="top">
           <span>
@@ -209,8 +209,8 @@
     </div>
   </div>
 
-  <!-- Dry-Run 预览抽屉 -->
-  <el-drawer v-model="previewDrawer.open" title="目录整理 Dry-Run 预览（只读不改盘）" size="72%">
+  <!-- 预览抽屉 -->
+  <el-drawer v-model="previewDrawer.open" title="目录整理预览（只读不改盘）" size="72%">
     <div class="mb12">
       共扫描到 <b>{{ previewDrawer.total }}</b> 个视频/原盘项目，其中
       <el-tag type="warning" size="small">{{ previewDrawer.pending_count }} 项需要调整命名/位置</el-tag>

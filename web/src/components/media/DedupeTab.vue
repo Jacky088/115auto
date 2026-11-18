@@ -220,10 +220,18 @@
       <el-form-item label="忽略小于">
         <div class="min-size-field">
           <div class="min-size-row">
-            <el-input-number v-model="dedupeRuleDialog.min_size_mb" :min="0" :max="1024000" :step="10" style="width: 150px" />
+            <el-input-number
+              v-model="dedupeRuleDialog.min_size_mb"
+              :min="0"
+              :max="1024000"
+              :step="10"
+              :precision="0"
+              :value-on-clear="0"
+              style="width: 150px"
+            />
             <span class="min-size-unit">MB</span>
           </div>
-          <div class="tip-block">0 表示不忽略任何大小；小文件不参与判重</div>
+          <div class="tip-block">0 表示不忽略任何大小（仅限 0～1024000 整数）；小文件不参与判重</div>
         </div>
       </el-form-item>
       <el-form-item label="启用">
@@ -418,13 +426,20 @@ async function saveDedupeRule() {
     toast.error('扫描目录为必选项，必须先选取网盘目录')
     return
   }
+  const rawMin = dedupeRuleDialog.value.min_size_mb
+  const minSizeMb = rawMin === '' || rawMin === null || rawMin === undefined ? 0 : Number(rawMin)
+  if (!Number.isFinite(minSizeMb) || !Number.isInteger(minSizeMb) || minSizeMb < 0 || minSizeMb > 1024000) {
+    toast.error('忽略体积请输入 0～1024000 之间的整数（单位 MB）')
+    return
+  }
+  dedupeRuleDialog.value.min_size_mb = minSizeMb
   savingDedupeRule.value = true
   try {
     const payload = {
       name: (dedupeRuleDialog.value.name || '').trim(),
       source_dir: dedupeRuleDialog.value.source_dir,
       include_subdirs: !!dedupeRuleDialog.value.include_subdirs,
-      min_size_mb: Number(dedupeRuleDialog.value.min_size_mb || 0),
+      min_size_mb: minSizeMb,
       enabled: !!dedupeRuleDialog.value.enabled,
     }
     if (dedupeRuleDialog.value.id) await api.put(`/api/media/dedupe/rules/${dedupeRuleDialog.value.id}`, payload)

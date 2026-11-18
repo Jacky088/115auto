@@ -238,6 +238,20 @@ def test_execute_multi_rules_updates_each_rule_stats(monkeypatch):
     assert int(db.query("SELECT last_deleted_count FROM dedupe_rules WHERE id=?", (r2,), one=True)["last_deleted_count"]) == 1
 
 
+def test_rule_min_size_mb_validation():
+    from pydantic import ValidationError
+    from backend.api.dedupe import DedupeRuleIn
+
+    assert DedupeRuleIn(source_dir="/电影", min_size_mb=None).min_size_mb == 0
+    assert DedupeRuleIn(source_dir="/电影", min_size_mb="").min_size_mb == 0
+    assert DedupeRuleIn(source_dir="/电影", min_size_mb="120").min_size_mb == 120
+    assert DedupeRuleIn(source_dir="/电影", min_size_mb=1024000).min_size_mb == 1024000
+
+    for bad in (-1, -100, 12.5, "abc", "12.5", "10MB", True, 1024001, 10**18):
+        with pytest.raises(ValidationError):
+            DedupeRuleIn(source_dir="/电影", min_size_mb=bad)
+
+
 def test_record_table_created():
     cols = {r["name"] for r in db.query("PRAGMA table_info(dedupe_records)")}
     assert {"batch_id", "file_id", "file_name", "file_path", "sha1", "size", "status"} <= cols

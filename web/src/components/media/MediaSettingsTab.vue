@@ -86,7 +86,7 @@
           <div class="meta-desc-box">
             <div class="mdb-head">
               <el-tag type="success" effect="plain" size="small">✔ 本地默认常驻开启</el-tag>
-              <span class="mdb-title">自动生成标准 .nfo 元数据与 poster / fanart 高清封面</span>
+              <span class="mdb-title">自动生成标准 .nfo 元数据与海报/背景高清封面</span>
             </div>
             <div class="mdb-text">
               刮削成功后，系统会在本地持久化生成符合 Kodi / Emby / Jellyfin 规范的影视 <code>.nfo</code> 详情文件与高清海报。元数据及图片文件<b>完全存储在本地，绝不上传或污染 115 网盘</b>。
@@ -127,7 +127,7 @@
             <el-input-number v-model="cfg.media_op_delay_min" :min="0.3" :max="20" :step="0.2" :precision="1" />
             <span class="mx8">至</span>
             <el-input-number v-model="cfg.media_op_delay_max" :min="0.5" :max="40" :step="0.2" :precision="1" />
-            <span class="tip-inline">秒（如遇 115 限流提示自动按 pace_factor 退避放大）</span>
+            <span class="tip-inline">秒（如遇 115 限流提示会自动退避拉长间隔）</span>
           </div>
         </el-form-item>
 
