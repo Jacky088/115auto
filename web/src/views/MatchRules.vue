@@ -443,13 +443,13 @@ const blPlaceholderMap = {
   channel: '频道名，如：some_channel',
   file_pattern: '正则表达式，如：.*\\.txt$',
 }
-const blPlaceholder = ref(blPlaceholderMap.keyword)
+const blPlaceholder = computed(() => blPlaceholderMap[blTab.value] || blPlaceholderMap.keyword)
 const blHints = {
   keyword: '消息标题或正文命中关键词 → 整条消息丢弃（含所有链接）；内置已覆盖预告/花絮/枪版/抢先版/解说/广告/引流等，误拦可到「命中记录」放行',
   channel: '频道黑名单 → 该频道的所有消息直接忽略',
   file_pattern: '分享内文件名命中正则 → 该分享整体跳过（转存前检查）',
 }
-const blHint = ref(blHints.keyword)
+const blHint = computed(() => blHints[blTab.value] || blHints.keyword)
 
 const blRegexTips = [
   { frag: '\\.txt$', meaning: '以 .txt 结尾（$ 表示结尾）', },
@@ -483,8 +483,6 @@ const loadBlacklist = async () => {
   } else {
     try {
       blItems.value = (await api.get(`/api/blacklist/${blTab.value}`)).data
-      blPlaceholder.value = blPlaceholderMap[blTab.value]
-      blHint.value = blHints[blTab.value]
     } catch (e) {
       ElMessage.error(errMsg(e))
     }
@@ -556,6 +554,8 @@ onMounted(() => { loadRules(); loadBlacklist() })
 .bl-add-input { flex: 1; min-width: 0; }
 @media (max-width: 768px) {
   .bl-add-input { flex: 1 0 100% !important; }
+  /* 移动端保持至少两行高度（与初始多行提示一致），避免从「命中记录」切回重挂载时被 autosize 压成单行 */
+  .bl-add-input :deep(.el-textarea__inner) { min-height: calc(3em + 10px) !important; }
 }
 .hit-summary { cursor: pointer; color: #3a4661; font-size: var(--fs-caption); }
 .hit-summary:hover { color: var(--el-color-primary); text-decoration: underline; }
