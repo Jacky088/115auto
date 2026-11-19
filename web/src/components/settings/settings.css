@@ -6,6 +6,7 @@
   margin-bottom: 16px;
   background: var(--subcard-bg);
   overflow: hidden;
+  break-inside: avoid;
 }
 
 .settings-page .section-title {
@@ -160,17 +161,15 @@
   }
 }
 
-/* 各 Tab 内卡片网格响应式布局：宽屏双列自适应，窄屏流式单列 */
+/* 各 Tab 内卡片网格响应式布局：宽屏自适应双列瀑布流，消除行间留白空洞；窄屏流式单列 */
 .settings-page .transfer-settings-group,
 .settings-page .notify-settings-group,
 .settings-page .schedule-settings-group,
 .settings-page .wash-settings-group,
 .settings-page .backup-settings-group,
 .settings-page .api-settings-group {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(460px, 1fr));
-  gap: 16px;
-  align-items: start;
+  columns: 2 460px;
+  column-gap: 16px;
 }
 
 @media (max-width: 960px) {
@@ -180,8 +179,8 @@
   .settings-page .wash-settings-group,
   .settings-page .backup-settings-group,
   .settings-page .api-settings-group {
-    grid-template-columns: 1fr;
-    gap: 12px;
+    columns: 1;
+    column-gap: 0;
   }
 }
 
