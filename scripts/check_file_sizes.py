@@ -16,7 +16,6 @@ WARN_LINES = 600
 
 # 历史文件只减不增基线（当前行数 + 30 行缺陷修复缓冲；重构缩减后应同步下调或移除）
 LEGACY_CAPS: dict[str, int] = {
-    "backend/pan115/auto_move.py": 900,
     "backend/pan115/client.py": 1020,
     "backend/worker/media_worker/scrape.py": 900,
     "backend/worker/queue_worker.py": 1040,
