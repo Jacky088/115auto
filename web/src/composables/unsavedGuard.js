@@ -12,7 +12,7 @@ import { nextTick, onBeforeUnmount, onMounted } from 'vue'
 import { onBeforeRouteLeave } from 'vue-router'
 import { ElMessageBox } from 'element-plus'
 
-export function useUnsavedGuard(dirty) {
+export function useUnsavedGuard(dirty, onDiscard = null) {
   const isDirty = () => (typeof dirty === 'function' ? dirty() : !!dirty.value)
   let confirmed = false  // 已确认离开的标记（本次导航放行）
 
@@ -25,6 +25,12 @@ export function useUnsavedGuard(dirty) {
         { confirmButtonText: '离开并丢弃', cancelButtonText: '留在本页', type: 'warning', confirmButtonClass: 'danger-confirm-btn' },
       )
       confirmed = true   // 用户确认：放行导航（更改即被丢弃）
+      if (typeof dirty === 'object' && dirty !== null && 'value' in dirty) {
+        dirty.value = false
+      }
+      if (typeof onDiscard === 'function') {
+        try { onDiscard() } catch { /* ignore */ }
+      }
       return true
     } catch {
       return false       // 用户取消：留在本页

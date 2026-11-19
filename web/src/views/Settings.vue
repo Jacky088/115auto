@@ -62,7 +62,7 @@
           </el-tab-pane>
 
           <el-tab-pane label="🧼 追更洗版" name="wash">
-            <WashSettings :f="f" @dirty="dirty = true" />
+            <WashSettings :f="f" @dirty="checkDirty" />
           </el-tab-pane>
 
           <el-tab-pane label="💾 备份恢复" name="backup">
@@ -239,7 +239,11 @@ const onTabChange = () => {
 const syncF = (patch) => {
   suppressWatch = true
   Object.assign(f.value, patch)
-  nextTick(() => { suppressWatch = false })
+  nextTick(() => {
+    baselineSnapshot = takeSnapshot()
+    dirty.value = false
+    suppressWatch = false
+  })
 }
 
 // ---- 系统自检 ----
@@ -290,25 +294,47 @@ const copyDoctor = async () => {
   ElMessage.success('自检报告已复制')
 }
 
-useUnsavedGuard(dirty)
+useUnsavedGuard(dirty, () => {
+  dirty.value = false
+})
 
-watch([f, retryPreset, pollPreset, transferPreset], () => {
-  if (!suppressWatch) dirty.value = true
-}, { deep: true })
+let baselineSnapshot = ''
+
+const takeSnapshot = () => JSON.stringify({
+  f: f.value,
+  retry: retryPreset.value,
+  poll: pollPreset.value,
+  trans: transferPreset.value,
+})
+
+const checkDirty = () => {
+  if (suppressWatch || !baselineSnapshot) return
+  dirty.value = takeSnapshot() !== baselineSnapshot
+}
+
+watch([f, retryPreset, pollPreset, transferPreset], checkDirty, { deep: true })
 
 const load = async () => {
   suppressWatch = true
   loadError.value = ''
   try {
-    f.value = (await api.get('/api/settings')).data
-    if (f.value.schedule_jitter_min === undefined) f.value.schedule_jitter_min = 5
-    if (f.value.batch_rest_enabled === undefined) f.value.batch_rest_enabled = true
-    if (f.value.batch_rest_count === undefined) f.value.batch_rest_count = 3
-    if (f.value.batch_rest_min_min === undefined) f.value.batch_rest_min_min = 2
-    if (f.value.batch_rest_max_min === undefined) f.value.batch_rest_max_min = 5
-    if (f.value.health_check_interval_min === undefined) f.value.health_check_interval_min = 10
-    if (f.value.dedup_cache_ttl_sec === undefined) f.value.dedup_cache_ttl_sec = 90
-    if (!f.value.auto_backup_time) f.value.auto_backup_time = '04:00'
+    const raw = (await api.get('/api/settings')).data || {}
+    
+    // 强类型安全归一化，防止 Element Plus 挂载后隐式转换触发 watch 误判 dirty
+    f.value = {
+      ...raw,
+      daily_limit: Number(raw.daily_limit || 50),
+      min_size_gb: Number(raw.min_size_gb ?? 0.2),
+      schedule_jitter_min: Number(raw.schedule_jitter_min ?? 5),
+      batch_rest_count: Number(raw.batch_rest_count ?? 3),
+      batch_rest_min_min: Number(raw.batch_rest_min_min ?? 2),
+      batch_rest_max_min: Number(raw.batch_rest_max_min ?? 5),
+      health_check_interval_min: Number(raw.health_check_interval_min ?? 10),
+      dedup_cache_ttl_sec: Number(raw.dedup_cache_ttl_sec ?? 90),
+      auto_backup_days: Number(raw.auto_backup_days ?? 7),
+      auto_backup_time: raw.auto_backup_time || '04:00',
+      batch_rest_enabled: raw.batch_rest_enabled !== undefined ? !!raw.batch_rest_enabled : true,
+    }
 
     // 回填三组预设
     const RETRY_PRESETS = [
@@ -346,8 +372,10 @@ const load = async () => {
 
     loaded.value = true
     await nextTick()
-    suppressWatch = false
+    // 挂载稳定后锁定基准快照
+    baselineSnapshot = takeSnapshot()
     dirty.value = false
+    suppressWatch = false
   } catch (e) {
     loadError.value = errMsg(e) || '设置加载失败'
     ElMessage.error(loadError.value)
@@ -474,6 +502,7 @@ const save = async () => {
       poll_interval_min: poll.min, poll_interval_max: poll.max,
       transfer_interval_min: trans.min, transfer_interval_max: trans.max,
     })
+    baselineSnapshot = takeSnapshot()
     dirty.value = false
     saveOk('设置已保存', '转存间隔、限额、开关等已即时生效')
   } catch (e) {

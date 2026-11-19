@@ -56,6 +56,35 @@
       </el-form-item>
     </div>
 
+    <!-- 每日摘要（紧随结果通知下方，逻辑呼应且两列高度平衡） -->
+    <div class="section-card">
+      <div class="section-title">每日摘要</div>
+      <el-form-item label="每日摘要">
+        <div class="switch-row">
+          <el-switch v-model="f.digest_enabled" />
+          <el-tooltip :disabled="!!f.digest_enabled" content="请先开启「每日摘要」总开关" placement="top">
+            <span>
+              <el-button :loading="digestTesting" :disabled="!f.digest_enabled" @click="testDigest">立即推送一次</el-button>
+            </span>
+          </el-tooltip>
+        </div>
+        <div class="tip" style="width: 100%">
+          开启后每天定时把当日转存汇总推送到已配置的通知渠道（TG / Bark / PushPlus / ntfy）；
+          「立即推送一次」用与定时推送完全相同的内容验证渠道是否可达
+        </div>
+      </el-form-item>
+      <el-form-item v-if="f.digest_enabled" label="推送时间">
+        <el-time-select
+          v-model="f.digest_time"
+          start="00:00"
+          step="00:30"
+          end="23:30"
+          placeholder="选择时间"
+          style="width: 130px"
+        />
+      </el-form-item>
+    </div>
+
     <!-- 通知渠道扩展 -->
     <div class="section-card">
       <div class="section-title">通知渠道扩展</div>
@@ -137,35 +166,6 @@
             使用官方 ntfy.sh 时访问令牌留空即可
           </div>
         </SecretConfig>
-      </el-form-item>
-    </div>
-
-    <!-- 每日摘要 -->
-    <div class="section-card">
-      <div class="section-title">每日摘要</div>
-      <el-form-item label="每日摘要">
-        <div class="switch-row">
-          <el-switch v-model="f.digest_enabled" />
-          <el-tooltip :disabled="!!f.digest_enabled" content="请先开启「每日摘要」总开关" placement="top">
-            <span>
-              <el-button :loading="digestTesting" :disabled="!f.digest_enabled" @click="testDigest">立即推送一次</el-button>
-            </span>
-          </el-tooltip>
-        </div>
-        <div class="tip" style="width: 100%">
-          开启后每天定时把当日转存汇总推送到已配置的通知渠道（TG / Bark / PushPlus / ntfy）；
-          「立即推送一次」用与定时推送完全相同的内容验证渠道是否可达
-        </div>
-      </el-form-item>
-      <el-form-item v-if="f.digest_enabled" label="推送时间">
-        <el-time-select
-          v-model="f.digest_time"
-          start="00:00"
-          step="00:30"
-          end="23:30"
-          placeholder="选择时间"
-          style="width: 130px"
-        />
       </el-form-item>
     </div>
   </div>
