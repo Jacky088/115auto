@@ -13,6 +13,7 @@ import android.text.InputType
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowManager
 import android.webkit.CookieManager
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
@@ -29,6 +30,9 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
 import java.net.URL
 
 /**
@@ -64,6 +68,28 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // 1. 全屏延伸到摄像头挖孔/刘海屏区域（消除顶部灰色/黑色遮挡条）
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            window.attributes.layoutInDisplayCutoutMode =
+                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+        }
+
+        // 2. 启用 Edge-to-Edge 沉浸式全屏布局与透明系统状态栏/导航栏
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        window.statusBarColor = Color.TRANSPARENT
+        window.navigationBarColor = Color.TRANSPARENT
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            window.isStatusBarContrastEnforced = false
+            window.isNavigationBarContrastEnforced = false
+        }
+
+        // 3. 初始浅色模式下设置状态栏深色文字/图标，确保时间电量清晰可见
+        val insetsController = WindowCompat.getInsetsController(window, window.decorView)
+        insetsController.isAppearanceLightStatusBars = true
+        insetsController.isAppearanceLightNavigationBars = true
+
         val saved = prefs.getString(KEY_URL, null)
         if (saved.isNullOrEmpty()) showSetup() else loadPanel(saved)
 
@@ -157,6 +183,11 @@ class MainActivity : ComponentActivity() {
             setPadding(dp(28), dp(24), dp(28), dp(24))
             setBackgroundColor(Color.WHITE)
         }
+        ViewCompat.setOnApplyWindowInsetsListener(root) { v, insets ->
+            val sysBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+            v.setPadding(dp(28), sysBars.top + dp(24), dp(28), sysBars.bottom + dp(24))
+            insets
+        }
         root.addView(box)
         setContentView(root)
     }
@@ -190,6 +221,18 @@ class MainActivity : ComponentActivity() {
                 download(link, agent, disposition, mime)
             }
         }
+        // 挂载深浅色模式通信桥梁，随网页主题切换状态栏字体颜色
+        class AndroidBridge {
+            @android.webkit.JavascriptInterface
+            fun setDarkMode(isDark: Boolean) {
+                runOnUiThread {
+                    val controller = WindowCompat.getInsetsController(window, window.decorView)
+                    controller.isAppearanceLightStatusBars = !isDark
+                    controller.isAppearanceLightNavigationBars = !isDark
+                }
+            }
+        }
+        wv.addJavascriptInterface(AndroidBridge(), "AndroidBridge")
         CookieManager.getInstance().setAcceptCookie(true)
         CookieManager.getInstance().setAcceptThirdPartyCookies(wv, true)
         webView = wv
@@ -255,6 +298,20 @@ class MainActivity : ComponentActivity() {
         ) {
             if (!request.isForMainFrame) return
             showNetError(request.url.toString(), error.description?.toString() ?: "连接失败")
+        }
+
+        override fun onPageFinished(view: WebView?, url: String?) {
+            super.onPageFinished(view, url)
+            // 将 Android 物理状态栏/挖孔高度安全注入 WebView CSS 变量，确保顶栏精准沉浸避让
+            val resourceId = resources.getIdentifier("status_bar_height", "dimen", "android")
+            val px = if (resourceId > 0) resources.getDimensionPixelSize(resourceId) else 0
+            val dp = (px / resources.displayMetrics.density).toInt()
+            if (dp > 0) {
+                view?.evaluateJavascript(
+                    "document.documentElement.style.setProperty('--android-status-bar-height', '${dp}px');",
+                    null
+                )
+            }
         }
 
         private fun openExternal(target: Uri): Boolean =

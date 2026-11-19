@@ -294,6 +294,7 @@ const toggleTheme = () => {
   isDark.value = !isDark.value
   document.documentElement.classList.toggle('dark', isDark.value)
   localStorage.setItem('theme', isDark.value ? 'dark' : 'light')
+  try { window.AndroidBridge?.setDarkMode(isDark.value) } catch { /* ignore */ }
 }
 
 // ---- 版本号：取免登录的 /api/health，失败静默不显示 ----
@@ -307,6 +308,7 @@ const loadVersion = async () => {
 const sysPoll = usePolling(loadSys, 10000)
 const cookiePoll = usePolling(check, 10000)  // Cookie 巡检与状态同频：恢复后 10 秒内消除警示
 onMounted(() => {
+  try { window.AndroidBridge?.setDarkMode(isDark.value) } catch { /* ignore */ }
   loadSys()
   check()
   loadUsername()
@@ -536,16 +538,14 @@ html.dark .theme-btn:hover {
   .page-card, :deep(.page-card) { margin: 10px !important; }
 }
 
-/* PWA 独立全屏 / 移动端刘海与状态栏避让 */
-@supports (padding-top: env(safe-area-inset-top)) {
-  .header {
-    padding-top: env(safe-area-inset-top);
-    height: calc(52px + env(safe-area-inset-top)) !important;
-  }
-  .menu-drawer .aside {
-    padding-top: env(safe-area-inset-top);
-    padding-bottom: env(safe-area-inset-bottom);
-  }
+/* PWA 独立全屏 / 移动端刘海与状态栏避让（兼容 iOS Safari 与 Android APK 沉浸全屏） */
+.header {
+  padding-top: var(--android-status-bar-height, env(safe-area-inset-top, 0px));
+  height: calc(52px + var(--android-status-bar-height, env(safe-area-inset-top, 0px))) !important;
+}
+.menu-drawer .aside {
+  padding-top: var(--android-status-bar-height, env(safe-area-inset-top, 0px));
+  padding-bottom: env(safe-area-inset-bottom, 0px);
 }
 </style>
 

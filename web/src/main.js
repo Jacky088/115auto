@@ -9,7 +9,12 @@ import router from './router'
 import './style.css'
 
 // 深色模式偏好：挂载前应用，避免闪烁（默认浅色）
-if (localStorage.getItem('theme') === 'dark') document.documentElement.classList.add('dark')
+if (localStorage.getItem('theme') === 'dark') {
+  document.documentElement.classList.add('dark')
+  try { window.AndroidBridge?.setDarkMode(true) } catch { /* ignore */ }
+} else {
+  try { window.AndroidBridge?.setDarkMode(false) } catch { /* ignore */ }
+}
 
 const app = createApp(App)
 for (const [name, comp] of Object.entries(icons)) app.component(name, comp)
