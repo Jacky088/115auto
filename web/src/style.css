@@ -209,12 +209,9 @@ html.dark .saas-hero-bg .el-card { background: var(--glass-bg) !important; }
 .el-button.is-plain:not(.is-disabled):hover,
 .el-button.is-plain:not(.is-disabled):focus-visible,
 .el-button.is-plain:not(.is-disabled):active,
-.el-button:not([class*='el-button--']):not(.is-text):not(.is-link):not(.is-disabled):hover,
-.el-button:not([class*='el-button--']):not(.is-text):not(.is-link):not(.is-disabled):focus-visible,
-.el-button:not([class*='el-button--']):not(.is-text):not(.is-link):not(.is-disabled):active,
-.el-button--default:not(.is-text):not(.is-link):not(.is-disabled):hover,
-.el-button--default:not(.is-text):not(.is-link):not(.is-disabled):focus-visible,
-.el-button--default:not(.is-text):not(.is-link):not(.is-disabled):active {
+.el-button:not(.el-button--primary):not(.el-button--success):not(.el-button--warning):not(.el-button--danger):not(.el-button--info):not(.is-text):not(.is-link):not(.is-disabled):hover,
+.el-button:not(.el-button--primary):not(.el-button--success):not(.el-button--warning):not(.el-button--danger):not(.el-button--info):not(.is-text):not(.is-link):not(.is-disabled):focus-visible,
+.el-button:not(.el-button--primary):not(.el-button--success):not(.el-button--warning):not(.el-button--danger):not(.el-button--info):not(.is-text):not(.is-link):not(.is-disabled):active {
   background-color: var(--btn-type-color) !important;
   border-color: var(--btn-type-color) !important;
   color: #ffffff !important;
@@ -222,10 +219,8 @@ html.dark .saas-hero-bg .el-card { background: var(--glass-bg) !important; }
 
 .el-button.is-plain:not(.is-disabled):hover *,
 .el-button.is-plain:not(.is-disabled):active *,
-.el-button:not([class*='el-button--']):not(.is-text):not(.is-link):not(.is-disabled):hover *,
-.el-button:not([class*='el-button--']):not(.is-text):not(.is-link):not(.is-disabled):active *,
-.el-button--default:not(.is-text):not(.is-link):not(.is-disabled):hover *,
-.el-button--default:not(.is-text):not(.is-link):not(.is-disabled):active * {
+.el-button:not(.el-button--primary):not(.el-button--success):not(.el-button--warning):not(.el-button--danger):not(.el-button--info):not(.is-text):not(.is-link):not(.is-disabled):hover *,
+.el-button:not(.el-button--primary):not(.el-button--success):not(.el-button--warning):not(.el-button--danger):not(.el-button--info):not(.is-text):not(.is-link):not(.is-disabled):active * {
   color: #ffffff !important;
 }
 /* 填充按钮统一扁平悬停：不使用任何投影/外发光，仅以按钮自身颜色变化反馈

@@ -15,7 +15,7 @@
             <span class="settings-title">系统设置</span>
             <el-tag v-if="dirty" type="danger" effect="plain" size="small">● 有未保存的更改</el-tag>
             <el-button v-if="dirty" type="primary" size="small" @click="save">保存设置</el-button>
-            <el-button size="small" :loading="doctorLoading" @click="onDoctorClick">系统自检</el-button>
+            <el-button size="small" class="doctor-btn" :loading="doctorLoading" @click="onDoctorClick">系统自检</el-button>
             <span class="tip pc-only-tip" style="margin-left: 4px">修改需点击「保存设置」后生效</span>
           </div>
 

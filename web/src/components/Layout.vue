@@ -93,16 +93,26 @@
         </div>
         <div class="header-right">
           <el-tooltip v-if="!isInstalled" content="安装为独立应用 (PWA)" placement="bottom">
-            <el-button text class="theme-btn" aria-label="安装为独立应用" @click="handleInstall">
-              <el-icon :size="17"><Download /></el-icon>
-            </el-button>
+            <button class="theme-btn" aria-label="安装为独立应用" @click="handleInstall">
+              <svg class="topbar-svg" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                <polyline points="7 10 12 15 17 10" />
+                <line x1="12" y1="15" x2="12" y2="3" />
+              </svg>
+            </button>
           </el-tooltip>
           <el-tooltip :content="isDark ? '切换到浅色模式' : '切换到深色模式'" placement="bottom">
-            <el-button text class="theme-btn"
-                       :aria-label="isDark ? '切换到浅色模式' : '切换到深色模式'"
-                       @click="toggleTheme">
-              <el-icon :size="17"><Sunny v-if="isDark" /><Moon v-else /></el-icon>
-            </el-button>
+            <button class="theme-btn"
+                    :aria-label="isDark ? '切换到浅色模式' : '切换到深色模式'"
+                    @click="toggleTheme">
+              <svg v-if="isDark" class="topbar-svg" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="4" />
+                <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41" />
+              </svg>
+              <svg v-else class="topbar-svg" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" />
+              </svg>
+            </button>
           </el-tooltip>
           <el-dropdown @command="onCommand">
           <div class="user-chip">
@@ -436,13 +446,32 @@ const changePwd = async () => {
 .gh-icon { width: 14px; height: 14px; fill: currentColor; flex: none; }
 
 .theme-btn {
-  padding: 4px;
   width: 32px;
   height: 32px;
+  border-radius: 8px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   color: var(--saas-text-main);
+  background: transparent;
+  border: 1px solid transparent;
+  cursor: pointer;
+  padding: 0;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.theme-btn:hover {
+  color: var(--el-color-primary);
+  background: rgba(79, 107, 255, 0.10);
+  border-color: rgba(79, 107, 255, 0.20);
+}
+html.dark .theme-btn:hover {
+  color: var(--el-color-primary-light-3);
+  background: rgba(125, 144, 255, 0.16);
+  border-color: rgba(125, 144, 255, 0.30);
+}
+.topbar-svg {
+  display: block;
+  flex-shrink: 0;
 }
 /* 告警条是 el-container（flex 列）的子项，而 el-alert 自带 overflow:hidden：
    顶栏 + 多条告警 + 内容超过视口高度时 flex 会把告警压缩裁掉正文（表现为"被折叠"）。
