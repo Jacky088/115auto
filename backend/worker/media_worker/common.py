@@ -17,6 +17,18 @@ def _mw():
     return media_worker
 
 
+STATUS_ZH = {
+    "queued": "排队执行中",
+    "running": "正在处理",
+    "need_confirm": "待确认",
+    "staged": "已选待提交",
+    "done": "已完成",
+    "skipped": "已跳过",
+    "failed": "执行失败",
+    "ignored": "已忽略",
+}
+
+
 class MediaCancelled(Exception):
     """收到顶栏停止指令，安全中止后续队列条目。"""
 
