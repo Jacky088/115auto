@@ -300,255 +300,31 @@
       </span>
     </div>
 
-    <!-- 规则表格工具栏：紧贴列表上方，便于直观管理与添加 -->
-    <div class="rules-table-toolbar">
-      <div class="rules-toolbar-left">
-        <span class="rules-toolbar-title">整理规则映射列表</span>
-        <el-tag v-if="moveRules.length" size="small" class="count-tag">共 {{ moveRules.length }} 条规则</el-tag>
-        <span class="rules-toolbar-tip">按由上至下顺序依次排队扫描与移动（只移动正片文件，文件夹本身不移动）</span>
-      </div>
-      <div class="rules-toolbar-right">
-        <el-button type="primary" size="small" @click="openAddMoveRule">
-          <el-icon><Plus /></el-icon>
-          <span>添加整理规则</span>
-        </el-button>
-      </div>
-    </div>
-
-    <!-- 规则表格 -->
-    <div class="table-responsive-wrapper">
-    <el-table :data="moveRules" size="small">
-      <template #empty>
-        <div class="rules-empty-box">
-          <p>暂无整理规则，点击下方或上方「添加整理规则」配置对应关系</p>
-          <el-button type="primary" plain size="small" @click="openAddMoveRule" style="margin-top: 6px">
-            <el-icon><Plus /></el-icon>
-            <span>添加整理规则</span>
-          </el-button>
-        </div>
-      </template>
-      <el-table-column label="整理模式" width="115">
-        <template #default="{ row }">
-          <el-tag
-            :type="(row.mode === 'library' || (!row.mode || row.mode === 'default') && moveSettings.auto_move_mode === 'library') ? 'success' : 'primary'"
-            effect="plain"
-            size="small"
-          >
-            {{ (row.mode === 'library' || (!row.mode || row.mode === 'default') && moveSettings.auto_move_mode === 'library') ? '总库分流' : '精确匹配' }}
-          </el-tag>
-        </template>
-      </el-table-column>
-      <el-table-column label="源目录（扫描位置）" min-width="190">
-        <template #default="{ row }">
-          <el-button class="dir-btn" @click="openMovePicker(row, 'move_source')">
-            <el-icon><FolderOpened /></el-icon>
-            <span>{{ row.source_dir || '请选择源目录' }}</span>
-          </el-button>
-        </template>
-      </el-table-column>
-      <el-table-column label="目标目录（移入位置）" min-width="190">
-        <template #default="{ row }">
-          <el-button class="dir-btn" @click="openMovePicker(row, 'move_target')">
-            <el-icon><FolderOpened /></el-icon>
-            <span>{{ row.target_dir || '请选择目标目录' }}</span>
-          </el-button>
-        </template>
-      </el-table-column>
-      <el-table-column label="匹配关键词" width="130">
-        <template #default="{ row }">
-          <span v-if="(row.mode === 'library' || (!row.mode || row.mode === 'default') && moveSettings.auto_move_mode === 'library')">
-            <el-tag type="info" size="small">自动识别总库子剧</el-tag>
-          </span>
-          <span v-else>
-            <el-tag type="primary" effect="plain" size="small">
-              {{ row.keyword || extractKeyword(row.target_dir) || '未设定' }}
-            </el-tag>
-          </span>
-        </template>
-      </el-table-column>
-      <el-table-column width="120">
-        <template #header>
-          <span class="info-tip-label">
-            <span>媒体类型</span>
-            <el-tooltip placement="top" effect="dark">
-              <template #content>
-                按标题匹配时的文件归属判别（配合两库同名场景）：<br />
-                · 电影库：跳过带集数标识（S01E01/第1集）的文件，剧集交给剧集规则；<br />
-                · 剧集库：正常认领（含剧场版/特别篇）；<br />
-                · 自动：不区分，与历史行为一致。<br />
-                与规则顺序无关，无论哪条规则先执行结果一致。
-              </template>
-              <el-icon class="info-tip-icon" :size="14" tabindex="0"><InfoFilled /></el-icon>
-            </el-tooltip>
-          </span>
-        </template>
-        <template #default="{ row }">
-          <el-tooltip placement="top" :disabled="row.media_type !== 'movie'"
-                      content="电影库规则会跳过带集数标识（S01E01/第1集）的文件，避免重名影片错位归档">
-            <el-select v-model="row.media_type" size="small" style="width: 104px" fit-input-width
-                       @change="saveMoveRule(row)">
-              <el-option label="自动" value="auto" />
-              <el-option label="电影库" value="movie" />
-              <el-option label="剧集库" value="tv" />
-            </el-select>
-          </el-tooltip>
-        </template>
-      </el-table-column>
-      <el-table-column width="88">
-        <template #header>
-          <span class="info-tip-label">
-            <span>云下载</span>
-            <el-tooltip placement="top" effect="dark">
-              <template #content>
-                云下载目录专用模式：<br />
-                115 云下载的中文标题只在任务目录名上，目录内文件多为纯英文名——开启后按<b>任务子目录名</b>匹配（自动剥除含网址的广告括号段），目录内文件继承归属。<br />
-                电影/剧集按集数标识自动判别；广告域名/微小体积文件自动过滤不入库；<br />
-                仅当源目录是分类路由配置的云下载目录时可开启，配置变更后失效会自动拦下并告警。
-              </template>
-              <el-icon class="info-tip-icon" :size="14" tabindex="0"><InfoFilled /></el-icon>
-            </el-tooltip>
-          </span>
-        </template>
-        <template #default="{ row }">
-          <el-tooltip placement="top" :disabled="!(row.dir_match && !cloudValid(row))"
-                      content="源目录已不是当前配置的云下载目录，云下载模式不会生效，请修改源目录或关闭此开关">
-            <div style="display: flex; align-items: center; gap: 4px">
-              <el-switch v-model="row.dir_match" :active-value="1" :inactive-value="0"
-                         :disabled="!row.dir_match && !cloudValid(row)"
-                         @change="toggleDirMatch(row)" />
-              <el-icon v-if="row.dir_match && !cloudValid(row)" style="color: var(--el-color-warning)">
-                <WarningFilled />
-              </el-icon>
-            </div>
-          </el-tooltip>
-        </template>
-      </el-table-column>
-      <el-table-column label="上次整理状态" width="150">
-        <template #default="{ row }">
-          <span v-if="row.last_run_at" style="font-size: var(--fs-caption); color: var(--saas-text-main)">
-            {{ row.last_moved_count > 0 ? `移动 ${row.last_moved_count} 个文件` : '无新匹配文件' }}
-          </span>
-          <span v-else style="color: var(--saas-text-sub); font-size: var(--fs-caption)">尚未执行</span>
-        </template>
-      </el-table-column>
-      <el-table-column label="启用" width="70">
-        <template #default="{ row }">
-          <el-tooltip placement="top" :disabled="!(row.dir_match && !cloudValid(row))"
-                      content="云下载模式未生效（源目录已不是云下载目录）：请改回云下载目录，或关闭云下载开关回落基本规则后再启用">
-            <span>
-              <el-switch
-                v-model="row.enabled"
-                :active-value="1"
-                :inactive-value="0"
-                :disabled="!!(row.dir_match && !cloudValid(row))"
-                @change="saveMoveRule(row)"
-              />
-            </span>
-          </el-tooltip>
-        </template>
-      </el-table-column>
-      <el-table-column label="操作" width="84" fixed="right">
-        <template #default="{ row }">
-          <el-button type="danger" text @click="deleteMoveRule(row.id)">删除</el-button>
-        </template>
-      </el-table-column>
-    </el-table>
-    </div>
+    <!-- 规则表格子组件 -->
+    <AutoMoveRulesTable
+      :rules="moveRules"
+      :move-settings="moveSettings"
+      :cloud-dirs="cloudDirs"
+      @add="openAddMoveRule"
+      @pick-dir="onTablePickDir"
+      @save-rule="saveMoveRule"
+      @delete-rule="deleteMoveRule"
+      @toggle-dir-match="toggleDirMatch"
+    />
   </el-card>
 
-    <DirPicker v-model="pickerVisible" :title="pickerTitle" @pick="onPickDir" />
+  <!-- 目录选择器（供表格行路径修改使用） -->
+  <DirPicker v-model="pickerVisible" :title="pickerTitle" @pick="onPickDir" />
 
-  <!-- 添加整理规则弹窗 -->
-  <el-dialog v-model="dialogVisible" title="添加文件整理规则" :width="'min(540px, 94vw)'" destroy-on-close>
-    <el-form class="add-rule-form" :model="newRuleForm" label-width="100px" size="small">
-      <el-form-item label="整理模式">
-        <el-radio-group v-model="newRuleForm.mode">
-          <el-radio label="default">跟随默认 ({{ moveSettings.auto_move_mode === 'library' ? '总库分流' : '一对一精确' }})</el-radio>
-          <el-radio label="library">总库智能分流</el-radio>
-          <el-radio label="exact">一对一精确匹配</el-radio>
-        </el-radio-group>
-      </el-form-item>
-      <el-form-item label="媒体类型">
-        <div style="display: flex; flex-direction: column; gap: 4px; width: 100%">
-          <el-radio-group v-model="newRuleForm.media_type">
-            <el-radio label="auto">自动</el-radio>
-            <el-radio label="movie">电影库</el-radio>
-            <el-radio label="tv">剧集库</el-radio>
-          </el-radio-group>
-          <span style="color: var(--saas-text-sub); font-size: var(--fs-caption); line-height: 1.4">
-            电影库跳过带集数标识的文件，避免两库同名错位
-          </span>
-        </div>
-      </el-form-item>
-      <el-form-item label="云下载模式">
-        <div style="display: flex; flex-direction: column; gap: 4px; width: 100%">
-          <el-checkbox v-model="newRuleForm.dir_match" :disabled="!sourceIsCloudDir">
-            <span class="info-tip-label">
-              <span>按父目录名匹配</span>
-              <el-tooltip placement="top" effect="dark">
-                <template #content>
-                  适用场景：115 云下载的中文标题只在任务目录名上（如「【广告www..】奥德赛[简繁英字幕].The.Odyssey.2026…」），<br />
-                  目录内文件多为纯英文名（The.Odyssey.2026….mkv）。<br /><br />
-                  开启后的行为变化：<br />
-                  · 匹配对象从文件名换成任务子目录名（自动剥除含网址的广告括号段）；<br />
-                  · 目录内纯英文文件继承目录归属，电影/剧集按集数标识自动判别；<br />
-                  · 广告域名/微小体积（&lt;10MB）文件自动过滤，不入媒体库；<br />
-                  · 源目录根部散落的单文件（如 a.mp4）不参与，留待手动处理；<br />
-                  · 字幕不跟移（留给整理刮削配对）。<br /><br />
-                  仅当源目录 = 分类路由配置的云下载目录时可开启；配置变更后自动失效并告警。
-                </template>
-                <el-icon class="info-tip-icon" :size="14" tabindex="0"><InfoFilled /></el-icon>
-              </el-tooltip>
-            </span>
-          </el-checkbox>
-          <span v-if="sourceIsCloudDir" style="color: var(--el-color-success); font-size: var(--fs-caption)">
-            已匹配云下载目录 {{ normPath(newRuleForm.source_dir) }}
-          </span>
-          <span v-else style="color: var(--el-color-warning); font-size: var(--fs-caption); line-height: 1.4">
-            源目录不是云下载目录 {{ cloudDirs.join('、') || '尚未配置' }}，此模式不可用
-          </span>
-          <span v-if="newRuleForm.dir_match" class="hint-line" style="color: var(--el-color-warning)">
-            ⚠ 开启后本规则按<b>任务子目录名</b>匹配（子目录内文件可为纯英文名），不再按文件名匹配；
-            源目录根部散落的文件不参与整理；目录内广告/微小体积文件自动过滤。
-            若日后源目录不再是云下载目录，本模式会自动失效并告警
-          </span>
-        </div>
-      </el-form-item>
-      <el-form-item label="源目录" required>
-        <el-button class="dir-btn" size="small" style="width: 100%" @click="openDialogPicker('dialog_source')">
-          <el-icon><FolderOpened /></el-icon>
-          <span>{{ newRuleForm.source_dir || '点击选择源目录（如 /自动转存）' }}</span>
-        </el-button>
-      </el-form-item>
-      <el-form-item label="目标目录" required>
-        <div style="display: flex; flex-direction: column; gap: 4px; width: 100%">
-          <el-button class="dir-btn" size="small" style="width: 100%" @click="openDialogPicker('dialog_target')">
-            <el-icon><FolderOpened /></el-icon>
-            <span>{{ newRuleForm.target_dir || (isDialogLibraryMode ? '选择影视总库（如 /电视剧）' : '选择具体剧集目录（如 /电视剧/折月亮 (2026)）') }}</span>
-          </el-button>
-          <span style="color: var(--saas-text-sub); font-size: var(--fs-caption); line-height: 1.4">
-            {{ isDialogLibraryMode ? '总库模式：目标选电视剧总库，系统自动识别库内各剧集文件夹并精准分流。' : '精确模式：目标选具体某部剧的文件夹，仅移动匹配该剧的文件。' }}
-          </span>
-        </div>
-      </el-form-item>
-      <el-form-item v-if="!isDialogLibraryMode" label="匹配关键词">
-        <div style="display: flex; flex-direction: column; gap: 4px; width: 100%">
-          <el-input v-model="newRuleForm.keyword" placeholder="根据目标目录自动提取（如 庆余年、折月亮）" />
-          <span style="color: var(--saas-text-sub); font-size: var(--fs-caption); line-height: 1.4">
-            自动剥离 (2026) 年份与季级目录，精确提取纯净剧名。
-          </span>
-        </div>
-      </el-form-item>
-    </el-form>
-    <template #footer>
-      <el-button @click="dialogVisible = false">取消</el-button>
-      <el-button type="primary" :disabled="!newRuleForm.source_dir || !newRuleForm.target_dir" @click="confirmAddMoveRule">
-        确定添加
-      </el-button>
-    </template>
-  </el-dialog>
+  <!-- 添加整理规则弹窗子组件 -->
+  <AutoMoveRuleDialog
+    v-model="dialogVisible"
+    :move-settings="moveSettings"
+    :cloud-dirs="cloudDirs"
+    @created="loadAutoMove"
+  />
 
-    <AutoMovePreviewDialog ref="previewDlgRef" @started="onPreviewStarted" />
+  <AutoMovePreviewDialog ref="previewDlgRef" @started="onPreviewStarted" />
   </div>
 </template>
 
@@ -559,7 +335,10 @@ import { api, errMsg, saveOk } from '../../api'
 import { usePolling } from '../../composables/usePolling'
 import { confirmAction } from '../../composables/confirmDialog'
 import DirPicker from '../DirPicker.vue'
+import AutoMoveRulesTable from './AutoMoveRulesTable.vue'
+import AutoMoveRuleDialog from './AutoMoveRuleDialog.vue'
 import AutoMovePreviewDialog from './AutoMovePreviewDialog.vue'
+import { extractKeyword, formatTime, normPath } from './autoMoveUtils'
 
 const previewDlgRef = ref(null)
 const pickerVisible = ref(false)
@@ -590,6 +369,9 @@ const drainStatus = ref({ unfinished: 0, queued: 0, retrying: 0, running: 0, sub
 const nextRuns = ref([])
 const newFixedTime = ref('')
 const systemRunning = ref(false)
+const runningMove = ref(false)
+const dialogVisible = ref(false)
+const cloudDirs = ref([])
 
 const computedAutoMoveEnabled = computed({
   get() {
@@ -645,68 +427,6 @@ watch(systemRunning, (isRunning) => {
     moveSettings.value.auto_move_enabled = false
   }
 })
-const runningMove = ref(false)
-const dialogVisible = ref(false)
-const newRuleForm = ref({
-  source_dir: '',
-  target_dir: '',
-  keyword: '',
-  mode: 'default',
-  media_type: 'auto',
-  dir_match: false,
-})
-
-// 云下载目录集合与归一化比对（后端在 rules 接口下发 cloud_dirs）
-const cloudDirs = ref([])
-const normPath = (p) => {
-  const t = String(p || '').trim()
-  return t ? '/' + t.replace(/^\/+|\/+$/g, '') : ''
-}
-const sourceIsCloudDir = computed(() =>
-  !!newRuleForm.value.source_dir && cloudDirs.value.includes(normPath(newRuleForm.value.source_dir)))
-
-// 选完目录后联动：目标路径预选媒体类型；源目录为云下载目录时自动开启按父目录名匹配（均可手动改）
-watch(() => newRuleForm.value.target_dir, (t) => {
-  if (!t) return
-  if (/电影|影片/.test(t)) newRuleForm.value.media_type = 'movie'
-  else if (/电视剧|剧集|短剧|动漫|综艺|纪录片/.test(t)) newRuleForm.value.media_type = 'tv'
-})
-watch(() => newRuleForm.value.source_dir, () => {
-  if (sourceIsCloudDir.value) {
-    newRuleForm.value.dir_match = true
-  } else {
-    newRuleForm.value.dir_match = false
-  }
-})
-
-const isDialogLibraryMode = computed(() => {
-  const m = newRuleForm.value.mode
-  if (m === 'library') return true
-  if (m === 'exact') return false
-  return moveSettings.value.auto_move_mode === 'library'
-})
-
-
-const extractKeyword = (path) => {
-  if (!path) return ''
-  const parts = path.trim().replace(/^\/+|\/+$/g, '').split('/').filter(p => p.trim())
-  if (!parts.length) return ''
-  let idx = parts.length - 1
-  const seasonRe = /^(?:season\s*\d+|s\d{1,2}|第\s*[一二三四五六七八九十\d]+\s*季|特别篇|sp|specials?)$/i
-  if (idx > 0 && seasonRe.test(parts[idx])) {
-    idx -= 1
-  }
-  const candidate = parts[idx]
-  const cleaned = candidate.replace(/[([{（【]?\s*(?:19\d{2}|20\d{2})\s*[)\]}）】]?/g, '').trim()
-  return cleaned || candidate
-}
-
-const formatTime = (ts) => {
-  if (!ts) return ''
-  const d = new Date(ts * 1000)
-  return d.toLocaleString('zh-CN', { hour12: false })
-}
-
 
 const loadAutoMove = async () => {
   try {
@@ -777,8 +497,7 @@ const stopAutoMovePolling = () => {
   movePoll.stop()
 }
 
-
-const openMovePicker = (row, kind) => {
+const onTablePickDir = ({ row, kind }) => {
   pickerRow = row
   pickerKind.value = kind
   pickerTitle.value = kind === 'move_source'
@@ -787,19 +506,12 @@ const openMovePicker = (row, kind) => {
   pickerVisible.value = true
 }
 
-const openDialogPicker = (kind) => {
-  pickerRow = null
-  pickerKind.value = kind
-  pickerTitle.value = kind === 'dialog_source' ? '选择源目录' : '选择目标目录'
-  pickerVisible.value = true
-}
-
 const onPickDir = (val) => {
   if (pickerKind.value === 'move_source') {
     if (pickerRow) {
       const oldSource = pickerRow.source_dir
       pickerRow.source_dir = val
-      if (pickerRow.dir_match && !cloudDirs.value.includes(normPath(val))) {
+      if (pickerRow.dir_match && !(cloudDirs.value || []).includes(normPath(val))) {
         ElMessageBox.confirm(
           '新源目录不是云下载目录，云下载模式将自动关闭，' +
           '回落为按文件名匹配的基本规则并保持启用。',
@@ -821,11 +533,6 @@ const onPickDir = (val) => {
       pickerRow.keyword = extractKeyword(val)
       saveMoveRule(pickerRow)
     }
-  } else if (pickerKind.value === 'dialog_source') {
-    newRuleForm.value.source_dir = val
-  } else if (pickerKind.value === 'dialog_target') {
-    newRuleForm.value.target_dir = val
-    newRuleForm.value.keyword = extractKeyword(val)
   }
 }
 
@@ -903,7 +610,6 @@ const saveMoveRule = async (rule) => {
 }
 
 // 云下载模式内联开关（非对称）：开 = 校验源目录 + 确认弹窗；关 = 直接生效
-const cloudValid = (row) => cloudDirs.value.includes(normPath(row.source_dir))
 const toggleDirMatch = async (row) => {
   if (!row.dir_match) {
     await saveMoveRule(row)
@@ -939,29 +645,8 @@ const deleteMoveRule = async (id) => {
 }
 
 const openAddMoveRule = () => {
-  newRuleForm.value = { source_dir: '', target_dir: '', keyword: '', mode: 'default', media_type: 'auto', dir_match: false }
   dialogVisible.value = true
 }
-
-const confirmAddMoveRule = async () => {
-  if (!newRuleForm.value.source_dir || !newRuleForm.value.target_dir) return
-  try {
-    await api.post('/api/auto-move/rules', {
-      source_dir: newRuleForm.value.source_dir,
-      target_dir: newRuleForm.value.target_dir,
-      keyword: newRuleForm.value.keyword || extractKeyword(newRuleForm.value.target_dir),
-      mode: newRuleForm.value.mode || 'default',
-      media_type: newRuleForm.value.media_type || 'auto',
-      dir_match: !!newRuleForm.value.dir_match,
-    })
-    dialogVisible.value = false
-    ElMessage.success('整理规则已添加')
-    await loadAutoMove()
-  } catch (e) {
-    ElMessage.error(errMsg(e))
-  }
-}
-
 
 const runAutoMoveNow = async () => {
   if (runningMove.value) return

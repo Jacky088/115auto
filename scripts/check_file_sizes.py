@@ -23,7 +23,6 @@ LEGACY_CAPS: dict[str, int] = {
     "backend/worker/bot_commands.py": 1360,
     "backend/worker/media_worker/scrape.py": 900,
     "backend/worker/queue_worker.py": 1040,
-    "web/src/components/dirs/AutoMovePanel.vue": 1020,
     "web/src/views/Files.vue": 1320,
     "web/src/views/Settings.vue": 1460,
 }
