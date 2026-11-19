@@ -14,10 +14,8 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 DEFAULT_MAX_LINES = 800
 WARN_LINES = 600
 
-# 历史文件只减不增基线（当前行数 + 30 行缺陷修复缓冲；重构缩减后应同步下调或移除）
-LEGACY_CAPS: dict[str, int] = {
-    "backend/worker/queue_worker.py": 1040,
-}
+# 历史文件只减不增基线（当前已全部清零，全库 0 豁免，所有源码文件均遵守 800 行硬上限）
+LEGACY_CAPS: dict[str, int] = {}
 
 SCAN_GLOBS = (
     "backend/**/*.py",
