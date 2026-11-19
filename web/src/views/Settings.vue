@@ -15,7 +15,7 @@
             <span class="settings-title">系统设置</span>
             <el-tag v-if="dirty" type="danger" effect="plain" size="small">● 有未保存的更改</el-tag>
             <el-button v-if="dirty" type="primary" size="small" @click="save">保存设置</el-button>
-            <el-button size="small" :loading="doctorLoading" @click="runDoctor">系统自检</el-button>
+            <el-button size="small" :loading="doctorLoading" @click="onDoctorClick">系统自检</el-button>
             <span class="tip pc-only-tip" style="margin-left: 4px">修改需点击「保存设置」后生效</span>
           </div>
 
@@ -109,7 +109,7 @@
       </el-table>
       <template #footer>
         <el-button :disabled="!doctor" @click="copyDoctor">复制报告</el-button>
-        <el-button type="primary" :loading="doctorLoading" @click="runDoctor">重新检查</el-button>
+        <el-button type="primary" :loading="doctorLoading" @click="executeDoctor">重新检查</el-button>
       </template>
     </el-dialog>
   </div>
@@ -120,6 +120,7 @@ import { nextTick, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { api, errMsg, saveOk } from '../api'
+import { confirmAction } from '../composables/confirmDialog'
 import { useUnsavedGuard } from '../composables/unsavedGuard'
 import TransferSettings from '../components/settings/TransferSettings.vue'
 import ScheduleSettings from '../components/settings/ScheduleSettings.vue'
@@ -249,7 +250,7 @@ const DOCTOR_TEXT = { ok: '正常', warn: '警告', fail: '失败', skip: '跳�
 const doctorTagText = (s) => DOCTOR_TEXT[s] || s || ''
 const doctorTagType = (s) => (s === 'ok' ? 'success' : s === 'warn' ? 'warning'
   : s === 'fail' ? 'danger' : 'info')
-const runDoctor = async () => {
+const executeDoctor = async () => {
   doctorOpen.value = true
   doctorLoading.value = true
   try {
@@ -259,6 +260,18 @@ const runDoctor = async () => {
   } finally {
     doctorLoading.value = false
   }
+}
+
+const onDoctorClick = async () => {
+  const ok = await confirmAction({
+    title: '是否执行系统自检？',
+    message: '系统自检将对数据库完整性、数据目录读写、磁盘与网盘容量、115 登录状态、频道监听及转存队列健康进行全面只读巡检，并生成脱敏诊断报告（安全只读，不修改任何业务数据与凭据）。',
+    confirmText: '开始自检',
+    cancelText: '取消',
+    type: 'info',
+  })
+  if (!ok) return
+  await executeDoctor()
 }
 const copyDoctor = async () => {
   const text = doctor.value && doctor.value.report
