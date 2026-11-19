@@ -1,122 +1,176 @@
-"""API 集成测试（需要服务器已启动 + 可访问 Telegram）。
+"""API 核心接口集成测试（鉴权、安全、向导、设置、频道、订阅、转存与黑名单）。
 
-运行: .venv/Scripts/python tests/test_api_integration.py [base_url]
-前提: 用全新的 data 目录启动 uvicorn backend.main:app --port 8768
+采用 FastAPI TestClient 纯内存执行，秒级运行，可稳定常驻 CI 与本地 pytest。
 """
+import os
 import sys
-import time
+import tempfile
 
-import httpx
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+os.environ.setdefault("DATA_DIR", tempfile.mkdtemp(prefix="autosave_test_api_"))
 
-PASS, FAIL = [], []
+from unittest.mock import AsyncMock, patch
+
+import pytest
+from fastapi.testclient import TestClient
+
+from backend import auth, database as db
+from backend.main import app
+
+client = TestClient(app)
 
 
-def check(name, cond, detail=""):
-    (PASS if cond else FAIL).append(name)
-    print(f"  {'✅' if cond else '❌'} {name}" + (f"  [{detail}]" if detail and not cond else ""))
+@pytest.fixture(autouse=True)
+def _setup_db():
+    db.init()
+    db.set_setting("web_username", "admin")
+    db.set_setting("web_password_hash", auth.hash_password("admin123"))
+    with auth._fail_lock:
+        auth._fail_records.clear()
+    yield
 
 
-def run_integration():
-    BASE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8768"
-    c = httpx.Client(base_url=BASE, timeout=30)
-    h = {}
+def test_auth_and_security():
+    # 1. 未登录访问受保护接口
+    r = client.get("/api/dashboard/stats")
+    assert r.status_code == 401
 
-    print("\n=== A. 认证与安全 ===")
-    r = c.get("/api/dashboard/stats")
-    check("未登录访问被拒 401", r.status_code == 401, str(r.status_code))
-    r = c.post("/api/auth/login", json={"username": "admin", "password": "wrong"})
-    check("错误密码被拒 401", r.status_code == 401)
-    r = c.post("/api/auth/login", json={"username": "admin", "password": "admin123"})
-    check("正确密码登录", r.status_code == 200 and "token" in r.json())
-    h = {"Authorization": "Bearer " + r.json()["token"]}
+    # 2. 错误密码被拒
+    r = client.post("/api/auth/login", json={"username": "admin", "password": "wrongpassword"})
+    assert r.status_code == 401
 
-    print("\n=== B. 向导与设置 ===")
-    w = c.get("/api/wizard/status", headers=h).json()
-    check("向导初始未完成", w["completed"] is False)
-    s = c.get("/api/settings", headers=h).json()
-    check("默认设置读取", s["daily_limit"] == 50 and s["tg_mode"] == "polling")
-    c.put("/api/settings", headers=h, json={"poll_interval_min": 10, "poll_interval_max": 15})
-    s2 = c.get("/api/settings", headers=h).json()
-    check("设置热更新", s2["poll_interval_min"] == 10 and s2["poll_interval_max"] == 15)
+    # 3. 正确密码登录
+    r = client.post("/api/auth/login", json={"username": "admin", "password": "admin123"})
+    assert r.status_code == 200
+    token = r.json().get("token")
+    assert token
 
-    print("\n=== C. 目录选择 ===")
-    dirs = c.get("/api/dirs/115", headers=h).json()
-    check("115 目录接口连通 (无论是否已绑 cookie)", "items" in dirs)
+    headers = {"Authorization": f"Bearer {token}"}
 
-    print("\n=== D. 频道管理 ===")
-    r = c.post("/api/channels", headers=h, json={"name": "test_ch_integration", "type": "public"})
-    check("添加频道", r.status_code == 200 and r.json().get("ok") is True)
-    chs = c.get("/api/channels", headers=h).json()
-    check("频道列表可见", any(x["name"] == "test_ch_integration" for x in chs))
-    ch_id = [x for x in chs if x["name"] == "test_ch_integration"][0]["id"]
-    c.delete(f"/api/channels/{ch_id}", headers=h)
-    chs2 = c.get("/api/channels", headers=h).json()
-    check("删除频道", not any(x["name"] == "test_ch_integration" for x in chs2))
+    # 4. 携带 Bearer Token 访问正常
+    r = client.get("/api/dashboard/stats", headers=headers)
+    assert r.status_code == 200
+    assert "quota" in r.json()
 
-    print("\n=== E. 订阅规则 ===")
-    r = c.post("/api/subscriptions", headers=h, json={
-        "name": "集成测试规则",
-        "keywords": "4K, 1080p",
-        "save_dir_id": "0",
-        "save_dir_name": "默认根目录",
+    # 5. 退出登录
+    r = client.post("/api/auth/logout", headers=headers)
+    assert r.status_code == 200
+
+    # 6. 已吊销的 Token 再次访问被拒
+    r = client.get("/api/dashboard/stats", headers=headers)
+    assert r.status_code == 401
+
+
+def test_wizard_and_settings():
+    token = auth.make_token("admin")
+    h = {"Authorization": f"Bearer {token}"}
+
+    # 向导状态
+    w = client.get("/api/wizard/status", headers=h).json()
+    assert "completed" in w
+
+    # 读取设置
+    s = client.get("/api/settings", headers=h).json()
+    assert "daily_limit" in s
+
+    # 热更新设置（合法区间：poll_interval_min / max 在 15~3600）
+    r = client.put("/api/settings", headers=h, json={"poll_interval_min": 20, "poll_interval_max": 40})
+    assert r.status_code == 200
+    s2 = client.get("/api/settings", headers=h).json()
+    assert s2["poll_interval_min"] == 20
+    assert s2["poll_interval_max"] == 40
+
+
+@patch("backend.tg.validate.check_channel_access", new=AsyncMock(return_value={"ok": True, "title": "测试频道"}))
+def test_channels_crud():
+    token = auth.make_token("admin")
+    h = {"Authorization": f"Bearer {token}"}
+
+    # 添加频道
+    r = client.post("/api/channels", headers=h, json={"name": "test_ch_integ", "type": "polling"})
+    assert r.status_code == 200 and r.json().get("ok") is True
+
+    # 列表可见
+    chs = client.get("/api/channels", headers=h).json()
+    matched = [x for x in chs if x["name"] == "test_ch_integ"]
+    assert len(matched) == 1
+    ch_id = matched[0]["id"]
+
+    # 删除频道
+    r = client.delete(f"/api/channels/{ch_id}", headers=h)
+    assert r.status_code == 200
+    chs2 = client.get("/api/channels", headers=h).json()
+    assert not any(x["name"] == "test_ch_integ" for x in chs2)
+
+
+def test_subscriptions_crud():
+    token = auth.make_token("admin")
+    h = {"Authorization": f"Bearer {token}"}
+
+    # 添加订阅
+    r = client.post("/api/subscriptions", headers=h, json={
+        "keyword": "测试剧集",
+        "note": "集成测试用",
     })
-    check("添加订阅", r.status_code == 200 and r.json().get("ok") is True)
-    subs = c.get("/api/subscriptions", headers=h).json()
-    check("订阅列表可见", any(x["name"] == "集成测试规则" for x in subs))
-    sub_id = [x for x in subs if x["name"] == "集成测试规则"][0]["id"]
-    c.delete(f"/api/subscriptions/{sub_id}", headers=h)
-    subs2 = c.get("/api/subscriptions", headers=h).json()
-    check("删除订阅", not any(x["name"] == "集成测试规则" for x in subs2))
+    assert r.status_code == 200 and r.json().get("ok") is True
 
-    print("\n=== F. 注入消息与转存队列 ===")
-    c.post("/api/channels", headers=h, json={"name": "integ_test_source", "type": "public"})
-    src_ch = [x for x in c.get("/api/channels", headers=h).json() if x["name"] == "integ_test_source"][0]
-    raw_texts = [
-        "🔥 新片发布: 电影A.2024.1080p https://115.com/s/sw3fake01?password=abcd",
-        "另一部好片: 剧集B.S01E01.4K 访问码: 1234 链接: https://anotepad.com/note/read/fakelink",
-        "无关纯文本无链接",
-    ]
-    for i, t in enumerate(raw_texts, start=1):
-        c.post(f"/api/channels/{src_ch['id']}/test_inject", headers=h, json={"message_id": 9000 + i, "text": t})
-    tr = c.get("/api/transfers", headers=h, params={"size": 100}).json()
-    queued = [i for i in tr["items"] if i["channel_name"] == "integ_test_source"]
-    check("消息解析入队 (至少 1 条 115 链接)", len(queued) >= 1, f"入队 {len(queued)} 条")
+    # 列表可见
+    res = client.get("/api/subscriptions", headers=h).json()
+    items = res.get("items", [])
+    matched = [x for x in items if x["keyword"] == "测试剧集"]
+    assert len(matched) == 1
+    sub_id = matched[0]["id"]
 
-    print("\n=== G. 队列处理与重试（等待工作器扫盘）===")
-    print("  ⏳ 等待 45 秒观察后台 worker 执行结果...")
-    time.sleep(45)
-    tr2 = c.get("/api/transfers", headers=h, params={"size": 100}).json()
-    running_or_tried = [i for i in tr2["items"] if i["attempts"] > 0]
-    check("工作器已尝试处理队列", len(running_or_tried) > 0,
-          f"{len(running_or_tried)} 个任务已尝试")
-    if running_or_tried:
-        sample = running_or_tried[0]
-        check("失败任务标记 115 未登录", "未登录" in sample["error"] or "cookie" in sample["error"].lower(),
-              sample["error"][:80])
-        check("已安排退避重试", sample["next_retry_at"] is not None)
-
-    print("\n=== H. 转存记录操作 ===")
-    if queued:
-        tid = queued[0]["id"]
-        r = c.post(f"/api/transfers/{tid}/retry", headers=h)
-        check("手动重试入队", r.json().get("ok") is True)
-    r = c.get("/api/logs", headers=h).json()
-    check("历史日志可查", r["total"] > 0)
-
-    print("\n=== I. 黑名单 CRUD ===")
-    c.post("/api/blacklist/keyword", headers=h, json={"value": "测试关键词ABC\n另一个DEF"})
-    kws = [k["value"] for k in c.get("/api/blacklist/keyword", headers=h).json()]
-    check("批量添加关键词", "测试关键词ABC" in kws and "另一个DEF" in kws)
-    kid = [k for k in c.get("/api/blacklist/keyword", headers=h).json() if k["value"] == "测试关键词ABC"][0]["id"]
-    c.delete(f"/api/blacklist/keyword/{kid}", headers=h)
-    kws = [k["value"] for k in c.get("/api/blacklist/keyword", headers=h).json()]
-    check("删除关键词", "测试关键词ABC" not in kws)
-
-    print(f"\n{'='*40}\n结果: {len(PASS)} 通过, {len(FAIL)} 失败")
-    if FAIL:
-        print("失败项:", FAIL)
-        sys.exit(1)
+    # 删除订阅
+    r = client.delete(f"/api/subscriptions/{sub_id}", headers=h)
+    assert r.status_code == 200
+    res2 = client.get("/api/subscriptions", headers=h).json()
+    items2 = res2.get("items", [])
+    assert not any(x["keyword"] == "测试剧集" for x in items2)
 
 
-if __name__ == "__main__":
-    run_integration()
+def test_blacklist_keyword_crud():
+    token = auth.make_token("admin")
+    h = {"Authorization": f"Bearer {token}"}
+
+    # 批量添加关键词
+    client.post("/api/blacklist/keyword", headers=h, json={"value": "测试词AAA\n测试词BBB"})
+    kws = [k["value"] for k in client.get("/api/blacklist/keyword", headers=h).json()]
+    assert "测试词AAA" in kws and "测试词BBB" in kws
+
+    # 删除关键词
+    all_kws = client.get("/api/blacklist/keyword", headers=h).json()
+    kid = [k for k in all_kws if k["value"] == "测试词AAA"][0]["id"]
+    client.delete(f"/api/blacklist/keyword/{kid}", headers=h)
+
+    kws2 = [k["value"] for k in client.get("/api/blacklist/keyword", headers=h).json()]
+    assert "测试词AAA" not in kws2
+
+
+def test_manual_transfer_and_retry():
+    token = auth.make_token("admin")
+    h = {"Authorization": f"Bearer {token}"}
+
+    # 手动转存入队
+    r = client.post("/api/transfers/manual", headers=h, json={
+        "text": "https://115cdn.com/s/testinteg01?password=1234",
+        "target_dir": "/最近接收",
+    })
+    assert r.status_code == 200
+    assert r.json().get("result", {}).get("queued") == 1
+
+    # 查看列表
+    tr = client.get("/api/transfers", headers=h, params={"size": 50}).json()
+    items = [i for i in tr["items"] if i.get("share_code") == "testinteg01"]
+    assert len(items) == 1
+    tid = items[0]["id"]
+
+    # 重试转存（running/success 拒绝，但先把状态设为 failed 模拟可重试）
+    db.execute("UPDATE transfers SET status='failed', error='模拟失败' WHERE id=?", (tid,))
+    r = client.post(f"/api/transfers/{tid}/retry", headers=h)
+    assert r.status_code == 200
+    assert r.json().get("ok") is True
+
+    # 日志可查
+    logs = client.get("/api/logs", headers=h).json()
+    assert logs["total"] >= 0

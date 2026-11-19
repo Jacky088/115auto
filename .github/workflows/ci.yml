@@ -19,7 +19,7 @@ jobs:
         run: ruff check backend tests
       - name: Modularity guard (file size ceiling)
         run: python scripts/check_file_sizes.py
-      - run: coverage run -m pytest tests --ignore=tests/test_api_integration.py --ignore=tests/test_worker_mock.py -q
+      - run: coverage run -m pytest tests --ignore=tests/test_worker_mock.py -q
       - run: coverage run -a tests/test_worker_mock.py
       - name: Coverage report
         run: coverage report

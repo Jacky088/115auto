@@ -131,5 +131,5 @@ cd web && npm run lint && npm run build  # 轻量静态检查 + 预构建到 bac
 # 测试与检查
 .venv/Scripts/ruff check backend tests
 .venv/Scripts/python tests/test_worker_mock.py
-.venv/Scripts/python -m pytest tests --ignore=tests/test_api_integration.py --ignore=tests/test_worker_mock.py -q
+.venv/Scripts/python -m pytest tests --ignore=tests/test_worker_mock.py -q
 ```
