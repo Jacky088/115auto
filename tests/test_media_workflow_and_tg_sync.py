@@ -24,7 +24,12 @@ def _clean_state():
     transfer_gate.reset_for_tests()
     transfer_gate.clear_cancel()
     for tbl in ("media_rules", "media_tasks", "organized_records", "media_tg_batches", "tmdb_cache", "transfers"):
-        db.execute(f"DELETE FROM {tbl}")
+        for _ in range(5):
+            try:
+                db.execute(f"DELETE FROM {tbl}")
+                break
+            except Exception:
+                time.sleep(0.1)
     while not jobs._tg_notify_queue.empty():
         try:
             jobs._tg_notify_queue.get_nowait()

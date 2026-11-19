@@ -52,21 +52,28 @@ _conn: sqlite3.Connection | None = None
 
 def _init_db():
     global _conn
-    _conn = sqlite3.connect(config.DB_PATH, check_same_thread=False)
-    _conn.row_factory = sqlite3.Row
-    _conn.execute("PRAGMA journal_mode=WAL")
-    _conn.execute("PRAGMA synchronous=NORMAL")  # WAL 下的安全档位：高频小事务（写日志）收益明显
-    # 备份/恢复使用独立连接：遇到短暂锁竞争时等待而不是立刻抛 database is locked
-    _conn.execute("PRAGMA busy_timeout=5000")
-    # 快速结构完整性校验，拦截损坏页或异常头
-    res = _conn.execute("PRAGMA quick_check").fetchone()
-    if res and res[0] != "ok":
-        raise sqlite3.DatabaseError(f"quick_check failed: {res[0]}")
-    _conn.executescript(SCHEMA)
-    _migrate_warnings = _migrate(_conn)
-    _seed(_conn)
-    _conn.commit()
-    _emit_migrate_warnings(_migrate_warnings)
+    with _lock:
+        if _conn is not None:
+            try:
+                _conn.close()
+            except Exception:
+                pass
+            _conn = None
+        _conn = sqlite3.connect(config.DB_PATH, check_same_thread=False, timeout=60.0)
+        _conn.row_factory = sqlite3.Row
+        _conn.execute("PRAGMA journal_mode=WAL")
+        _conn.execute("PRAGMA synchronous=NORMAL")  # WAL 下的安全档位：高频小事务（写日志）收益明显
+        # 遇到锁竞争时自旋等待长达 60s 而不是提前抛 database is locked
+        _conn.execute("PRAGMA busy_timeout=60000")
+        # 快速结构完整性校验，拦截损坏页或异常头
+        res = _conn.execute("PRAGMA quick_check").fetchone()
+        if res and res[0] != "ok":
+            raise sqlite3.DatabaseError(f"quick_check failed: {res[0]}")
+        _conn.executescript(SCHEMA)
+        _migrate_warnings = _migrate(_conn)
+        _seed(_conn)
+        _conn.commit()
+        _emit_migrate_warnings(_migrate_warnings)
 
 
 def _handle_corrupt_db(err: Exception):
