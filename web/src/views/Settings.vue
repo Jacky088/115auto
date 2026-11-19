@@ -30,10 +30,10 @@
               popper-class="settings-search-popper"
               @select="onSearchSelect"
             >
-              <template #default="{ item }">
-                <div class="search-item">
-                  <span class="search-label">{{ item.value }}</span>
-                  <el-tag size="small" effect="light" class="search-tab-tag">{{ tabLabel(item.tab) }}</el-tag>
+              <template #default="scope">
+                <div v-if="scope && scope.item" class="search-item">
+                  <span class="search-label">{{ scope.item.value }}</span>
+                  <el-tag size="small" effect="light" class="search-tab-tag">{{ tabLabel(scope.item.tab) }}</el-tag>
                 </div>
               </template>
             </el-autocomplete>
@@ -117,6 +117,7 @@
 
 <script setup>
 import { nextTick, onMounted, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { api, errMsg, saveOk } from '../api'
 import { useUnsavedGuard } from '../composables/unsavedGuard'
@@ -128,6 +129,7 @@ import BackupSettings from '../components/settings/BackupSettings.vue'
 import ApiSettings from '../components/settings/ApiSettings.vue'
 import '../components/settings/settings.css'
 
+const route = useRoute()
 const transferRef = ref(null)
 const backupRef = ref(null)
 const f = ref({})
@@ -229,8 +231,8 @@ const onSearchSelect = (item) => {
   })
 }
 
-const onTabChange = (name) => {
-  history.replaceState(null, '', `#${name}`)
+const onTabChange = () => {
+  // 保持组件内部响应式状态切换，不劫持修改 window.location.hash，避免与 Hash 路由发生冲突
 }
 
 const syncF = (patch) => {
@@ -286,63 +288,58 @@ const load = async () => {
   loadError.value = ''
   try {
     f.value = (await api.get('/api/settings')).data
+    if (f.value.schedule_jitter_min === undefined) f.value.schedule_jitter_min = 5
+    if (f.value.batch_rest_enabled === undefined) f.value.batch_rest_enabled = true
+    if (f.value.batch_rest_count === undefined) f.value.batch_rest_count = 3
+    if (f.value.batch_rest_min_min === undefined) f.value.batch_rest_min_min = 2
+    if (f.value.batch_rest_max_min === undefined) f.value.batch_rest_max_min = 5
+    if (f.value.health_check_interval_min === undefined) f.value.health_check_interval_min = 10
+    if (f.value.dedup_cache_ttl_sec === undefined) f.value.dedup_cache_ttl_sec = 90
+    if (!f.value.auto_backup_time) f.value.auto_backup_time = '04:00'
+
+    // 回填三组预设
+    const RETRY_PRESETS = [
+      { label: '快速（30秒/2分/10分）', sec: [30, 120, 600] },
+      { label: '标准（1分/5分/30分）', sec: [60, 300, 1800] },
+      { label: '稳健（5分/30分/2小时）', sec: [300, 1800, 7200] },
+    ]
+    const POLL_PRESETS = [
+      { label: '快速（15~45秒）', min: 15, max: 45 },
+      { label: '标准（30秒~2分）', min: 30, max: 120 },
+      { label: '稳健（3~10分）', min: 180, max: 600 },
+    ]
+    const TRANSFER_PRESETS = [
+      { label: '快速（30秒~1分）', min: 30, max: 60 },
+      { label: '标准（1~3分）', min: 60, max: 180 },
+      { label: '稳健（3~10分）', min: 180, max: 600 },
+    ]
+
+    const hit = (arr, cur, pick) => {
+      if (!Array.isArray(cur)) return arr[1].label
+      const m = arr.find((p) => pick(p).every((n, i) => n === cur[i]))
+      return (m || arr[1]).label
+    }
+    retryPreset.value = hit(RETRY_PRESETS, f.value.retry_backoff || [], (p) => p.sec)
+    pollPreset.value = hit(POLL_PRESETS, [f.value.poll_interval_min, f.value.poll_interval_max],
+                           (p) => [p.min, p.max])
+    transferPreset.value = hit(TRANSFER_PRESETS, [f.value.transfer_interval_min, f.value.transfer_interval_max],
+                               (p) => [p.min, p.max])
+
+    // 查询参数直达指定 Tab（如 ?tab=notify）
+    const tabQuery = String(route?.query?.tab || '').toLowerCase()
+    if (tabQuery && TAB_LABELS[tabQuery]) {
+      activeTab.value = tabQuery
+    }
+
+    loaded.value = true
+    await nextTick()
+    suppressWatch = false
+    dirty.value = false
   } catch (e) {
     loadError.value = errMsg(e) || '设置加载失败'
     ElMessage.error(loadError.value)
     suppressWatch = false
-    return
   }
-  if (f.value.schedule_jitter_min === undefined) f.value.schedule_jitter_min = 5
-  if (f.value.batch_rest_enabled === undefined) f.value.batch_rest_enabled = true
-  if (f.value.batch_rest_count === undefined) f.value.batch_rest_count = 3
-  if (f.value.batch_rest_min_min === undefined) f.value.batch_rest_min_min = 2
-  if (f.value.batch_rest_max_min === undefined) f.value.batch_rest_max_min = 5
-  if (f.value.health_check_interval_min === undefined) f.value.health_check_interval_min = 10
-  if (f.value.dedup_cache_ttl_sec === undefined) f.value.dedup_cache_ttl_sec = 90
-  if (!f.value.auto_backup_time) f.value.auto_backup_time = '04:00'
-
-  // 回填三组预设
-  const RETRY_PRESETS = [
-    { label: '快速（30秒/2分/10分）', sec: [30, 120, 600] },
-    { label: '标准（1分/5分/30分）', sec: [60, 300, 1800] },
-    { label: '稳健（5分/30分/2小时）', sec: [300, 1800, 7200] },
-  ]
-  const POLL_PRESETS = [
-    { label: '快速（15~45秒）', min: 15, max: 45 },
-    { label: '标准（30秒~2分）', min: 30, max: 120 },
-    { label: '稳健（3~10分）', min: 180, max: 600 },
-  ]
-  const TRANSFER_PRESETS = [
-    { label: '快速（30秒~1分）', min: 30, max: 60 },
-    { label: '标准（1~3分）', min: 60, max: 180 },
-    { label: '稳健（3~10分）', min: 180, max: 600 },
-  ]
-
-  const hit = (arr, cur, pick) => {
-    const m = arr.find((p) => pick(p).every((n, i) => n === cur[i]))
-    return (m || arr[1]).label
-  }
-  retryPreset.value = hit(RETRY_PRESETS, f.value.retry_backoff || [], (p) => p.sec)
-  pollPreset.value = hit(POLL_PRESETS, [f.value.poll_interval_min, f.value.poll_interval_max],
-                         (p) => [p.min, p.max])
-  transferPreset.value = hit(TRANSFER_PRESETS, [f.value.transfer_interval_min, f.value.transfer_interval_max],
-                             (p) => [p.min, p.max])
-
-  if (f.value.tg_mode && f.value.tg_mode !== 'polling') {
-    transferRef.value?.loadUb?.()
-  }
-  backupRef.value?.loadBundleEstimate?.()
-  
-  // URL hash 直达相应 Tab
-  const hash = (location.hash || '').replace('#', '')
-  if (hash && TAB_LABELS[hash]) {
-    activeTab.value = hash
-  }
-
-  loaded.value = true
-  await nextTick()
-  suppressWatch = false
-  dirty.value = false
 }
 
 const validateForm = () => {
