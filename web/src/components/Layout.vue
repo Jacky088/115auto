@@ -92,7 +92,7 @@
           </el-tooltip>
         </div>
         <div class="header-right">
-          <el-tooltip v-if="canInstall || isIosSafari" content="安装为独立应用 (PWA)" placement="bottom">
+          <el-tooltip v-if="!isInstalled" content="安装为独立应用 (PWA)" placement="bottom">
             <el-button text class="theme-btn" aria-label="安装为独立应用" @click="handleInstall">
               <el-icon :size="17"><Download /></el-icon>
             </el-button>
@@ -341,7 +341,7 @@ const username = ref('')
 const loadUsername = async () => {
   try { username.value = (await api.get('/api/auth/me')).data.username || 'admin' } catch { /* ignore */ }
 }
-const { canInstall, isIosSafari, promptInstall } = usePwaInstall()
+const { canInstall, isInstalled, isIosSafari, promptInstall } = usePwaInstall()
 const handleInstall = () => {
   if (canInstall.value) {
     promptInstall()
@@ -349,6 +349,12 @@ const handleInstall = () => {
     ElMessageBox.alert(
       '在 iPhone / iPad Safari 上安装为独立 App：\n\n1. 点击 Safari 底部工具栏的【分享】图标（方框带向上箭头）；\n2. 向上滑动菜单，点击【添加到主屏幕】；\n3. 点击右上角【添加】即可！',
       '添加到主屏幕',
+      { confirmButtonText: '我知道了' }
+    )
+  } else {
+    ElMessageBox.alert(
+      '将 115AutoSave 安装为桌面独立应用：\n\n1. Chrome / Edge 浏览器：点击地址栏最右侧的【安装】图标 ⊕，或点击右上角「···」菜单 →「应用」→「将此站点作为应用安装」；\n2. 局域网访问提示：浏览器规范要求仅在 HTTPS 或 localhost 下支持一键弹窗；局域网 IP 访问请通过上述浏览器菜单手动添加；\n3. 手机/平板设备：在浏览器菜单选择「添加到主屏幕」即可。',
+      '安装为独立应用',
       { confirmButtonText: '我知道了' }
     )
   }

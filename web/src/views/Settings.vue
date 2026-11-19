@@ -41,7 +41,12 @@
         </div>
       </template>
 
-      <el-form label-position="top" class="settings-form">
+      <el-form label-position="top" class="settings-form" autocomplete="off" @submit.prevent>
+        <!-- 阻止浏览器密码管理器将设置页首个输入框（TG 代理）误认为登录用户名 -->
+        <div style="position: absolute; top: -9999px; left: -9999px; width: 0; height: 0; overflow: hidden;" aria-hidden="true">
+          <input type="text" name="fake_username_remember" tabindex="-1" autocomplete="username" />
+          <input type="password" name="fake_password_remember" tabindex="-1" autocomplete="current-password" />
+        </div>
         <el-tabs v-model="activeTab" class="settings-tabs" @tab-change="onTabChange">
           <el-tab-pane label="🔄 转存控制" name="transfer">
             <TransferSettings

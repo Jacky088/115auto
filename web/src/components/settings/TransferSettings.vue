@@ -144,6 +144,15 @@
         <div class="range-row input-btn-row" style="width: 100%">
           <el-input
             v-model="f.proxy"
+            name="tg_proxy_url"
+            autocomplete="off"
+            autocapitalize="off"
+            autocorrect="off"
+            spellcheck="false"
+            data-lpignore="true"
+            data-1p-ignore="true"
+            data-bwignore="true"
+            data-form-type="other"
             placeholder="socks5://127.0.0.1:1080 或 http://127.0.0.1:7890（仅 TG 流量走代理，留空直连）"
             :title="f.proxy === SECRET_MASK ? '已配置代理（显示为掩码）：清空后输入新地址可更换' : ''"
           />

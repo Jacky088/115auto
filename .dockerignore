@@ -9,7 +9,9 @@ tests
 docs
 android
 scratch
+scripts
 web
+**/node_modules
 **/__pycache__
 **/*.pyc
 .pytest_cache
