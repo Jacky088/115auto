@@ -2,7 +2,7 @@
 import os
 from pathlib import Path
 
-APP_VERSION = "1.5.1"  # 展示于网页页脚与 /api/version，随发行包更新
+APP_VERSION = "1.5.2"  # 展示于网页页脚与 /api/version，随发行包更新
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 BACKEND_DIR = Path(__file__).resolve().parent
