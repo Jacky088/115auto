@@ -25,6 +25,8 @@ export default [
     rules: {
       // 允许单字组件名（Login.vue / Dashboard.vue / Files.vue 等既有命名）
       'vue/multi-word-component-names': 'off',
+      // 表单分区子组件模式下，允许对传入的表单对象属性直接双向绑定（禁止直接重写 prop 本身）
+      'vue/no-mutating-props': ['error', { shallowOnly: true }],
       // 允许空 catch 块（前端常见兜底 try { ... } catch {}）
       'no-empty': ['error', { allowEmptyCatch: true }],
       // 未使用变量仅报提示，忽略下划线前缀占位参数

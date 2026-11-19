@@ -24,7 +24,6 @@ LEGACY_CAPS: dict[str, int] = {
     "backend/worker/media_worker/scrape.py": 900,
     "backend/worker/queue_worker.py": 1040,
     "web/src/views/Files.vue": 1320,
-    "web/src/views/Settings.vue": 1460,
 }
 
 SCAN_GLOBS = (
