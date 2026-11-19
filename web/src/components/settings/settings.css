@@ -79,20 +79,145 @@
   line-height: 1.55;
 }
 
-/* 左右两栏瀑布流布局：各分区卡片按高度自动分配到两列，窄屏回落单列 */
-.settings-page .settings-flow {
-  column-count: 2;
-  column-gap: 16px;
+/* 设置页面顶栏与响应式工具区 */
+.settings-page .settings-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  width: 100%;
 }
 
-.settings-page .settings-flow > .section-card {
-  break-inside: avoid;
+.settings-page .settings-title {
+  font-weight: 700;
+  font-size: var(--fs-title);
+  color: var(--saas-text-main);
 }
 
-@media (max-width: 1100px) {
-  .settings-page .settings-flow {
-    column-count: 1;
+.settings-page .toolbar-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.settings-page .toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: auto;
+}
+
+.settings-page .settings-search-input {
+  width: 270px;
+}
+
+@media (max-width: 768px) {
+  .settings-page .settings-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
   }
+  .settings-page .toolbar-left {
+    width: 100%;
+    justify-content: space-between;
+  }
+  .settings-page .toolbar-right {
+    width: 100%;
+    margin-left: 0;
+  }
+  .settings-page .settings-search-input {
+    width: 100%;
+  }
+  .settings-page .pc-only-tip {
+    display: none;
+  }
+}
+
+/* 标签页导航与自适应手势滑动 */
+.settings-page .settings-tabs .el-tabs__header {
+  margin-bottom: 20px;
+  border-bottom: 1px solid var(--saas-line);
+}
+
+.settings-page .settings-tabs .el-tabs__item {
+  font-size: 14px;
+  font-weight: 500;
+  padding: 0 16px;
+  transition: color 0.2s cubic-bezier(0.4, 0, 0.2, 1), font-weight 0.2s ease;
+}
+
+.settings-page .settings-tabs .el-tabs__item.is-active {
+  font-weight: 700;
+  color: var(--el-color-primary);
+}
+
+@media (max-width: 768px) {
+  .settings-page .settings-tabs .el-tabs__item {
+    padding: 0 10px;
+    font-size: 13px;
+  }
+}
+
+/* 各 Tab 内卡片网格响应式布局：宽屏双列自适应，窄屏流式单列 */
+.settings-page .transfer-settings-group,
+.settings-page .notify-settings-group,
+.settings-page .schedule-settings-group,
+.settings-page .wash-settings-group,
+.settings-page .backup-settings-group,
+.settings-page .api-settings-group {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(460px, 1fr));
+  gap: 16px;
+  align-items: start;
+}
+
+@media (max-width: 960px) {
+  .settings-page .transfer-settings-group,
+  .settings-page .notify-settings-group,
+  .settings-page .schedule-settings-group,
+  .settings-page .wash-settings-group,
+  .settings-page .backup-settings-group,
+  .settings-page .api-settings-group {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+}
+
+/* 搜索结果项样式 */
+.settings-search-popper .search-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 4px 0;
+}
+
+.settings-search-popper .search-label {
+  font-size: 13px;
+  color: var(--saas-text-main);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-search-popper .search-tab-tag {
+  flex-shrink: 0;
+  font-size: 11.5px;
+}
+
+/* 搜索直达微光高亮动画 */
+@keyframes settingsHighlightFlash {
+  0% { box-shadow: 0 0 0 0 rgba(79, 107, 255, 0.7); }
+  35% { box-shadow: 0 0 0 6px rgba(79, 107, 255, 0.45); }
+  100% { box-shadow: 0 0 0 0 rgba(79, 107, 255, 0); }
+}
+
+.settings-page .tab-pane-highlight {
+  animation: settingsHighlightFlash 1.6s ease-out;
+  border-radius: 12px;
 }
 
 .settings-page .tip {

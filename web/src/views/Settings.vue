@@ -10,34 +10,71 @@
 
     <el-card v-if="loaded" shadow="never" class="page-card">
       <template #header>
-        <div class="toolbar" style="margin-bottom: 0">
-          <b>系统设置</b>
-          <el-tag v-if="dirty" type="danger" effect="plain" size="small">● 有未保存的更改</el-tag>
-          <el-button v-if="dirty" type="primary" size="small" style="margin-left: 8px" @click="save">保存设置</el-button>
-          <el-button size="small" style="margin-left: 8px" :loading="doctorLoading" @click="runDoctor">
-            系统自检
-          </el-button>
-          <span style="margin-left: auto" class="tip">修改需点击「保存设置」后生效</span>
+        <div class="settings-toolbar">
+          <div class="toolbar-left">
+            <span class="settings-title">系统设置</span>
+            <el-tag v-if="dirty" type="danger" effect="plain" size="small">● 有未保存的更改</el-tag>
+            <el-button v-if="dirty" type="primary" size="small" @click="save">保存设置</el-button>
+            <el-button size="small" :loading="doctorLoading" @click="runDoctor">系统自检</el-button>
+            <span class="tip pc-only-tip" style="margin-left: 4px">修改需点击「保存设置」后生效</span>
+          </div>
+
+          <div class="toolbar-right">
+            <el-autocomplete
+              v-model="searchQuery"
+              :fetch-suggestions="querySearch"
+              placeholder="🔍 搜索设置项（如 Bark、重试、备份...）"
+              clearable
+              size="small"
+              class="settings-search-input"
+              popper-class="settings-search-popper"
+              @select="onSearchSelect"
+            >
+              <template #default="{ item }">
+                <div class="search-item">
+                  <span class="search-label">{{ item.value }}</span>
+                  <el-tag size="small" effect="light" class="search-tab-tag">{{ tabLabel(item.tab) }}</el-tag>
+                </div>
+              </template>
+            </el-autocomplete>
+          </div>
         </div>
       </template>
 
       <el-form label-position="top" class="settings-form">
-        <div class="settings-flow">
-          <TransferSettings
-            ref="transferRef"
-            :f="f"
-            v-model:poll-preset="pollPreset"
-            v-model:transfer-preset="transferPreset"
-            v-model:retry-preset="retryPreset"
-          />
-          <ScheduleSettings :f="f" />
-          <NotifySettings :f="f" @sync-f="syncF" />
-          <WashSettings :f="f" @dirty="dirty = true" />
-          <BackupSettings ref="backupRef" :f="f" />
-          <ApiSettings :f="f" />
-        </div>
+        <el-tabs v-model="activeTab" class="settings-tabs" @tab-change="onTabChange">
+          <el-tab-pane label="🔄 转存控制" name="transfer">
+            <TransferSettings
+              ref="transferRef"
+              :f="f"
+              v-model:poll-preset="pollPreset"
+              v-model:transfer-preset="transferPreset"
+              v-model:retry-preset="retryPreset"
+            />
+          </el-tab-pane>
 
-        <div class="btn-row" style="margin-top: 10px">
+          <el-tab-pane label="🔔 消息通知" name="notify">
+            <NotifySettings :f="f" @sync-f="syncF" />
+          </el-tab-pane>
+
+          <el-tab-pane label="⏰ 定时维护" name="schedule">
+            <ScheduleSettings :f="f" />
+          </el-tab-pane>
+
+          <el-tab-pane label="🧼 追更洗版" name="wash">
+            <WashSettings :f="f" @dirty="dirty = true" />
+          </el-tab-pane>
+
+          <el-tab-pane label="💾 备份恢复" name="backup">
+            <BackupSettings ref="backupRef" :f="f" />
+          </el-tab-pane>
+
+          <el-tab-pane label="🔑 开放接口" name="api">
+            <ApiSettings :f="f" />
+          </el-tab-pane>
+        </el-tabs>
+
+        <div class="btn-row" style="margin-top: 16px">
           <el-button type="primary" :disabled="!dirty" @click="save">保存设置</el-button>
         </div>
       </el-form>
@@ -97,12 +134,104 @@ const f = ref({})
 const loaded = ref(false)
 const loadError = ref('')
 
+const activeTab = ref('transfer')
+const searchQuery = ref('')
+
 const retryPreset = ref('标准（1分/5分/30分）')
 const pollPreset = ref('标准（30秒~2分）')
 const transferPreset = ref('标准（1~3分）')
 const dirty = ref(false)
 
 let suppressWatch = false
+
+// ---- Tab 标签与快速检索索引 ----
+const TAB_LABELS = {
+  transfer: '🔄 转存控制',
+  notify: '🔔 消息通知',
+  schedule: '⏰ 定时维护',
+  wash: '🧼 追更洗版',
+  backup: '💾 备份恢复',
+  api: '🔑 开放接口',
+}
+const tabLabel = (tab) => TAB_LABELS[tab] || tab
+
+const SEARCH_INDEX = [
+  // 转存控制 (transfer)
+  { value: '转存总开关与云下载总开关', tab: 'transfer', keywords: ['开关', '转存', '离线', '云下载', 'ed2k', '磁力'] },
+  { value: 'Telegram 监听模式 (网页轮询 / Userbot)', tab: 'transfer', keywords: ['tg', '监听', '轮询', 'userbot', '模式', '频道'] },
+  { value: '网络代理设置 (HTTP / SOCKS5)', tab: 'transfer', keywords: ['代理', 'proxy', 'socks5', 'http', '梯子'] },
+  { value: '轮询检索间隔', tab: 'transfer', keywords: ['轮询', '间隔', '秒', '分钟', '频控'] },
+  { value: '转存与云下载执行间隔', tab: 'transfer', keywords: ['转存', '云下载', '执行', '延迟', '间隔', '频控'] },
+  { value: '失败重试退避阶梯 (60s/300s/1800s)', tab: 'transfer', keywords: ['重试', '失败', '退避', '报错', '阶梯'] },
+  { value: '115 空间不足自动暂停 (空间门闸)', tab: 'transfer', keywords: ['空间', '暂停', '门禁', '门闸', '熔断', 'gb', 'tb', '容量'] },
+  { value: '每日转存上限 (1~50 笔/天)', tab: 'transfer', keywords: ['每日', '限额', '上限', '额度', '50'] },
+  { value: '分享体积下限 (过滤微小资源)', tab: 'transfer', keywords: ['体积', '下限', '过滤', '小文件', 'gb'] },
+  { value: '拟人化连存小憩 (防风控休息)', tab: 'transfer', keywords: ['小憩', '休息', '连存', '防风控', '笔数', '时间'] },
+
+  // 消息通知 (notify)
+  { value: 'Telegram Bot 推送与测试', tab: 'notify', keywords: ['tg', 'telegram', 'bot', 'token', 'chat_id', '通知', '推送', '测试'] },
+  { value: 'Bark (iOS) 苹果设备通知', tab: 'notify', keywords: ['bark', 'ios', '苹果', 'iphone', '推送', 'key', '设备'] },
+  { value: 'Server酱 (Turbo) 微信推送', tab: 'notify', keywords: ['server酱', '方糖', '微信', 'sct', 'sendkey', '消息'] },
+  { value: 'PushDeer 微信/客户端推送', tab: 'notify', keywords: ['pushdeer', '快鹿', '推送', 'key'] },
+  { value: 'PushPlus (推送加) 微信通知', tab: 'notify', keywords: ['pushplus', '推送加', '微信', 'token'] },
+  { value: 'ntfy 自建/公共主题推送', tab: 'notify', keywords: ['ntfy', 'topic', '自建', '主题', '推送'] },
+  { value: '自定义 Webhook (企业微信/飞书/钉钉)', tab: 'notify', keywords: ['webhook', '企微', '企业微信', '飞书', '钉钉', '机器人', 'http', 'post'] },
+  { value: '每日转存摘要报告 (日报推送时间)', tab: 'notify', keywords: ['每日', '摘要', '日报', '统计', '定时', '推送时间'] },
+
+  // 定时维护 (schedule)
+  { value: '定时计划与避让时间段 (静默防风控)', tab: 'schedule', keywords: ['定时', '计划', '避让', '深夜', '时间段', '起止', '跨零点'] },
+  { value: '开工随机扰动 (Jitter 随机微差)', tab: 'schedule', keywords: ['扰动', '随机', 'jitter', '微差', '防封'] },
+  { value: '运行健康巡检间隔 (离线任务检查)', tab: 'schedule', keywords: ['健康', '巡检', '离线', '检查', '间隔'] },
+  { value: '日志保留天数与 SQLite 自动压缩', tab: 'schedule', keywords: ['日志', '清理', '保留', '天数', 'vacuum', '压缩', '瘦身'] },
+
+  // 追更洗版 (wash)
+  { value: '分享追更模式 (同一链接增量转存)', tab: 'wash', keywords: ['追更', '增量', '分享', '同链接', '集数', '加更'] },
+  { value: '按文件名同名去重', tab: 'wash', keywords: ['去重', '同名', '查重', '文件名'] },
+  { value: '智能画质洗版升级 (高画质替换低画质)', tab: 'wash', keywords: ['洗版', '画质', '4k', '1080p', '升级', '替换', '优质'] },
+  { value: '旧版文件归档目录与移入回收站', tab: 'wash', keywords: ['旧版', '归档', '回收站', '删除', '目录'] },
+
+  // 备份恢复 (backup)
+  { value: '定时自动备份至 Telegram Bot', tab: 'backup', keywords: ['自动备份', '定时', '计划', '天数', '时间', 'bot'] },
+  { value: '导出轻量配置备份 (.json)', tab: 'backup', keywords: ['导出', '配置', '备份', 'json', '下载'] },
+  { value: '导出全量迁移包 (含媒体刮削与台账)', tab: 'backup', keywords: ['全量', '迁移包', '导出', '换机', '换服务器', 'bundle'] },
+  { value: '恢复历史备份或全量迁移包', tab: 'backup', keywords: ['恢复', '还原', '导入', '上传', '覆盖'] },
+
+  // 开放接口 (api)
+  { value: '对外 API Token (开放转存接口)', tab: 'api', keywords: ['api', 'token', '开放', '接口', '外部', '密钥', '第三方', '调用'] },
+]
+
+const querySearch = (queryString, cb) => {
+  if (!queryString || !queryString.trim()) {
+    cb([])
+    return
+  }
+  const q = queryString.trim().toLowerCase()
+  const results = SEARCH_INDEX.filter((item) => {
+    return (
+      item.value.toLowerCase().includes(q) ||
+      item.keywords.some((kw) => kw.includes(q))
+    )
+  })
+  cb(results)
+}
+
+const onSearchSelect = (item) => {
+  if (!item) return
+  activeTab.value = item.tab
+  nextTick(() => {
+    searchQuery.value = ''
+    const el = document.querySelector(`.settings-page .${item.tab}-settings-group`)
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      el.classList.add('tab-pane-highlight')
+      setTimeout(() => el.classList.remove('tab-pane-highlight'), 1800)
+    }
+  })
+}
+
+const onTabChange = (name) => {
+  history.replaceState(null, '', `#${name}`)
+}
 
 const syncF = (patch) => {
   suppressWatch = true
@@ -203,6 +332,13 @@ const load = async () => {
     transferRef.value?.loadUb?.()
   }
   backupRef.value?.loadBundleEstimate?.()
+  
+  // URL hash 直达相应 Tab
+  const hash = (location.hash || '').replace('#', '')
+  if (hash && TAB_LABELS[hash]) {
+    activeTab.value = hash
+  }
+
   loaded.value = true
   await nextTick()
   suppressWatch = false
