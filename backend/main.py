@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import auth, config, database as db
+from . import auth, config, database as db, pan115  # noqa: F401
 from .api import account, dedupe, ext, files, manage, media, ws
 from .core import logstream
 from .tg import episode_backfill, polling, userbot

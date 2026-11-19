@@ -4,9 +4,24 @@
 """
 import json
 import os
+import pathlib
 import sys
 import tempfile
 import time
+
+# 兼容 Python 3.12 及以下版本中 Path.is_file 不支持 follow_symlinks 参数的问题
+_orig_is_file = pathlib.Path.is_file
+
+
+def _compat_is_file(self, *args, **kwargs):
+    try:
+        return _orig_is_file(self, *args, **kwargs)
+    except TypeError:
+        kwargs.pop("follow_symlinks", None)
+        return _orig_is_file(self, *args, **kwargs)
+
+
+pathlib.Path.is_file = _compat_is_file
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ["DATA_DIR"] = tempfile.mkdtemp(prefix="autosave_test_")

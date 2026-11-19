@@ -5,6 +5,6 @@ httpx[socks]>=0.27
 beautifulsoup4>=4.12
 telethon>=1.36
 python-socks[asyncio]>=2.4
-p115client>=0.0.9.7
+p115client>=0.0.9.7,<=0.0.9.7.2
 qrcode>=7.4
 tzdata>=2024.1
