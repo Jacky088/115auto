@@ -112,9 +112,6 @@
           </div>
           <template #dropdown>
             <el-dropdown-menu>
-              <el-dropdown-item v-if="canInstall || isIosSafari" command="install">
-                <el-icon><Download /></el-icon>安装到主屏幕 (PWA)
-              </el-dropdown-item>
               <el-dropdown-item command="pwd">修改用户名 / 密码</el-dropdown-item>
               <el-dropdown-item command="logout" divided>退出登录</el-dropdown-item>
             </el-dropdown-menu>
@@ -358,10 +355,6 @@ const handleInstall = () => {
 }
 
 const onCommand = async (cmd) => {
-  if (cmd === 'install') {
-    handleInstall()
-    return
-  }
   if (cmd === 'pwd') {
     pwdForm.username = username.value
     pwdForm.old = ''; pwdForm.new = ''; pwdForm.confirm = ''

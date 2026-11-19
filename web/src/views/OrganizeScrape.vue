@@ -29,16 +29,7 @@
     <!-- 主工作台：三大独立程序与设置标签页 -->
     <el-card shadow="never" class="page-card">
       <el-tabs v-model="activeTab" @tab-change="onTabChange">
-        <el-tab-pane name="organize">
-          <template #label>
-            <span>📁 目录整理</span>
-            <el-badge
-              v-if="(status.counts.records || 0) > 0"
-              :value="status.counts.records"
-              type="info"
-              class="tab-badge"
-            />
-          </template>
+        <el-tab-pane label="📁 目录整理" name="organize">
           <OrganizeTab ref="organizeTabRef" />
         </el-tab-pane>
 
