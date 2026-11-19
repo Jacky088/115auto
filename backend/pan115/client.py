@@ -278,124 +278,17 @@ def _to_int(v, default: int = 0) -> int:
         return default
 
 
-def _list_dir(pid: int = 0) -> dict[str, int]:
-    """列出某目录下的子目录 {名字: cid}。"""
-    client = _get_client()
-    dirs: dict[str, int] = {}
-    offset = 0
-    while True:
-        resp = pan_call(client.fs_files, {"cid": pid, "fc_mix": 0, "limit": 1150, "offset": offset,
-                                          "o": "user_ptime", "asc": 0, "show_dir": 1})
-        if not resp.get("state"):
-            raise Pan115Error(f"fs_files 失败: {str(resp)[:200]}")
-        data = resp.get("data") or []
-        for f in data:
-            if not isinstance(f, dict):
-                continue
-            fid, name = _file_id(f), _file_name(f)
-            if not _is_dir_item(f) or not fid or not name:
-                continue
-            cid = _to_int(fid, -1)
-            if cid >= 0:
-                dirs[name] = cid
-        total = _to_int(resp.get("count"), 0)
-        offset += len(data)
-        if not data:
-            break
-        if total and offset >= total:
-            break
-        if offset > 500_000:  # count 偶发缺失时防止失控翻页的兜底上限
-            break
-        time.sleep(0.4)  # 大目录多页翻页间隔，降低请求频率
-    return dirs
-
-
-# 目录路径 → cid 缓存：同一目标目录每个任务都会 mkdirs（去重检查 + 正式转存各一次），
-# 逐层 _list_dir 还要每层 sleep 0.5s，缓存后命中直接返回，省 115 请求与等待。
-# 带 TTL：用户在网页里改了目录结构时最多滞后 cache_ttl 过期一次，出错自动清空。
-_dir_cache: dict[str, tuple[float, int]] = {}
-_dir_cache_lock = threading.Lock()
-_DIR_CACHE_TTL = 600.0  # 10 分钟
-
-
-def _dir_cache_get(path: str) -> int:
-    with _dir_cache_lock:
-        hit = _dir_cache.get(path)
-        if hit and time.time() < hit[0]:
-            return hit[1]
-        if hit:
-            _dir_cache.pop(path, None)
-    return 0
-
-
-def _dir_cache_put(path: str, cid: int) -> None:
-    with _dir_cache_lock:
-        if len(_dir_cache) > 200:
-            _dir_cache.clear()  # 简单兜底防无限增长
-        _dir_cache[path] = (time.time() + _DIR_CACHE_TTL, cid)
-
-
-def clear_dir_cache():
-    """目录失效（转存/云下载报目录不存在等）时调用：下次重新逐级解析。"""
-    with _dir_cache_lock:
-        _dir_cache.clear()
-
-
-def resolve_dir_cid(path: str) -> int:
-    """只读解析 115 目录路径返回 cid；任一级目录不存在时返回 0（不自动创建）。"""
-    if not path or not path.strip("/"):
-        return 0
-    norm = "/" + path.strip("/")
-    if (hit := _dir_cache_get(norm)):
-        return hit
-    pid = 0
-    walked = ""
-    for name in [p for p in norm.strip("/").split("/") if p]:
-        walked += "/" + name
-        if (hit := _dir_cache_get(walked)):
-            pid = hit
-            continue
-        dirs = _list_dir(pid)
-        if name not in dirs:
-            return 0
-        pid = dirs[name]
-        _dir_cache_put(walked, pid)
-    return pid
-
-
-def mkdirs(path: str) -> int:
-    """逐级确保目录存在，返回最深层 cid。path 形如 /媒体库/电影。"""
-    if not path or not path.strip("/"):
-        return 0
-    path = path.rstrip("/") or "/"
-    cached = _dir_cache_get(path)
-    if cached:
-        return cached
-    client = _get_client()
-    parts = [p for p in path.strip("/").split("/") if p]
-    pid = 0
-    walked = ""  # 已解析到的前缀，逐级写入缓存
-    for name in parts:
-        walked += "/" + name
-        if (hit := _dir_cache_get(walked)):
-            pid = hit
-            continue
-        dirs = _list_dir(pid)
-        if name in dirs:
-            pid = dirs[name]
-        else:
-            resp = pan_call(client.fs_mkdir, {"cname": name, "pid": pid})
-            if not resp.get("state"):
-                raise Pan115Error(f"创建目录 {name} 失败: {str(resp)[:200]}")
-            data = resp.get("data", {}) or {}
-            new_cid = _to_int(data.get("file_id") or data.get("cid") or resp.get("cid"), 0)
-            if not new_cid:
-                new_cid = _list_dir(pid).get(name, 0)  # 响应缺 id 时回查上级目录
-            pid = new_cid
-            logstream.info("115", f"已创建目录 {name} (cid={pid})")
-        _dir_cache_put(walked, pid)
-        time.sleep(0.5)
-    return pid
+from .dirs import (  # noqa: F401
+    _dir_cache,
+    _dir_cache_get,
+    _dir_cache_lock,
+    _dir_cache_put,
+    _list_dir,
+    clear_dir_cache,
+    ensure_subdir,
+    mkdirs,
+    resolve_dir_cid,
+)
 
 
 # ---------- 分享 ----------
@@ -653,51 +546,12 @@ def list_entries(cid: int, limit: int = 2000, known_ids: set[str] | None = None,
 
 
 
-_EP_SEASON_RE = re.compile(r"[Ss](\d{1,2})[\s._-]*[Ee]\d{1,3}")
-_EP_CN_RE = re.compile(r"第\s?(\d{1,3})\s?[集话話]")
-
-
-def organize_seasons(cid: int, min_files: int = 2) -> int:
-    """把目录下的剧集文件按季归入「Season N」子目录，返回移动的文件数。
-
-    - 只处理带集数标识（S01E01 / 第1集）的文件；第N集默认按第 1 季
-    - 单季少于 min_files 个文件时不建目录（避免为两三集碎片建一堆空壳）
-    - 目录已存在时复用
-    """
-    client = _get_client()
-    entries = list_entries(cid)
-    groups: dict[int, list[dict]] = {}
-    for e in entries:
-        if e["is_dir"]:
-            continue
-        m = _EP_SEASON_RE.search(e["name"]) or _EP_CN_RE.search(e["name"])
-        if not m:
-            continue
-        season = 1 if _EP_CN_RE.fullmatch(m.group(0).strip()) else max(int(m.group(1)), 1)
-        groups.setdefault(season, []).append(e)
-    moved = 0
-    for season, items in sorted(groups.items()):
-        if len(items) < min_files:
-            continue
-        sname = f"Season {season}"
-        target = next((e for e in entries if e["is_dir"] and e["name"] == sname), None)
-        if target is None:
-            resp = pan_call(client.fs_mkdir, {"cname": sname, "pid": cid})
-            if not resp.get("state"):
-                raise Pan115Error(f"创建 {sname} 失败: {str(resp)[:200]}")
-            data = resp.get("data", {}) or {}
-            new_id = _to_int(data.get("file_id") or data.get("cid") or resp.get("cid"), 0)
-            if not new_id:
-                new_id = _list_dir(cid).get(sname, 0)
-            target = {"id": str(new_id), "name": sname, "is_dir": True}
-            entries.append(target)
-            time.sleep(0.5)
-        # 用 move_entries（分批 + 校验响应 + 失效缓存）替代裸 fs_move，
-        # 避免移动失败被静默忽略或单批数量超限
-        move_entries([str(i["id"]) for i in items], int(str(target["id"])))
-        moved += len(items)
-        time.sleep(0.5)
-    return moved
+from .tree import (  # noqa: F401
+    _EP_CN_RE,
+    _EP_SEASON_RE,
+    organize_seasons,
+    walk_media_tree,
+)
 
 
 def search_file(name: str, limit: int = 20) -> list[dict]:
@@ -844,109 +698,6 @@ def delete_entries(fids: list[str]) -> None:
         note_115_error(str(e))
         raise
 
-
-def ensure_subdir(base_cid: int, rel_dir: str) -> int:
-    """从已知目录 base_cid 出发逐级查找或创建相对子目录，返回末级 cid。"""
-    cur = int(base_cid)
-    segs = [s.strip() for s in (rel_dir or "").strip("/").split("/") if s.strip()]
-    if not segs:
-        return cur
-    client = _get_client()
-    for name in segs:
-        children = _list_dir(cur)
-        if name in children:
-            cur = children[name]
-            continue
-        resp = pan_call(client.fs_mkdir, {"cname": name, "pid": cur})
-        if not resp.get("state"):
-            # 并发或同名重试再查一次目录列表
-            children = _list_dir(cur)
-            if name in children:
-                cur = children[name]
-                continue
-            msg = resp.get("error") or resp.get("msg") or str(resp)[:200]
-            note_115_error(msg)
-            raise Pan115Error(f"创建子目录「{name}」失败: {msg}")
-        data = resp.get("data") or {}
-        new_cid = data.get("cid") or data.get("file_id") or data.get("id") or resp.get("cid")
-        if new_cid:
-            cur = int(str(new_cid))
-        else:
-            cur = _list_dir(cur).get(name, 0)
-            if not cur:
-                raise Pan115Error(f"创建子目录「{name}」后未能定位 cid")
-        clear_dir_cache()
-    return cur
-
-
-def walk_media_tree(root_cid: int, root_path: str, max_depth: int = 4) -> dict:
-    """礼貌遍历 115 指定目录下的文件树（自动将 BDMV 原盘视为整体目录不拆散内部流文件）。
-
-    返回 {"files": [...], "bdmv_dirs": [...], "dirs": [...]}
-    """
-    norm_root = "/" + root_path.strip("/")
-    queue_dirs: list[tuple[int, str, list[str], int]] = [(int(root_cid), norm_root, [], 0)]
-    files_out: list[dict] = []
-    bdmv_out: list[dict] = []
-    dirs_out: list[dict] = []
-
-    while queue_dirs:
-        cur_cid, cur_path, rel_parents, depth = queue_dirs.pop(0)
-        if depth > max_depth:
-            continue
-        entries = list_entries(cur_cid, limit=2000)
-        dir_names_lower = {e["name"].lower() for e in entries if e.get("is_dir")}
-        # BDMV / VIDEO_TS 原盘保护：父目录视作原子整体，不再深入枚举 Stream/*.m2ts
-        if depth > 0 and ("bdmv" in dir_names_lower or "certificate" in dir_names_lower or "video_ts" in dir_names_lower):
-            bdmv_out.append({
-                "id": str(cur_cid),
-                "name": rel_parents[-1],
-                "path": cur_path,
-                "parent_dirs": rel_parents[:-1],
-                "parent_cid": "",  # 由外层记录填充
-                "is_bdmv": True,
-            })
-            continue
-
-        sibling_names = [e["name"] for e in entries if not e.get("is_dir")]
-        # 目录内文件条目只在目录级构建一次，同目录所有文件共享同一列表引用——
-        # 旧写法为每个文件各复制一份过滤列表，大目录下 O(N²) 内存放大
-        sibling_file_entries = [x for x in entries if not x.get("is_dir")]
-        for e in entries:
-            if e.get("is_dir"):
-                if e["name"].lower() in ("@eadir", ".ds_store", "__macosx", "_待清理旧版"):
-                    continue
-                sub_path = f"{cur_path.rstrip('/')}/{e['name']}"
-                dirs_out.append({
-                    "id": str(e["id"]),
-                    "name": e["name"],
-                    "path": sub_path,
-                    "parent_cid": str(cur_cid),
-                    "depth": depth + 1,
-                })
-                if depth + 1 <= max_depth:
-                    queue_dirs.append((int(str(e["id"])), sub_path, rel_parents + [e["name"]], depth + 1))
-            else:
-                files_out.append({
-                    "id": str(e["id"]),
-                    "name": e["name"],
-                    "size": int(e.get("size") or 0),
-                    "sha1": e.get("sha1") or "",
-                    "parent_cid": str(cur_cid),
-                    "dir_path": cur_path,
-                    "parent_dirs": list(rel_parents),
-                    "sibling_names": sibling_names,
-                    "sibling_entries": sibling_file_entries,
-                })
-        if queue_dirs:
-            time.sleep(0.25 * pace_factor())
-
-    # 补全 bdmv_dirs 的 parent_cid
-    dir_parent_map = {d["path"]: d["parent_cid"] for d in dirs_out}
-    for b in bdmv_out:
-        b["parent_cid"] = dir_parent_map.get(b["path"], "")
-
-    return {"files": files_out, "bdmv_dirs": bdmv_out, "dirs": dirs_out}
 
 # ---------- 向后兼容门面重导出（auth / auto_move） ----------
 from .auth import (  # noqa: E402, F401
