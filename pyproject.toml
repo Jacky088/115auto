@@ -9,3 +9,21 @@ extend-exclude = [".venv", "data", "scratch", "web", "android", "backend/static"
 select = ["E9", "F", "B"]
 # B008: FastAPI Depends/Query 默认参数写法；其余为风格或已确认安全项，避免无关 diff
 ignore = ["B008", "B011", "B023", "B904", "B905"]
+
+[tool.coverage.run]
+source = ["backend"]
+omit = [
+    "backend/static/*",
+    "backend/tg/userbot.py",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]

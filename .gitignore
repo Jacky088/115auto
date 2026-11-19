@@ -25,5 +25,7 @@ scratch/
 
 # 静态检查缓存
 .ruff_cache/
+.coverage
+.coverage.*
 
 .screenshots/

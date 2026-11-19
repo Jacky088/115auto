@@ -14,13 +14,15 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
-      - run: pip install -r backend/requirements.txt pytest ruff
+      - run: pip install -r backend/requirements.txt pytest pytest-cov ruff
       - name: Lint (pyflakes / syntax errors)
         run: ruff check backend tests
       - name: Modularity guard (file size ceiling)
         run: python scripts/check_file_sizes.py
-      - run: python -m pytest tests --ignore=tests/test_api_integration.py --ignore=tests/test_worker_mock.py -q
-      - run: python tests/test_worker_mock.py
+      - run: coverage run -m pytest tests --ignore=tests/test_api_integration.py --ignore=tests/test_worker_mock.py -q
+      - run: coverage run -a tests/test_worker_mock.py
+      - name: Coverage report
+        run: coverage report
 
   frontend:
     runs-on: ubuntu-latest
