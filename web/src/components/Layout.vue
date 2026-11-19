@@ -19,9 +19,6 @@
           <el-menu-item index="/history"><el-icon><Tickets /></el-icon>日志查询</el-menu-item>
           <el-menu-item index="/account"><el-icon><User /></el-icon>账号管理</el-menu-item>
           <el-menu-item index="/settings"><el-icon><Setting /></el-icon>系统设置</el-menu-item>
-          <el-menu-item v-if="canInstall || isIosSafari" index="" @click="handleInstall">
-            <el-icon><Download /></el-icon>安装到主屏幕
-          </el-menu-item>
         </el-menu>
         <a v-if="version" class="footer-ver aside-foot" :href="REPO_URL"
            target="_blank" rel="noopener" title="GitHub 仓库">
@@ -47,9 +44,6 @@
         <el-menu-item index="/history"><el-icon><Tickets /></el-icon>日志查询</el-menu-item>
         <el-menu-item index="/account"><el-icon><User /></el-icon>账号管理</el-menu-item>
         <el-menu-item index="/settings"><el-icon><Setting /></el-icon>系统设置</el-menu-item>
-        <el-menu-item v-if="canInstall || isIosSafari" index="" @click="handleInstall">
-          <el-icon><Download /></el-icon>安装为应用
-        </el-menu-item>
       </el-menu>
       <a v-if="version" class="footer-ver aside-foot" :href="REPO_URL"
          target="_blank" rel="noopener" title="GitHub 仓库">
@@ -442,7 +436,15 @@ const changePwd = async () => {
 .footer-ver:hover { opacity: 1; color: var(--saas-text-main); }
 .gh-icon { width: 14px; height: 14px; fill: currentColor; flex: none; }
 
-.theme-btn { padding: 8px; color: var(--saas-text-main); }
+.theme-btn {
+  padding: 4px;
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--saas-text-main);
+}
 /* 告警条是 el-container（flex 列）的子项，而 el-alert 自带 overflow:hidden：
    顶栏 + 多条告警 + 内容超过视口高度时 flex 会把告警压缩裁掉正文（表现为"被折叠"）。
    flex:none 让告警永远按内容完整显示，高度缺口全部由可滚动的 el-main 吸收 */
@@ -457,14 +459,14 @@ const changePwd = async () => {
   border-bottom: 1px solid var(--glass-border); padding: 0 12px;
 }
 .header-left { flex: 1; display: flex; align-items: center; gap: 10px; min-width: 0; }
-.header-right { display: flex; align-items: center; gap: 6px; flex: none; }
+.header-right { display: flex; align-items: center; gap: 3px; flex: none; margin-left: auto; }
 .header-title {
   font-weight: 600; font-size: var(--fs-title); color: var(--saas-text-main);
   flex: none; display: inline-flex; align-items: center; gap: 8px;
 }
 /* 标题文字不折行；窄屏时允许必要收缩 */
 .header-title .title-text { flex: none; white-space: nowrap; }
-.user-chip { display: flex; align-items: center; gap: 8px; cursor: pointer; padding: 4px 6px; border-radius: var(--r-pill); transition: background .15s ease; }
+.user-chip { display: flex; align-items: center; gap: 6px; cursor: pointer; padding: 2px 6px; border-radius: var(--r-pill); transition: background .15s ease; }
 .user-chip:hover { background: rgba(79, 107, 255, .14); }
 .avatar {
   width: 30px; height: 30px; border-radius: 50%;
@@ -489,13 +491,21 @@ const changePwd = async () => {
 /* 移动端 */
 @media (max-width: 768px) {
   .pc-only { display: none; }
-  .menu-btn { display: inline-flex; }
-  .header-title { font-size: var(--fs-title); }
+  .menu-btn { display: inline-flex; padding: 4px; margin-right: -2px; }
+  .header { padding: 0 8px; gap: 4px; }
+  .header-left { gap: 6px; min-width: 0; flex: 1 1 auto; overflow: hidden; }
+  .header-title { font-size: var(--fs-title); gap: 6px; min-width: 0; flex-shrink: 1; overflow: hidden; }
+  .header-title .title-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 80px; }
+  .run-tag { flex-shrink: 0; }
+  .start-wrap { flex-shrink: 0; }
+  .start-btn { width: 58px; min-width: 58px; height: 26px; padding: 0 6px; font-size: 12px; }
+  .start-btn.start-btn--resume { width: 74px; min-width: 74px; }
   .user-name { display: none; }
+  .header-right { gap: 2px; flex-shrink: 0; margin-left: auto; }
+  .theme-btn { width: 28px; height: 28px; padding: 2px; }
+  .user-chip { padding: 1px 3px; gap: 3px; }
+  .avatar { width: 26px; height: 26px; font-size: var(--fs-caption); }
   .page-card, :deep(.page-card) { margin: 10px !important; }
-  /* 防顶栏重叠：间距收紧。标题可收缩省略（.header-title/.title-text），
-     状态标在省略区外始终可见；任何屏宽下运行按钮都不会再被右侧压住 */
-  .header, .header-left { gap: 5px; }
 }
 
 /* PWA 独立全屏 / 移动端刘海与状态栏避让 */
