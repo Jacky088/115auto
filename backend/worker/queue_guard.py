@@ -22,7 +22,7 @@ def _qw():
 SPACE_GUARD_RATIO = 90.0          # 使用率 ≥90% 挂起队列（与网页空间条变红同阈值）
 SPACE_GUARD_RESUME_RATIO = 88.0   # 回落到 <88% 才恢复（2% 回差，防止在阈值附近反复暂停/恢复）
 SPACE_GUARD_MIN_FREE = 10 << 30   # 剩余 <10GB 同样视为告急（任何高清单集都存不下）
-SPACE_PROBE_TTL = 60              # 空间探测结果本地缓存秒数（避免空闲循环反复打 115 接口）
+SPACE_PROBE_TTL = 300             # 空间门禁探测本地缓存秒数（优先读取内存缓存，避免空闲循环打 115）
 _SPACE_PROBE = {"ts": 0.0, "blocked": False, "reason": "", "ratio": 0.0, "free": 0}
 _SPACE_MARKERS = ("空间不足", "存储空间不足", "空间已满", "容量不足",
                   "not enough space", "insufficient storage", "no space left", "storage full")
@@ -129,6 +129,7 @@ def _space_gate() -> tuple[bool, str]:
             if blocked:
                 reason = f"已用 {ratio:.1f}%，剩余 {free / (1 << 30):.2f} GB"
     except Exception:
+        _SPACE_PROBE["ts"] = now
         return (bool(db.get_setting("space_blocked", False)),
                 str(db.get_setting("space_blocked_reason", "") or ""))
     _SPACE_PROBE.update(ts=now, blocked=blocked, reason=reason, ratio=ratio, free=free)

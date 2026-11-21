@@ -33,6 +33,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
 import java.net.URL
 
 /**
@@ -53,6 +54,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private var webView: WebView? = null
+    private var swipeRefreshLayout: SwipeRefreshLayout? = null
     private var serverUrl: String? = null
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
 
@@ -109,6 +111,8 @@ class MainActivity : ComponentActivity() {
     // ---------- 首次启动：输入服务器地址 ----------
 
     private fun showSetup() {
+        swipeRefreshLayout?.removeAllViews()
+        swipeRefreshLayout = null
         webView = null
         val density = resources.displayMetrics.density
         fun dp(v: Int) = (v * density).toInt()
@@ -211,6 +215,7 @@ class MainActivity : ComponentActivity() {
     @SuppressLint("SetJavaScriptEnabled")
     private fun loadPanel(url: String) {
         serverUrl = url
+        val density = resources.displayMetrics.density
         val wv = WebView(this).apply {
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
@@ -235,8 +240,31 @@ class MainActivity : ComponentActivity() {
         wv.addJavascriptInterface(AndroidBridge(), "AndroidBridge")
         CookieManager.getInstance().setAcceptCookie(true)
         CookieManager.getInstance().setAcceptThirdPartyCookies(wv, true)
+
+        // 下拉刷新容器：主题极光蓝、防滚动冲突、沉浸状态栏位移适配
+        val swipe = SwipeRefreshLayout(this).apply {
+            setColorSchemeColors(Color.parseColor("#4f6bff"))
+            setOnRefreshListener {
+                webView?.reload()
+            }
+            // 解决内联或长网页滚动冲突：只有在 WebView 到达最顶端且不能继续向上滚时才触发下拉刷新
+            setOnChildScrollUpCallback { _, _ ->
+                wv.canScrollVertically(-1) || wv.scrollY > 0
+            }
+            // 初始设置指示器位移（避开沉浸式全屏状态栏与挖孔区域）
+            val resId = resources.getIdentifier("status_bar_height", "dimen", "android")
+            val statusBarPx = if (resId > 0) resources.getDimensionPixelSize(resId) else (24 * density).toInt()
+            setProgressViewOffset(false, statusBarPx, statusBarPx + (56 * density).toInt())
+
+            addView(wv, ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            ))
+        }
+
         webView = wv
-        setContentView(wv)
+        swipeRefreshLayout = swipe
+        setContentView(swipe)
         wv.loadUrl(url)
     }
 
@@ -297,11 +325,13 @@ class MainActivity : ComponentActivity() {
             error: WebResourceError
         ) {
             if (!request.isForMainFrame) return
+            swipeRefreshLayout?.isRefreshing = false
             showNetError(request.url.toString(), error.description?.toString() ?: "连接失败")
         }
 
         override fun onPageFinished(view: WebView?, url: String?) {
             super.onPageFinished(view, url)
+            swipeRefreshLayout?.isRefreshing = false
             // 将 Android 物理状态栏/挖孔高度安全注入 WebView CSS 变量，确保顶栏精准沉浸避让
             val resourceId = resources.getIdentifier("status_bar_height", "dimen", "android")
             val px = if (resourceId > 0) resources.getDimensionPixelSize(resourceId) else 0
@@ -310,6 +340,12 @@ class MainActivity : ComponentActivity() {
                 view?.evaluateJavascript(
                     "document.documentElement.style.setProperty('--android-status-bar-height', '${dp}px');",
                     null
+                )
+                // 精准动态同步下拉刷新指示器位置
+                swipeRefreshLayout?.setProgressViewOffset(
+                    false,
+                    px,
+                    px + (56 * resources.displayMetrics.density).toInt()
                 )
             }
         }
@@ -374,6 +410,8 @@ class MainActivity : ComponentActivity() {
     // ---------- 生命周期 ----------
 
     override fun onDestroy() {
+        swipeRefreshLayout?.removeAllViews()
+        swipeRefreshLayout = null
         webView?.apply {
             loadUrl("about:blank")
             (parent as? ViewGroup)?.removeAllViews()

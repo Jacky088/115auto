@@ -406,9 +406,10 @@ def _fetch_next():
 
 
 async def _heartbeat(job_id: int):
-    """长任务心跳：每 60 秒刷新 running_at（仅当任务仍为 running），看门狗据此判断是否真卡死。"""
+    """长任务心跳：每 60 秒刷新 running_at 与工作器心跳，防大任务被看门狗误判。"""
     while True:
         await asyncio.sleep(60)
+        mark_worker_alive()
         await asyncio.to_thread(
             db.execute,
             "UPDATE transfers SET running_at=? WHERE id=? AND status='running'",
@@ -459,6 +460,58 @@ def _claim_next_job():
     return job
 
 
+_worker_heartbeat_at: float = 0.0
+_worker_sleeping_until: float = 0.0
+_worker_task: asyncio.Task | None = None
+
+
+def mark_worker_alive():
+    """刷新工作器主循环心跳时间戳。"""
+    global _worker_heartbeat_at
+    _worker_heartbeat_at = time.time()
+
+
+def mark_worker_sleeping(seconds: float):
+    """标记工作器处于合法的休眠阶段（扰动/小憩/限额退避），避免看门狗误判为卡死。"""
+    global _worker_sleeping_until
+    _worker_sleeping_until = time.time() + max(0.0, float(seconds))
+
+
+def get_worker_task() -> asyncio.Task | None:
+    return _worker_task
+
+
+def set_worker_task(task: asyncio.Task | None):
+    global _worker_task
+    _worker_task = task
+
+
+def is_worker_stalled(threshold_seconds: float = 600.0) -> bool:
+    """判断转存工作器是否失联卡死：已启动且超过阈值无心跳且未处于计划休眠与转存活跃中。"""
+    now = time.time()
+    if now < _worker_sleeping_until:
+        return False
+    if transfer_gate.is_transfer_active():
+        return False
+    if _worker_heartbeat_at <= 0.0:
+        return False
+    effective_heartbeat = max(_worker_heartbeat_at, _worker_sleeping_until)
+    return (now - effective_heartbeat) > threshold_seconds
+
+
+def restart_worker_task() -> asyncio.Task:
+    """重启转存工作器协程并更新全局引用（供主进程启动与看门狗自愈复用）。"""
+    global _worker_task
+    if _worker_task and not _worker_task.done():
+        try:
+            _worker_task.cancel()
+        except Exception:
+            pass
+    _worker_task = asyncio.create_task(queue_worker())
+    mark_worker_alive()
+    return _worker_task
+
+
 async def queue_worker():
     logstream.info("transfer", "转存工作器启动（等待「开始运行」）")
     consecutive_fails = 0
@@ -474,11 +527,18 @@ async def queue_worker():
         db.set_setting("space_blocked_reason", "")
     while True:
         try:
+            mark_worker_alive()
             # 互斥门闸：若文件整理正在运行，暂停转存并在此挂起等待整理完成
             await transfer_gate.wait_transfer_worker_allowed()
 
+            try:
+                gates = await asyncio.wait_for(asyncio.to_thread(_poll_worker_gates), timeout=15.0)
+            except asyncio.TimeoutError:
+                logstream.warn("transfer", "工作器门禁状态轮询超时（>15s），跳过本轮等待下次检测")
+                await asyncio.sleep(5)
+                continue
             (running, paused, sched_on, in_win, jitter_min, limit, quota, waiting,
-             space_blocked, space_reason) = await asyncio.to_thread(_poll_worker_gates)
+             space_blocked, space_reason) = gates
 
             # 总开关：用户未点击「开始运行」前不消费队列
             if not running:
@@ -536,7 +596,9 @@ async def queue_worker():
                 if jitter_min > 0:
                     jitter_sec = random.randint(15, max(15, jitter_min * 60))
                     logstream.info("transfer", f"⏰ 进入允许转存时段，开启拟人化开工随机扰动（等待 {jitter_sec} 秒后开始处理队列）...")
+                    mark_worker_sleeping(jitter_sec)
                     await asyncio.sleep(jitter_sec)
+                    mark_worker_alive()
             elif not sched_on:
                 last_schedule_active = False
 
@@ -545,7 +607,9 @@ async def queue_worker():
                 logstream.warn("transfer",
                                f"已达每日限额 {limit}（分享+云下载共享额度），剩余 {waiting} 个任务保留在队列，"
                                "明日 0 点额度重置后自动接续转存")
+                mark_worker_sleeping(600)
                 await asyncio.sleep(600)
+                mark_worker_alive()
                 continue
 
             # 领取任务前再次确认互斥门闸
@@ -600,7 +664,9 @@ async def queue_worker():
                         consecutive_success = 0
                         rest_sec = random.randint(min_m * 60, max_m * 60)
                         logstream.info("transfer", f"☕ 已连续完成 {rest_count} 笔转存，触发拟人化小憩（休息 {rest_sec // 60} 分 {rest_sec % 60} 秒后继续）...")
+                        mark_worker_sleeping(rest_sec)
                         await asyncio.sleep(rest_sec)
+                        mark_worker_alive()
             except PermanentTransferError as e:
                 # 确定性失败（格式不支持/地址无效等）：不重试，立即失败并通知
                 await asyncio.to_thread(
@@ -624,13 +690,19 @@ async def queue_worker():
                 await asyncio.to_thread(_fail, job, str(e))
                 if consecutive_fails >= 5:
                     logstream.error("transfer", "连续失败 5 次，暂停转存 30 分钟")
+                    mark_worker_sleeping(1800)
                     await asyncio.sleep(1800)
+                    mark_worker_alive()
                     consecutive_fails = 0
             finally:
                 transfer_gate.mark_transfer_active(False)
                 hb.cancel()
+                mark_worker_alive()
 
-            await asyncio.sleep(await asyncio.to_thread(_interval))
+            wait_sec = await asyncio.to_thread(_interval)
+            mark_worker_sleeping(wait_sec)
+            await asyncio.sleep(wait_sec)
+            mark_worker_alive()
         except Exception as e:
             logstream.error("transfer", f"工作器异常: {logstream.exc(e)}")
             await asyncio.sleep(30)

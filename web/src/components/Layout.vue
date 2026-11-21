@@ -75,7 +75,7 @@
             <el-tooltip v-if="sysSpaceBlocked" placement="bottom"
                         :content="'115 空间不足（' + (sysSpaceReason || '剩余空间告急') + '）：触发本条已标记跳过且不再自动重试，后续任务保留排队、未被判失败，清理空间后自动继续；可在「设置 → 转存控制」关闭自动暂停'">
               <el-tag disable-transitions size="small" class="run-tag run-tag--space">
-                <span class="space-dot"></span>空间不足·已暂停
+                <span class="space-dot"></span><span class="space-tag-full">空间不足·已暂停</span><span class="space-tag-short">空间不足</span>
               </el-tag>
             </el-tooltip>
           </div>
@@ -92,6 +92,18 @@
           </el-tooltip>
         </div>
         <div class="header-right">
+          <!-- 下拉与快捷刷新按钮（移动端与“安装为应用”PWA 独立窗口常驻） -->
+          <el-tooltip content="刷新当前数据" placement="bottom">
+            <button class="theme-btn refresh-btn" :class="{ 'is-refreshing': isRefreshing }"
+                    aria-label="刷新当前数据" title="刷新当前数据" @click="handlePageRefresh">
+              <svg class="topbar-svg" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+                <path d="M3 3v5h5" />
+                <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16" />
+                <path d="M16 21h5v-5" />
+              </svg>
+            </button>
+          </el-tooltip>
           <el-tooltip v-if="!isInstalled" content="安装为独立应用 (PWA)" placement="bottom">
             <button class="theme-btn" aria-label="安装为独立应用" @click="handleInstall">
               <svg class="topbar-svg" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -145,8 +157,29 @@
           <div>处理：按上述原因修正后，点击网页顶栏「运行」恢复（队列与配置已保留，任务不会丢失）。</div>
         </div>
       </el-alert>
-      <el-main style="padding: 0; overflow-y: auto; overflow-x: hidden">
-        <router-view />
+      <el-main ref="mainContainerRef" class="layout-main"
+               style="padding: 0; overflow-y: auto; overflow-x: hidden; position: relative"
+               @touchstart="handleTouchStart"
+               @touchmove="handleTouchMove"
+               @touchend="handleTouchEnd">
+        <!-- 移动端下拉刷新极光玻璃指示器 -->
+        <div class="pull-refresh-indicator"
+             :class="{ 'is-refreshing': isRefreshing }"
+             :style="{ transform: `translateY(${pullDistance}px)`, opacity: pullOpacity }">
+          <div class="pull-refresh-bubble">
+            <svg class="pull-refresh-icon"
+                 :class="{ 'is-spinning': isRefreshing }"
+                 :style="{ transform: isRefreshing ? '' : `rotate(${pullRotate}deg)` }"
+                 viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+              <path d="M3 3v5h5" />
+              <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16" />
+              <path d="M16 21h5v-5" />
+            </svg>
+            <span class="pull-refresh-text">{{ pullText }}</span>
+          </div>
+        </div>
+        <router-view :key="routerKey" />
       </el-main>
     </el-container>
   </el-container>
@@ -185,7 +218,7 @@
 </template>
 
 <script setup>
-import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, provide, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { api, errMsg, saveOk, clearLoggedIn } from '../api'
@@ -212,6 +245,96 @@ const sysSpaceBlocked = ref(false)
 const sysSpaceReason = ref('')
 const autoStop = ref('')
 const toggling = ref(false)
+
+// 页面刷新与手势下拉刷新状态
+const routerKey = ref(0)
+const isRefreshing = ref(false)
+const mainContainerRef = ref(null)
+
+const touchStartY = ref(0)
+const pullDistance = ref(0)
+const isPulling = ref(false)
+
+const PULL_THRESHOLD = 50 // 触发刷新的临界位移
+const PULL_MAX = 74       // 最大弹性拉伸位移
+
+const pullOpacity = computed(() => {
+  if (isRefreshing.value) return 1
+  if (pullDistance.value <= 4) return 0
+  return Math.min(1, pullDistance.value / 24)
+})
+
+const pullRotate = computed(() => pullDistance.value * 5.5)
+
+const pullText = computed(() => {
+  if (isRefreshing.value) return '正在刷新数据...'
+  return pullDistance.value >= PULL_THRESHOLD ? '释放立即刷新' : '下拉刷新'
+})
+
+const handleTouchStart = (e) => {
+  if (isRefreshing.value) return
+  const container = mainContainerRef.value?.$el || mainContainerRef.value
+  if (!container || container.scrollTop > 0) {
+    isPulling.value = false
+    return
+  }
+  if (e.touches && e.touches.length === 1) {
+    touchStartY.value = e.touches[0].clientY
+    isPulling.value = true
+  }
+}
+
+const handleTouchMove = (e) => {
+  if (!isPulling.value || isRefreshing.value) return
+  const container = mainContainerRef.value?.$el || mainContainerRef.value
+  if (!container || container.scrollTop > 0) {
+    pullDistance.value = 0
+    return
+  }
+  if (e.touches && e.touches.length === 1) {
+    const deltaY = e.touches[0].clientY - touchStartY.value
+    if (deltaY > 0) {
+      const dist = Math.min(deltaY * 0.42, PULL_MAX)
+      pullDistance.value = dist
+      if (dist > 6 && e.cancelable) {
+        e.preventDefault()
+      }
+    } else {
+      pullDistance.value = 0
+    }
+  }
+}
+
+const handleTouchEnd = () => {
+  if (!isPulling.value) return
+  isPulling.value = false
+  if (pullDistance.value >= PULL_THRESHOLD && !isRefreshing.value) {
+    pullDistance.value = 46
+    handlePageRefresh()
+  } else {
+    pullDistance.value = 0
+  }
+}
+
+const handlePageRefresh = async () => {
+  if (isRefreshing.value) return
+  isRefreshing.value = true
+  try {
+    await Promise.allSettled([
+      loadSys(),
+      check(),
+    ])
+    window.dispatchEvent(new CustomEvent('app:refresh'))
+  } catch { /* ignore */ }
+  routerKey.value++
+  setTimeout(() => {
+    isRefreshing.value = false
+    pullDistance.value = 0
+    ElMessage.success({ message: '已刷新数据', duration: 1200, grouping: true })
+  }, 650)
+}
+
+provide('refreshPage', handlePageRefresh)
 
 const loadSys = async () => {
   try {
@@ -483,20 +606,25 @@ html.dark .theme-btn:hover {
 .cookie-alert-btn { margin-top: 6px; }
 .header {
   display: flex; align-items: center; gap: 8px;
+  flex-wrap: nowrap !important; white-space: nowrap;
   background: var(--saas-card);
   -webkit-backdrop-filter: var(--glass-blur);
   backdrop-filter: var(--glass-blur);
   border-bottom: 1px solid var(--glass-border); padding: 0 12px;
+  box-sizing: border-box;
 }
-.header-left { flex: 1; display: flex; align-items: center; gap: 10px; min-width: 0; }
-.header-right { display: flex; align-items: center; gap: 3px; flex: none; margin-left: auto; }
+.header-left { flex: 1 1 auto; display: flex; align-items: center; gap: 10px; min-width: 0; overflow: hidden; white-space: nowrap; }
+.header-right { display: flex; align-items: center; gap: 3px; flex-shrink: 0; margin-left: auto; white-space: nowrap; }
 .header-title {
   font-weight: 600; font-size: var(--fs-title); color: var(--saas-text-main);
-  flex: none; display: inline-flex; align-items: center; gap: 8px;
+  flex: 0 1 auto; display: inline-flex; align-items: center; gap: 8px;
+  min-width: 0; overflow: hidden;
 }
 /* 标题文字不折行；窄屏时允许必要收缩 */
-.header-title .title-text { flex: none; white-space: nowrap; }
-.user-chip { display: flex; align-items: center; gap: 6px; cursor: pointer; padding: 2px 6px; border-radius: var(--r-pill); transition: background .15s ease; }
+.header-title .title-text { flex: 0 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.run-tag { flex-shrink: 0; white-space: nowrap; }
+.space-tag-short { display: none; }
+.user-chip { display: flex; align-items: center; gap: 6px; cursor: pointer; padding: 2px 6px; border-radius: var(--r-pill); transition: background .15s ease; flex-shrink: 0; }
 .user-chip:hover { background: rgba(79, 107, 255, .14); }
 .avatar {
   width: 30px; height: 30px; border-radius: 50%;
@@ -504,10 +632,11 @@ html.dark .theme-btn:hover {
   color: #fff; display: flex; align-items: center; justify-content: center;
   font-size: var(--fs-body); font-weight: 600;
   box-shadow: 0 3px 10px rgba(79, 107, 255, .35);
+  flex-shrink: 0;
 }
 .user-name { color: var(--saas-text-main); font-size: var(--fs-body); }
-.menu-btn { display: none; padding: 6px; }
-.start-wrap { display: inline-flex; flex: none; align-items: center; }
+.menu-btn { display: none; padding: 6px; flex-shrink: 0; }
+.start-wrap { display: inline-flex; flex-shrink: 0; align-items: center; }
 .start-btn {
   width: 68px; min-width: 68px; height: 28px; padding: 0 8px;
   justify-content: center; flex: none; box-sizing: border-box;
@@ -518,24 +647,97 @@ html.dark .theme-btn:hover {
   width: 88px; min-width: 88px;
 }
 
-/* 移动端 */
+/* 移动端与自适应全屏防重叠 */
 @media (max-width: 768px) {
   .pc-only { display: none; }
-  .menu-btn { display: inline-flex; padding: 4px; margin-right: -2px; }
+  .menu-btn { display: inline-flex; padding: 4px; margin-right: -2px; flex-shrink: 0; }
   .header { padding: 0 8px; gap: 4px; }
   .header-left { gap: 6px; min-width: 0; flex: 1 1 auto; overflow: hidden; }
-  .header-title { font-size: var(--fs-title); gap: 6px; min-width: 0; flex-shrink: 1; overflow: hidden; }
-  .header-title .title-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 80px; }
-  .run-tag { flex-shrink: 0; }
+  .header-title { font-size: var(--fs-title); gap: 5px; min-width: 0; flex: 0 1 auto; overflow: hidden; }
+  .header-title .title-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 72px; }
+  .run-tag {
+    flex-shrink: 0;
+    padding: 0 6px !important;
+    height: 22px !important;
+    line-height: 20px !important;
+    font-size: 11px !important;
+  }
+  .space-tag-full { display: none; }
+  .space-tag-short { display: inline; }
   .start-wrap { flex-shrink: 0; }
-  .start-btn { width: 58px; min-width: 58px; height: 26px; padding: 0 6px; font-size: 12px; }
-  .start-btn.start-btn--resume { width: 74px; min-width: 74px; }
+  .start-btn { width: 56px; min-width: 56px; height: 26px; padding: 0 5px; font-size: 12px; }
+  .start-btn.start-btn--resume { width: 72px; min-width: 72px; }
   .user-name { display: none; }
+  .user-chip { padding: 1px 2px; gap: 0; }
+  .user-chip .el-icon { display: none !important; }
   .header-right { gap: 2px; flex-shrink: 0; margin-left: auto; }
-  .theme-btn { width: 28px; height: 28px; padding: 2px; }
-  .user-chip { padding: 1px 3px; gap: 3px; }
+  .theme-btn { width: 28px; height: 28px; padding: 2px; flex-shrink: 0; }
   .avatar { width: 26px; height: 26px; font-size: var(--fs-caption); }
   .page-card, :deep(.page-card) { margin: 10px !important; }
+}
+
+/* 针对小屏手机（iPhone SE、mini、360px 等屏幕）精细化阶梯防护，确保万无一失绝对不重叠 */
+@media (max-width: 390px) {
+  .header { padding: 0 6px; gap: 3px; }
+  .header-left { gap: 4px; }
+  .header-title { gap: 4px; }
+  .header-title .title-text { max-width: 48px; font-size: 13px; }
+  .start-btn { width: 52px; min-width: 52px; font-size: 11px; padding: 0 4px; }
+  .start-btn.start-btn--resume { width: 66px; min-width: 66px; }
+  .header-right { gap: 1px; }
+}
+
+@media (max-width: 340px) {
+  /* 极窄屏（320px~340px）：隐藏冗余标题文本，状态胶囊与控制按钮绝对完整展示 */
+  .header-title .title-text { display: none; }
+}
+
+/* 顶栏刷新按钮旋转动画 */
+.refresh-btn.is-refreshing svg {
+  animation: spin-refresh 0.75s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+@keyframes spin-refresh {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* 移动端下拉刷新气泡指示器 */
+.pull-refresh-indicator {
+  position: absolute;
+  top: -46px;
+  left: 0;
+  right: 0;
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+  z-index: 99;
+  transition: transform 0.16s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.2s ease;
+}
+.pull-refresh-indicator.is-refreshing {
+  transition: transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 0.2s ease;
+}
+.pull-refresh-bubble {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 14px;
+  background: var(--saas-card);
+  border: 1px solid var(--glass-border);
+  box-shadow: 0 4px 16px rgba(79, 107, 255, 0.16);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border-radius: 20px;
+  color: var(--el-color-primary);
+  font-size: 12px;
+  font-weight: 500;
+}
+.pull-refresh-icon {
+  display: block;
+  flex-shrink: 0;
+  transition: transform 0.08s linear;
+}
+.pull-refresh-icon.is-spinning {
+  animation: spin-refresh 0.75s cubic-bezier(0.4, 0, 0.2, 1) infinite;
 }
 
 /* PWA 独立全屏 / 移动端刘海与状态栏避让（兼容 iOS Safari 与 Android APK 沉浸全屏） */

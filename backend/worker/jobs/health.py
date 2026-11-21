@@ -74,27 +74,36 @@ def _running_timeout_secs() -> int:
 
 
 async def health_check_loop():
-    """运行期健康监控（每 2 分钟）：115 Cookie 与 TG 状态任一失效 → 自动终止运行。
+    """运行期健康监控：每 60 秒检查工作器存活心跳与转存超时；按配置周期检查 115 与 TG 状态。
 
     - 仅在 running=True 时生效（未运行只做静默记录，不打扰）
     - 连续 2 次（约 4 分钟）确认失败才终止：避免单次网络抖动误杀
     - 恢复后自动清除故障标记
     """
-    logstream.info("system", "运行健康监控任务启动（按配置周期检查 115 与 TG 状态）")
+    logstream.info("system", "运行健康监控任务启动（按配置周期检查 115 与 TG 状态，持续巡检工作器心跳）")
     fail_streak: dict[str, int] = {"115": 0, "tg": 0}
+    last_external_check = 0.0
     while True:
-        interval_min = max(1, int(float(await asyncio.to_thread(
-            db.get_setting, "health_check_interval_min", 10) or 10)))
-        await asyncio.sleep(interval_min * 60)
+        await asyncio.sleep(60)
         try:
             if not await asyncio.to_thread(db.get_setting, "running", False):
                 fail_streak = {"115": 0, "tg": 0}
                 continue
 
-            # --- 看门狗：转存任务卡在 running 超过阈值（115 请求无响应，
-            # p115client 的 HTTP 栈无默认超时）→ 自动重新排队，避免队列永久停摆。
-            # 执行中的任务每 60 秒心跳刷新 running_at；真正卡死才会超过阈值。
-            # 旧线程若迟到返回，状态守卫（AND status='running'）会拒绝其回写，不会重复计额。
+            # --- 看门狗 1：转存工作器协程健康检测与自愈（防底层网络阻塞导致队列停摆）---
+            try:
+                from .. import queue_worker
+                wt = queue_worker.get_worker_task()
+                if wt is None or wt.done():
+                    logstream.error("transfer", "看门狗：检测到转存工作器协程已停止运行，正在自动重启自愈...")
+                    queue_worker.restart_worker_task()
+                elif queue_worker.is_worker_stalled(600.0):
+                    logstream.error("transfer", "看门狗：转存工作器超过 10 分钟无心跳响应（疑似协程假死），正在重启自愈...")
+                    queue_worker.restart_worker_task()
+            except Exception as e:
+                logstream.warn("system", f"工作器健康检查异常: {e}")
+
+            # --- 看门狗 2：转存任务卡在 running 超过阈值（115 请求无响应）→ 自动重新排队 ---
             timeout_secs = await asyncio.to_thread(_running_timeout_secs)
             requeued = await asyncio.to_thread(
                 db.execute,
@@ -106,6 +115,14 @@ async def health_check_loop():
                 logstream.warn("transfer", f"看门狗：{requeued} 个任务转存超时"
                                            f"（>{timeout_secs // 60} 分钟无心跳），已重新排队"
                                            "（重排计入重试次数，新线程将先做防重预检）")
+
+            # --- 外部依赖周期检测（115 Cookie / TG 状态，按 health_check_interval_min 周期执行）---
+            now_ts = time.time()
+            interval_min = max(1, int(float(await asyncio.to_thread(
+                db.get_setting, "health_check_interval_min", 10) or 10)))
+            if now_ts - last_external_check < interval_min * 60:
+                continue
+            last_external_check = now_ts
 
             # --- 115 Cookie ---
             # 正在执行转存或文件整理时优先复用缓存，避免向繁忙中的 115 并发强刷校验请求

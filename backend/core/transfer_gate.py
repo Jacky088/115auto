@@ -371,6 +371,15 @@ async def prepare_and_drain_transfers(max_wait_seconds: float = 3600.0, mode: st
             if unfinished == 0 and not _transfer_active:
                 logstream.info(log_mod, f"📁 现有转存队列（水线 #{_cutoff_id}）已全部到达终态，开始独占{mode_name}。")
                 break
+            # 外部条件无法消费队列（明确开启定时计划但在时段外，或转存已暂停）：排空等待 30 秒确认无在途任务后放行，避免死等超时
+            now_t = time.time()
+            sched_closed = bool(db.get_setting("schedule_enabled", False)) and not is_in_schedule_window()
+            paused = bool(db.get_setting("paused", False))
+            if (sched_closed or paused) and (now_t - start_time >= 30.0):
+                if run == 0 and sub == 0 and not _transfer_active:
+                    reason = "转存已暂停" if paused else "当前不在允许转存时段"
+                    logstream.info(log_mod, f"转存工作器当前无在途任务（{reason}），排队任务安全留存，开始独占{mode_name}。")
+                    break
 
         now = time.time()
         if now - start_time > max_wait_seconds:

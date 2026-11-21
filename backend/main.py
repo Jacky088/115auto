@@ -70,7 +70,7 @@ async def lifespan(app: FastAPI):
         _background.append(asyncio.create_task(polling.polling_loop()))
     if mode in ("userbot", "both"):
         await userbot.start_if_configured()
-    _background.append(asyncio.create_task(queue_worker.queue_worker()))
+    _background.append(queue_worker.restart_worker_task())
     _background.append(asyncio.create_task(jobs.health_check_loop()))
     _background.append(asyncio.create_task(jobs.log_cleanup_loop()))
     _background.append(asyncio.create_task(jobs.offline_check_loop()))
@@ -87,6 +87,9 @@ async def lifespan(app: FastAPI):
     # 与 SQLite（WAL）完整落盘，避免强杀后 session 文件损坏需要重新登录
     for t in _background:
         t.cancel()
+    wt = queue_worker.get_worker_task()
+    if wt and not wt.done():
+        wt.cancel()
     if _background:
         await asyncio.gather(*_background, return_exceptions=True)
         _background.clear()

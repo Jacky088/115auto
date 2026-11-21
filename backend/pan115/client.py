@@ -136,6 +136,11 @@ def _get_client():
             raise Pan115Error("115 Cookie 为空，请到「账号管理」重新扫码登录或导入 Cookie")
         from p115client import P115Client
         _client = P115Client(cookie)
+        _orig_req = _client.request
+        def _req_with_timeout(*args, **kwargs):
+            kwargs.setdefault("timeout", 30)
+            return _orig_req(*args, **kwargs)
+        _client.request = _req_with_timeout
         return _client
 
 
@@ -161,24 +166,33 @@ def _space_num(v) -> int:
 def space_info(force: bool = False) -> dict:
     """容量信息 {total, use, free, ratio}（字节）。默认复用 5 分钟缓存。
 
-    缓存未命中时用锁合并并发：worker / 仪表盘 / 账号页同时来取也只打一次 115。
-    字段兼容两种响应形态：proapi 返回 all_total/all_use/all_remain（值可能是
-    {"size": N, "size_format": "..."} 对象），旧接口返回 total_size/use_size。
+    缓存未命中时非阻塞合并并发：同一时刻只放一个真实请求打 115，
+    若已有线程正在打接口，其余调用直接复用现有旧缓存（0 毫秒响应），绝不排队等锁。
     """
     global _space_cache
+    now = time.time()
     if not force:
         with _cache_lock:
             cached = _space_cache
-        if cached and time.time() < cached[0]:
+        if cached and now < cached[0]:
             return cached[1]
-    with _space_call_lock:
+    acquired = _space_call_lock.acquire(blocking=force)
+    if not acquired:
+        with _cache_lock:
+            if _space_cache is not None:
+                return _space_cache[1]
+        _space_call_lock.acquire(blocking=True)
+    try:
         if not force:
             with _cache_lock:
                 cached = _space_cache
-            if cached and time.time() < cached[0]:
+            if cached and now < cached[0]:
                 return cached[1]
         client = _get_client()
-        resp = client.user_space_info()
+        try:
+            resp = client.user_space_info(timeout=15)
+        except TypeError:
+            resp = client.user_space_info()
         if not resp.get("state"):
             raise Pan115Error(str(resp)[:200])
         data = resp.get("data", {}) or {}
@@ -187,10 +201,12 @@ def space_info(force: bool = False) -> dict:
         free = _space_num(data.get("free_size") or data.get("all_remain")) or max(total - use, 0)
         ratio = round(use / total * 100, 1) if total else 0
         result = {"total": total, "use": use, "free": free, "ratio": ratio}
-        now = time.time()
+        now_ts = time.time()
         with _cache_lock:
-            _space_cache = (now + _SPACE_TTL, result)
+            _space_cache = (now_ts + _SPACE_TTL, result)
         return result
+    finally:
+        _space_call_lock.release()
 
 
 def check_login(force: bool = False) -> dict:
@@ -214,7 +230,10 @@ def check_login(force: bool = False) -> dict:
                 return cached[1]
         try:
             client = _get_client()
-            resp = client.user_my_info()
+            try:
+                resp = client.user_my_info(timeout=15)
+            except TypeError:
+                resp = client.user_my_info()
             if resp.get("state"):
                 data = resp.get("data", {})
                 db.set_setting("cookie_ok", True)
