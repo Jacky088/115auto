@@ -858,12 +858,19 @@ html.dark .el-overlay {
 /* 全站弹窗全局视口垂直水平绝对居中（杜绝长页面滚屏时弹窗偏上被遮挡） */
 .el-overlay-dialog {
   display: flex !important;
+  /* 垂直居中依赖 flex 的 align-items，任何 margin-top 偏移都会破坏居中 */
   align-items: center !important;
+  /* 弹窗高于可视区时安全回退为顶部对齐，保证顶部内容不被裁掉且可滚动 */
+  align-items: safe center !important;
   justify-content: center !important;
+  box-sizing: border-box !important;
+  /* 上下留白参与居中计算，弹窗不贴边，也无需再给弹窗加 margin-top */
+  padding: 3vh 12px !important;
   overflow: auto !important;
 }
 
 .el-overlay-dialog > .el-dialog {
+  /* 仅水平 auto，垂直交给 align-items，避免覆盖居中 */
   margin: 0 auto !important;
   top: auto !important;
   max-height: 92vh;
@@ -871,8 +878,15 @@ html.dark .el-overlay {
   flex-direction: column;
 }
 
+/* 头/底固定高度，主体区自适应剩余空间并在内部滚动，防止总高超出 max-height 导致偏上/偏下 */
+.el-overlay-dialog > .el-dialog > .el-dialog__header,
+.el-overlay-dialog > .el-dialog > .el-dialog__footer {
+  flex: 0 0 auto;
+}
+
 .el-overlay-dialog > .el-dialog > .el-dialog__body {
   overflow-y: auto;
+  min-height: 0;
   max-height: calc(92vh - 120px);
 }
 
@@ -1548,12 +1562,12 @@ html.dark .el-message-box__headerbtn:hover .el-message-box__close {
 
 /* ================== 移动端适配（<=768px） ================== */
 @media (max-width: 768px) {
-  /* 弹窗/抽屉全宽 */
+  /* 弹窗/抽屉全宽；窄屏也保持垂直居中（不再用 margin-top 偏移，改用遮罩层内边距留白） */
   .el-dialog {
     width: 94vw !important;
     max-width: 94vw !important;
-    margin-top: 6vh !important;
   }
+  .el-overlay-dialog { padding: 2vh 6px !important; }
   .el-message-box { width: 92vw !important; padding: 18px 18px 16px !important; }
   .el-drawer.ltr, .el-drawer.rtl, .el-drawer.ttb, .el-drawer.bbl {
     max-width: 100vw;

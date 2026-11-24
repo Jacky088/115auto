@@ -3,8 +3,9 @@
 严格排除：
 - data/ (运行时数据库，绝不能打入包中覆盖生产环境)
 - .git/ / .github/ / .venv/ / web/node_modules/ / web/dist/
-- __pycache__/ / .pytest_cache/ / .screenshots/ / scratch/
+- __pycache__/ / .pytest_cache/ / .screenshots/ / scratch/ / htmlcov/
 - *.pyc, *.log, *.bak, *.db, *.sqlite*, *.session*, *.key, *.zip, .env*
+- .coverage / .coverage.* （本地测试覆盖率产物，不随包分发）
 
 发版前置校验：
 - 确认 backend/static/index.html 与静态资源已存在（保障 Docker 无 Node 阶段构建完整）
@@ -36,6 +37,7 @@ EXCLUDE_DIRS = {
     "data",
     "scratch",
     "dist",
+    "htmlcov",  # coverage html 报告（测试产物）
 }
 
 EXCLUDE_EXTS = {
@@ -60,6 +62,7 @@ EXCLUDE_EXTS = {
 
 EXCLUDE_FILES = {
     ".env",
+    ".coverage",
     ".DS_Store",
     "Thumbs.db",
     "115_cookie.txt",
@@ -77,6 +80,9 @@ def should_exclude(rel_path: Path) -> bool:
     name = rel_path.name
     # .env.example 是部署模板（不含真实密钥），需要随包分发；其余 .env* 一律排除
     if name in EXCLUDE_FILES or (name.startswith(".env.") and name != ".env.example"):
+        return True
+    # 覆盖率测试产物（.coverage / .coverage.xxx.1234）不随包分发
+    if name == ".coverage" or name.startswith(".coverage."):
         return True
     if rel_path.suffix.lower() in EXCLUDE_EXTS:
         return True
@@ -144,6 +150,7 @@ def build_zip():
                 or "__pycache__/" in n
                 or n.endswith((".db", ".db-wal", ".db-shm", ".sqlite", ".sqlite3", ".session", ".key", ".pem", ".log"))
                 or Path(n).name in EXCLUDE_FILES
+                or Path(n).name.startswith(".coverage")
                 or (Path(n).name.startswith(".env") and Path(n).name != ".env.example")
             )
         ]

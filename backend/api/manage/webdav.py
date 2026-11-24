@@ -152,11 +152,14 @@ async def export_to_webdav(body: dict | None = None, _=Depends(require_user)):
 
 @router.get("/list")
 async def list_webdav_backups(_=Depends(require_user)):
-    """获取远端 WebDAV 备份目录下的迁移包列表。"""
+    """获取远端 WebDAV 备份目录下的迁移包列表（失败原因原样透出，便于用户排查）。"""
     client = webdav.create_configured_client()
     if not client:
-        raise HTTPException(400, "尚未配置有效的 WebDAV 服务器")
-    return await run_ext_thread(client.list_backups)
+        raise HTTPException(400, "尚未配置有效的 WebDAV 服务器：缺少服务地址/用户名/应用密码，请重新填写并测试连接")
+    try:
+        return await run_ext_thread(client.list_backups)
+    except Exception as e:
+        raise HTTPException(502, f"读取 WebDAV 备份列表失败：{str(e)[:200]}") from e
 
 
 @router.post("/restore_preview")
@@ -204,7 +207,6 @@ async def restore_apply_from_webdav(
         await run_ext_thread(client.download_file, fn, local_zip)
         res = await migration_bundle.apply_migration_bundle(
             local_zip,
-            work_dir / "stage",
             restore_credentials=restore_credentials,
             restore_meta=restore_meta,
         )

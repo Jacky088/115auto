@@ -60,6 +60,26 @@ import {
   ElConfigProvider,
   ElLoading,
 } from 'element-plus'
+import { defineComponent, h } from 'vue'
+
+/** 弹窗/抽屉统一 teleport 到 body。
+ *
+ * 全站卡片使用玻璃拟态 `backdrop-filter`，而 `backdrop-filter`/`filter`/`transform`
+ * 的祖先会为 `position: fixed` 后代创建包含块：遮罩层会以该祖先为「视口」定位，
+ * 于是弹窗既不居中（页面滚动后甚至跑到可视区外），还会被祖先的 overflow 裁剪。
+ * Element Plus 的 append-to-body 默认关闭，这里统一打开，保证弹窗始终相对真实视口定位。
+ * 组件如显式传入 append-to-body 仍以传入值为准。
+ */
+const appendedToBody = (Comp, name) => defineComponent({
+  name,
+  inheritAttrs: false,
+  setup(_props, { attrs, slots }) {
+    return () => h(Comp, { appendToBody: true, ...attrs }, slots)
+  },
+})
+
+const AppDialog = appendedToBody(ElDialog, 'ElDialog')
+const AppDrawer = appendedToBody(ElDrawer, 'ElDrawer')
 
 const components = {
   ElAlert,
@@ -114,6 +134,10 @@ const components = {
   ElTooltip,
   ElConfigProvider,
 }
+
+// 弹窗/抽屉改用 teleport 到 body 的包装版（见上方 appendedToBody 说明）
+components.ElDialog = AppDialog
+components.ElDrawer = AppDrawer
 
 export default {
   install(app) {

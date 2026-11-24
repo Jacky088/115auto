@@ -313,60 +313,69 @@ class WebDAVClient:
         return local_dest
 
     def list_backups(self) -> list[dict[str, Any]]:
-        """获取备份目录下的全部 .zip 迁移包文件，按修改时间倒序排列。"""
+        """获取备份目录下的全部 .zip 迁移包文件，按修改时间倒序排列。
+
+        连接失败、认证失败、返回内容无法解析都必须抛出异常（由接口层转成明确提示），
+        否则「连不上/密码失效」会被静默伪装成「远端目录没有备份」，用户无从排查。
+        仅 404（目录尚未创建，首次使用）按空列表处理。
+        """
         target_url = self._build_url(f"{self.root_dir}/")
-        with self._client() as client:
-            try:
+        try:
+            with self._client() as client:
                 resp = client.request("PROPFIND", target_url, headers={"Depth": "1"})
-                if resp.status_code == 404:
-                    return []
-                if resp.status_code not in (200, 207):
-                    raise RuntimeError(f"列出备份失败（HTTP {resp.status_code}）")
-            except Exception as e:
-                logger.error("WebDAV 列取目录失败: %s", e)
-                return []
+        except Exception as e:
+            logger.error("WebDAV 列取目录失败: %s", e)
+            raise RuntimeError(f"连接 WebDAV 失败：{str(e)[:150]}") from e
+
+        if resp.status_code == 404:
+            return []
+        if resp.status_code == 401:
+            raise RuntimeError("WebDAV 认证失败（401）：请重新填写应用密码并点击「测试连接」")
+        if resp.status_code not in (200, 207):
+            raise RuntimeError(f"列出远端备份失败（HTTP {resp.status_code}）")
 
         # 解析 XML 多状态响应
         items: list[dict[str, Any]] = []
         try:
             root = ET.fromstring(resp.content)
-            for resp_node in root.iter():
-                if not resp_node.tag.lower().endswith("response"):
-                    continue
-                href = ""
-                size = 0
-                mtime = ""
-                is_dir = False
-                for elem in resp_node.iter():
-                    tag = elem.tag.split("}")[-1].lower()
-                    if tag == "href":
-                        href = elem.text or ""
-                    elif tag == "getcontentlength":
-                        try:
-                            size = int(elem.text or 0)
-                        except ValueError:
-                            size = 0
-                    elif tag == "getlastmodified":
-                        mtime = elem.text or ""
-                    elif tag == "collection":
-                        is_dir = True
-
-                unquoted = urllib.parse.unquote(href).rstrip("/")
-                fname = unquoted.split("/")[-1]
-                # 仅保留 autosave_ 开头的 zip 备份文件
-                if href and not is_dir and fname.lower().endswith(".zip") and fname.startswith("autosave_"):
-                    parsed_ts = _parse_mtime(mtime, fname)
-                    kind = "auto" if fname.startswith("autosave_auto_") else "migration"
-                    items.append({
-                        "name": fname,
-                        "size": size,
-                        "mtime": parsed_ts,
-                        "href": href,
-                        "kind": kind,
-                    })
         except Exception as e:
             logger.error("解析 WebDAV PROPFIND XML 失败: %s", e)
-            return []
+            raise RuntimeError("远端备份目录返回内容无法解析（对方可能不是标准 WebDAV 服务）") from e
+
+        for resp_node in root.iter():
+            if not resp_node.tag.lower().endswith("response"):
+                continue
+            href = ""
+            size = 0
+            mtime = ""
+            is_dir = False
+            for elem in resp_node.iter():
+                tag = elem.tag.split("}")[-1].lower()
+                if tag == "href":
+                    href = elem.text or ""
+                elif tag == "getcontentlength":
+                    try:
+                        size = int(elem.text or 0)
+                    except ValueError:
+                        size = 0
+                elif tag == "getlastmodified":
+                    mtime = elem.text or ""
+                elif tag == "collection":
+                    is_dir = True
+
+            unquoted = urllib.parse.unquote(href).rstrip("/")
+            fname = unquoted.split("/")[-1]
+            # 仅保留 autosave_ 开头的 zip 备份文件
+            if href and not is_dir and fname.lower().endswith(".zip") and fname.startswith("autosave_"):
+                parsed_ts = _parse_mtime(mtime, fname)
+                kind = "auto" if fname.startswith("autosave_auto_") else "migration"
+                items.append({
+                    "name": fname,
+                    "size": size,
+                    "mtime": parsed_ts,
+                    "href": href,
+                    "kind": kind,
+                })
 
         # 按时间戳倒序，时间戳相同按文件名倒序
         items.sort(key=lambda x: (float(x.get("mtime") or 0), x.get("name") or ""), reverse=True)
@@ -388,10 +397,18 @@ class WebDAVClient:
             raise RuntimeError(f"删除失败（HTTP {r.status_code}）")
 
     def prune_backups(self, keep_count: int = 10) -> int:
-        """自动轮转：超出保留上限的旧备份文件自动删除。"""
+        """自动轮转：超出保留上限的旧备份文件自动删除。
+
+        轮转属于「上传成功后」的收尾动作：即便列取失败也不能让已经成功的备份被判为失败，
+        因此这里吞掉异常并返回 0（真实原因由上传链路日志体现）。
+        """
         if keep_count <= 0:
             return 0
-        backups = self.list_backups()
+        try:
+            backups = self.list_backups()
+        except Exception as e:
+            logger.warning("自动轮转跳过（列取远端备份失败）: %s", e)
+            return 0
         if len(backups) <= keep_count:
             return 0
         to_delete = backups[keep_count:]
@@ -406,7 +423,7 @@ class WebDAVClient:
                         deleted += 1
                         logger.info("已自动清理 WebDAV 超期旧备份: %s", fn)
                 except Exception as e:
-                    logger.warn("清理 WebDAV 旧备份失败 (%s): %s", fn, e)
+                    logger.warning("清理 WebDAV 旧备份失败 (%s): %s", fn, e)
         return deleted
 
 

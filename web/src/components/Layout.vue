@@ -11,12 +11,12 @@
         <el-menu :default-active="$route.path" router class="aside-menu" @select="menuOpen = false">
           <el-menu-item index="/dashboard"><el-icon><Odometer /></el-icon>仪表盘</el-menu-item>
           <el-menu-item index="/files"><el-icon><FolderOpened /></el-icon>网盘文件</el-menu-item>
-          <el-menu-item index="/dirs"><el-icon><Collection /></el-icon>转存目录</el-menu-item>
-          <el-menu-item index="/transfers"><el-icon><List /></el-icon>转存/整理记录</el-menu-item>
+          <el-menu-item index="/dirs"><el-icon><Collection /></el-icon>转存整理</el-menu-item>
+          <el-menu-item index="/transfers"><el-icon><List /></el-icon>记录查询</el-menu-item>
           <el-menu-item index="/match"><el-icon><Sort /></el-icon>匹配规则</el-menu-item>
           <el-menu-item index="/subscriptions"><el-icon><VideoPlay /></el-icon>订阅追剧</el-menu-item>
-          <el-menu-item index="/media"><el-icon><MagicStick /></el-icon>整理 / 刮削</el-menu-item>
-          <el-menu-item index="/history"><el-icon><Tickets /></el-icon>日志查询</el-menu-item>
+          <el-menu-item index="/media"><el-icon><MagicStick /></el-icon>整理刮削</el-menu-item>
+          <el-menu-item index="/history"><el-icon><Tickets /></el-icon>系统日志</el-menu-item>
           <el-menu-item index="/account"><el-icon><User /></el-icon>账号管理</el-menu-item>
           <el-menu-item index="/settings"><el-icon><Setting /></el-icon>系统设置</el-menu-item>
         </el-menu>
@@ -36,12 +36,12 @@
       <el-menu :default-active="$route.path" router class="aside-menu">
         <el-menu-item index="/dashboard"><el-icon><Odometer /></el-icon>仪表盘</el-menu-item>
         <el-menu-item index="/files"><el-icon><FolderOpened /></el-icon>网盘文件</el-menu-item>
-        <el-menu-item index="/dirs"><el-icon><Collection /></el-icon>转存目录</el-menu-item>
-        <el-menu-item index="/transfers"><el-icon><List /></el-icon>转存/整理记录</el-menu-item>
+        <el-menu-item index="/dirs"><el-icon><Collection /></el-icon>转存整理</el-menu-item>
+        <el-menu-item index="/transfers"><el-icon><List /></el-icon>记录查询</el-menu-item>
         <el-menu-item index="/match"><el-icon><Sort /></el-icon>匹配规则</el-menu-item>
         <el-menu-item index="/subscriptions"><el-icon><VideoPlay /></el-icon>订阅追剧</el-menu-item>
-        <el-menu-item index="/media"><el-icon><MagicStick /></el-icon>整理 / 刮削</el-menu-item>
-        <el-menu-item index="/history"><el-icon><Tickets /></el-icon>日志查询</el-menu-item>
+        <el-menu-item index="/media"><el-icon><MagicStick /></el-icon>整理刮削</el-menu-item>
+        <el-menu-item index="/history"><el-icon><Tickets /></el-icon>系统日志</el-menu-item>
         <el-menu-item index="/account"><el-icon><User /></el-icon>账号管理</el-menu-item>
         <el-menu-item index="/settings"><el-icon><Setting /></el-icon>系统设置</el-menu-item>
       </el-menu>
@@ -229,9 +229,10 @@ import { confirmAction } from '../composables/confirmDialog'
 
 const route = useRoute()
 const router = useRouter()
+// 顶栏页面标题：与左侧导航菜单名保持一致，避免同一功能出现两套叫法
 const titles = { dashboard: '仪表盘', files: '网盘文件', channels: '账号管理', subscriptions: '订阅追剧',
-                 dirs: '转存目录', media: '整理刮削', match: '匹配规则',
-                 transfers: '分流记录', history: '日志查询',
+                 dirs: '转存整理', media: '整理刮削', match: '匹配规则',
+                 transfers: '记录查询', history: '系统日志',
                  account: '账号管理', settings: '系统设置', setup: '初始化向导' }
 const title = computed(() => titles[route.path.slice(1)] || '')
 

@@ -19,9 +19,17 @@
         </div>
       </div>
 
+      <div v-if="loadError" class="tip-box is-warn dav-list-error">
+        <span>{{ loadError }}</span>
+        <el-button size="small" type="danger" plain @click="loadList">重试</el-button>
+      </div>
+
       <el-table :data="filteredBackups" size="small" stripe max-height="360" style="margin-top: 12px">
         <template #empty>
-          <el-empty :image-size="60" description="远端目录暂无符合筛选条件的 .zip 备份包" />
+          <el-empty
+            :image-size="60"
+            :description="loadError ? '备份列表读取失败，请按上方提示检查 WebDAV 配置' : '远端目录暂无符合筛选条件的 .zip 备份包'"
+          />
         </template>
         <el-table-column label="类型" width="100">
           <template #default="{ row }">
@@ -93,6 +101,7 @@ const props = defineProps({
 defineEmits(['update:modelValue'])
 
 const loading = ref(false)
+const loadError = ref('')
 const backups = ref([])
 const restoringFile = ref('')
 const deletingFile = ref('')
@@ -108,12 +117,14 @@ const filteredBackups = computed(() => {
 
 const loadList = async () => {
   loading.value = true
+  loadError.value = ''
   try {
-    const { data } = await api.get('/api/backup/webdav/list')
+    // WebDAV 目录遍历（PROPFIND）在大目录/慢网盘上可能超过默认 30s，单独放宽
+    const { data } = await api.get('/api/backup/webdav/list', { timeout: 60000 })
     backups.value = Array.isArray(data) ? data : []
   } catch (e) {
     backups.value = []
-    ElMessage.error(errMsg(e, '获取 WebDAV 备份列表失败'))
+    loadError.value = errMsg(e, '获取 WebDAV 备份列表失败')
   } finally {
     loading.value = false
   }
@@ -201,6 +212,16 @@ const restoreItem = async (row) => {
   color: var(--text-muted);
   flex-wrap: wrap;
   gap: 10px;
+}
+
+/* 远端列表读取失败提示：左侧原因（可换行）+ 右侧重试按钮 */
+.dav-list-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 12px;
+  overflow-wrap: anywhere;
 }
 
 .dialog-controls {
