@@ -88,6 +88,7 @@
         @show-detail="showDetail"
         @row-command="onRowCommand"
         @calc-dir-stat="calcDirStat"
+        @page-change="onPageChange"
         @size-change="onSizeChange"
       />
     </el-card>
@@ -186,6 +187,10 @@ const selectedSizeText = computed(() => {
 const onSizeChange = (val) => {
   size.value = val
   page.value = 1
+  load()
+}
+const onPageChange = (val) => {
+  page.value = val
   load()
 }
 const searchTerm = ref('')
@@ -328,6 +333,9 @@ const load = async () => {
         file_type: fileType.value,
         page: page.value,
         size: size.value,
+        fc: folderCount.value !== null ? folderCount.value : undefined,
+        file_count: fileCount.value !== null ? fileCount.value : undefined,
+        total_count: total.value || undefined,
       },
     })
     if (seq !== loadSeq) return

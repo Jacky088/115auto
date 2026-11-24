@@ -16,7 +16,7 @@
       </span>
       <el-button @click="$emit('move-selected')">
         <el-icon><FolderOpened /></el-icon>
-        <span>移动到</span>
+        <span>移动到…</span>
       </el-button>
       <el-button @click="$emit('copy-selected')">
         <el-icon><CopyDocument /></el-icon>

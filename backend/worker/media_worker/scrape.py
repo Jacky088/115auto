@@ -9,6 +9,7 @@ import uuid
 
 from ... import database as db
 from ...core import logstream, transfer_gate
+from ...core.executors import run_ext_thread
 from ...core.media_parser import ParsedMedia, format_media_target
 from ...core.tmdb_scraper import (
     compact_candidates,
@@ -208,7 +209,7 @@ async def _finalize_scraped_task(
             rel0, _ = format_media_target(pm, settings, tmdb_meta=tmdb_meta)
             first_show_folder = rel0.split("/")[0] if "/" in rel0 else rel0
         meta_dir = compute_local_meta_dir(first_show_folder, str(settings.get("media_local_meta_dir") or ""))
-        meta_res = await asyncio.to_thread(
+        meta_res = await run_ext_thread(
             save_local_metadata,
             meta_dir, cand_detail, kind,
             season_nums=sorted(season_nums) if kind == "tv" and season_nums else ([1] if kind == "tv" else None),
@@ -470,7 +471,7 @@ async def execute_scrape_queue(mode: str = "scan_and_run", rule_ids: list[int] |
                             if cache_key and cache_key in show_decision_cache:
                                 decision, scored = show_decision_cache[cache_key]
                             else:
-                                scored = await asyncio.to_thread(_mw().recall_and_score, pm, api_key, it["rule_media_type"], it.get("ep_stats"))
+                                scored = await run_ext_thread(_mw().recall_and_score, pm, api_key, it["rule_media_type"], it.get("ep_stats"))
                                 decision, scored = decide_match(scored, conf_th, margin_th)
                                 if cache_key and scored:
                                     show_decision_cache[cache_key] = (decision, scored)
@@ -491,7 +492,7 @@ async def execute_scrape_queue(mode: str = "scan_and_run", rule_ids: list[int] |
 
                         if decision == "auto" and top1:
                             try:
-                                detail = (scored[0].get("detail") if scored else None) or await asyncio.to_thread(
+                                detail = (scored[0].get("detail") if scored else None) or await run_ext_thread(
                                     _mw().get_tmdb_detail, top1["kind"], int(top1["tmdb_id"]), api_key
                                 )
                             except Exception as te:
@@ -605,7 +606,7 @@ async def execute_scrape_queue(mode: str = "scan_and_run", rule_ids: list[int] |
                         sel_kind = str(qr.get("selected_kind") or qr.get("media_type") or "movie")
                         if not sel_id:
                             raise RuntimeError("未指定有效 TMDB ID")
-                        det = await asyncio.to_thread(_mw().get_tmdb_detail, sel_kind, sel_id, api_key)
+                        det = await run_ext_thread(_mw().get_tmdb_detail, sel_kind, sel_id, api_key)
                         if not det:
                             raise RuntimeError(f"拉取 TMDB/{sel_kind}/{sel_id} 详情失败")
                         placed = await _finalize_scraped_task(qr, det, sel_kind, settings, run_batch_id, api_key, caches)

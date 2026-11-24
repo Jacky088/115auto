@@ -14,7 +14,7 @@
           <el-descriptions-item label="说明">转存通过 Cookie 完成，系统按「设置 → 后台巡检周期」自动巡检有效性。国内服务器推荐扫码登录；海外服务器扫码易被风控，可点击「手动导入 Cookie」</el-descriptions-item>
         </el-descriptions>
         <div class="btn-row" style="margin-top: 14px">
-          <el-button type="primary" @click="openQr">扫码登录 / 重新登录</el-button>
+          <el-button type="primary" title="重新扫码会覆盖当前 Cookie" @click="openQr">扫码登录 / 重新登录</el-button>
           <el-button @click="cookieVisible = true">手动导入 Cookie</el-button>
           <el-button @click="load">刷新状态</el-button>
         </div>
@@ -103,10 +103,10 @@
         <el-table-column prop="last_fetch_at" label="最近抓取" width="160">
           <template #default="{ row }">{{ row.last_fetch_at ? fmtTime(row.last_fetch_at) : '-' }}</template>
         </el-table-column>
-        <el-table-column label="健康" width="130">
+        <el-table-column label="抓取健康" width="130">
           <template #default="{ row }">
             <span v-if="row.fail_count > 0" class="health-bad">连续失败 {{ row.fail_count }} 轮</span>
-            <span v-else class="health-ok">正常</span>
+            <span v-else class="health-ok">抓取正常</span>
           </template>
         </el-table-column>
         <el-table-column prop="enabled" label="启用" width="80">
@@ -137,7 +137,7 @@
           <template #default="{ row }">
             <div class="table-actions">
               <el-button type="primary" text @click="preview(row)">预览</el-button>
-              <el-button type="warning" text @click="reset(row)">重置</el-button>
+              <el-button type="warning" text @click="reset(row)">重置进度</el-button>
               <el-button type="danger" text @click="del(row)">删除</el-button>
             </div>
           </template>
@@ -146,7 +146,7 @@
     </el-card>
 
     <!-- 115 扫码对话框 -->
-    <el-dialog v-model="qrVisible" title="115 扫码登录" :width="'min(380px, 94vw)'" @close="stopQrPoll">
+    <el-dialog v-model="qrVisible" title="115 扫码登录" :width="'min(380px, 94vw)'" align-center @close="stopQrPoll">
       <div style="text-align: center; min-height: 220px">
         <template v-if="qr.svg">
           <!-- 后端生成的 SVG 改用 data URI 承载：不再以 v-html 直插外部接口数据 -->
@@ -171,12 +171,12 @@
     <CookieImportDialog v-model="cookieVisible" @success="load" />
 
     <!-- Userbot 登录对话框 -->
-    <el-dialog v-model="tgVisible" title="Userbot 登录" :width="'min(480px, 94vw)'" @close="load">
+    <el-dialog v-model="tgVisible" title="Userbot 登录" :width="'min(480px, 94vw)'" align-center @close="load">
       <UserbotLogin compact @update="load" />
     </el-dialog>
 
     <!-- 添加频道对话框 -->
-    <el-dialog v-model="addVisible" title="添加监控频道" :width="'min(460px, 94vw)'">
+    <el-dialog v-model="addVisible" title="添加监控频道" :width="'min(460px, 94vw)'" align-center>
       <el-form label-width="96px">
         <el-form-item label="频道">
           <el-input v-model="addForm.name" placeholder="@channel_name 或 https://t.me/s/xxx" />
@@ -218,7 +218,7 @@
           <span class="mono">#{{ m.message_id }}</span>
           <div class="msg-head-right">
             <el-tag size="small" :type="m.transfer_status ? statusTagType(m.transfer_status) : 'info'">
-              {{ m.transfer_status ? statusLabel[m.transfer_status] : '非分享/待处理' }}
+              {{ m.transfer_status ? statusLabel[m.transfer_status] : '未转存' }}
             </el-tag>
             <el-button size="small" type="primary" plain :loading="transferingId === m.message_id"
                        @click="transferMsg(m)">转存此消息</el-button>
@@ -434,7 +434,7 @@ const changeType = async (row, v) => {
       .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;')
     ElMessageBox.alert(
       `已将 @${esc(row.name)} 的接入方式改为「${label[v]}」。<br/><br/>` +
-      `<b>⚠️ 注意：</b>如系统当前正在运行，需点击顶栏的「停止」再「运行」（或重启容器）以重启监听线程。`,
+      `<b>⚠️ 注意：</b>如系统当前正在运行，需点击顶栏的「停止运行」再「开始运行」（或重启容器）以重启监听线程。`,
       '修改成功（需重启监听生效）',
       { dangerouslyUseHTMLString: true, confirmButtonText: '知道了' },
     ).catch(() => {})

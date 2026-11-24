@@ -6,16 +6,16 @@
       <div class="aside" style="height: 100%">
         <div class="logo">
           <img src="/icon-192.png" alt="115" class="logo-mark" />
-          <div class="logo-text">115 自动转存</div>
+          <div class="logo-text">115 自动转存助手</div>
         </div>
         <el-menu :default-active="$route.path" router class="aside-menu" @select="menuOpen = false">
           <el-menu-item index="/dashboard"><el-icon><Odometer /></el-icon>仪表盘</el-menu-item>
           <el-menu-item index="/files"><el-icon><FolderOpened /></el-icon>网盘文件</el-menu-item>
           <el-menu-item index="/dirs"><el-icon><Collection /></el-icon>转存目录</el-menu-item>
-          <el-menu-item index="/transfers"><el-icon><List /></el-icon>分流记录</el-menu-item>
+          <el-menu-item index="/transfers"><el-icon><List /></el-icon>转存/整理记录</el-menu-item>
           <el-menu-item index="/match"><el-icon><Sort /></el-icon>匹配规则</el-menu-item>
           <el-menu-item index="/subscriptions"><el-icon><VideoPlay /></el-icon>订阅追剧</el-menu-item>
-          <el-menu-item index="/media"><el-icon><MagicStick /></el-icon>整理刮削</el-menu-item>
+          <el-menu-item index="/media"><el-icon><MagicStick /></el-icon>整理 / 刮削</el-menu-item>
           <el-menu-item index="/history"><el-icon><Tickets /></el-icon>日志查询</el-menu-item>
           <el-menu-item index="/account"><el-icon><User /></el-icon>账号管理</el-menu-item>
           <el-menu-item index="/settings"><el-icon><Setting /></el-icon>系统设置</el-menu-item>
@@ -31,16 +31,16 @@
     <el-aside width="216px" class="aside pc-only">
       <div class="logo">
         <img src="/icon-192.png" alt="115" class="logo-mark" />
-        <div class="logo-text">115 自动转存</div>
+        <div class="logo-text">115 自动转存助手</div>
       </div>
       <el-menu :default-active="$route.path" router class="aside-menu">
         <el-menu-item index="/dashboard"><el-icon><Odometer /></el-icon>仪表盘</el-menu-item>
         <el-menu-item index="/files"><el-icon><FolderOpened /></el-icon>网盘文件</el-menu-item>
         <el-menu-item index="/dirs"><el-icon><Collection /></el-icon>转存目录</el-menu-item>
-        <el-menu-item index="/transfers"><el-icon><List /></el-icon>分流记录</el-menu-item>
+        <el-menu-item index="/transfers"><el-icon><List /></el-icon>转存/整理记录</el-menu-item>
         <el-menu-item index="/match"><el-icon><Sort /></el-icon>匹配规则</el-menu-item>
         <el-menu-item index="/subscriptions"><el-icon><VideoPlay /></el-icon>订阅追剧</el-menu-item>
-        <el-menu-item index="/media"><el-icon><MagicStick /></el-icon>整理刮削</el-menu-item>
+        <el-menu-item index="/media"><el-icon><MagicStick /></el-icon>整理 / 刮削</el-menu-item>
         <el-menu-item index="/history"><el-icon><Tickets /></el-icon>日志查询</el-menu-item>
         <el-menu-item index="/account"><el-icon><User /></el-icon>账号管理</el-menu-item>
         <el-menu-item index="/settings"><el-icon><Setting /></el-icon>系统设置</el-menu-item>
@@ -73,7 +73,7 @@
               <span class="not-ready-dot"></span>未就绪
             </el-tag>
             <el-tooltip v-if="sysSpaceBlocked" placement="bottom"
-                        :content="'115 空间不足（' + (sysSpaceReason || '剩余空间告急') + '）：触发本条已标记跳过且不再自动重试，后续任务保留排队、未被判失败，清理空间后自动继续；可在「设置 → 转存控制」关闭自动暂停'">
+                        :content="'115 空间不足（' + (sysSpaceReason || '剩余空间不足') + '）：当前这一条已标记跳过、不会自动重试，其他任务继续排队不会丢失；清理空间后自动恢复转存。可在「系统设置 → 转存控制」关闭自动暂停'">
               <el-tag disable-transitions size="small" class="run-tag run-tag--space">
                 <span class="space-dot"></span><span class="space-tag-full">空间不足·已暂停</span><span class="space-tag-short">空间不足</span>
               </el-tag>
@@ -83,11 +83,11 @@
                       :content="sysReasons.length ? '无法开始运行：' + sysReasons.join('；') : ''">
             <span class="start-wrap">
               <el-button v-if="!sysRunning" type="primary" class="start-btn"
-                         :disabled="!sysReady" :loading="toggling" @click="startSystem">运行</el-button>
+                         :disabled="!sysReady" :loading="toggling" @click="startSystem">开始运行</el-button>
               <el-button v-else-if="sysPaused" type="warning" class="start-btn start-btn--resume"
                          :loading="toggling" @click="resumeSystem">恢复转存</el-button>
               <el-button v-else type="danger" plain class="start-btn"
-                         :loading="toggling" @click="stopSystem">停止</el-button>
+                         :loading="toggling" @click="stopSystem">停止运行</el-button>
             </span>
           </el-tooltip>
         </div>
@@ -142,7 +142,7 @@
         </div>
       </el-header>
       <el-alert v-if="cookieExpired" type="error" :closable="false" show-icon
-                title="115 Cookie 已失效，转存已暂停，请前往「账号管理」重新扫码登录"
+                title="115 Cookie 已失效，转存已暂停。请前往「账号管理」重新扫码登录；扫码失败时可改用手动导入 Cookie"
                 style="margin: 0 10px" class="cookie-alert">
         <el-button size="small" type="danger" plain class="cookie-alert-btn"
                    @click="router.push('/account')">去账号管理</el-button>
@@ -154,7 +154,7 @@
         </template>
         <div class="auto-stop-body">
           <div>原因：{{ autoStop }}</div>
-          <div>处理：按上述原因修正后，点击网页顶栏「运行」恢复（队列与配置已保留，任务不会丢失）。</div>
+          <div>处理：按上述原因修正后，点击网页顶栏「开始运行」恢复（队列与配置已保留，任务不会丢失）。</div>
         </div>
       </el-alert>
       <el-main ref="mainContainerRef" class="layout-main"
@@ -184,7 +184,7 @@
     </el-container>
   </el-container>
 
-  <el-dialog v-model="pwdVisible" title="修改用户名 / 密码" :width="'min(440px, 94vw)'" class="pc-dialog">
+  <el-dialog v-model="pwdVisible" title="修改用户名 / 密码" :width="'min(440px, 94vw)'" align-center class="pc-dialog">
     <el-form ref="pwdFormRef" :rules="pwdRules" :model="pwdForm" label-width="96px" @submit.prevent>
       <el-form-item label="用户名" prop="username">
         <el-input v-model="pwdForm.username" maxlength="32" placeholder="登录用户名" />
@@ -371,7 +371,7 @@ const resumeSystem = async () => {
 const stopSystem = async () => {
   if (!await confirmAction({
     title: '确定停止系统运行？',
-    message: '停止后将暂停频道监听、自动转存与定时整理（配置与排队任务保留，随时可重新启动）。',
+    message: '停止后将暂停频道监听、自动转存与目录整理（配置与排队任务保留，随时可重新启动）。',
     confirmText: '确认停止',
     danger: true,
   })) return
@@ -403,7 +403,7 @@ const check = async () => {
       autoStop.value = ''
       ElMessage.success(sysRunning.value
         ? '✅ 115 Cookie 已恢复有效，转存继续进行'
-        : '✅ 115 Cookie 已恢复有效；点顶栏「运行」恢复转存')
+        : '✅ 115 Cookie 已恢复有效；点顶栏「开始运行」恢复转存')
     }
     // 记录本次已知状态：只有确认有效/失效才更新，未知（null）保持原状
     if (bad) prevCookieOk = false
@@ -488,7 +488,7 @@ const handleInstall = () => {
     )
   } else {
     ElMessageBox.alert(
-      '将 115AutoSave 安装为桌面独立应用：\n\n1. Chrome / Edge 浏览器：点击地址栏最右侧的【安装】图标 ⊕，或点击右上角「···」菜单 →「应用」→「将此站点作为应用安装」；\n2. 局域网访问提示：浏览器规范要求仅在 HTTPS 或 localhost 下支持一键弹窗；局域网 IP 访问请通过上述浏览器菜单手动添加；\n3. 手机/平板设备：在浏览器菜单选择「添加到主屏幕」即可。',
+      '将 115 自动转存助手安装为桌面应用：\n\n1. Chrome / Edge 浏览器：点击地址栏最右侧的【安装】图标 ⊕，或点击右上角「···」菜单 →「应用」→「将此站点作为应用安装」；\n2. 局域网访问提示：浏览器规范要求仅在 HTTPS 或 localhost 下支持一键弹窗；局域网 IP 访问请通过上述浏览器菜单手动添加；\n3. 手机/平板设备：在浏览器菜单选择「添加到主屏幕」即可。',
       '安装为独立应用',
       { confirmButtonText: '我知道了' }
     )

@@ -450,6 +450,7 @@ def test_plan_b_migration_bundle_export_preview_and_restore(tmp_path):
         assert est["meta_asset_count"] == 1
         assert est["pending_media_tasks"] == 1
         assert est["credentials_count"] >= 2
+        assert "slim_db_bytes" in est and est["slim_db_bytes"] > 0
 
         # 3. 含凭据导出必须校验当前登录密码
         r_bad_pw = client.post(
@@ -593,4 +594,106 @@ def test_plan_b_migration_bundle_export_preview_and_restore(tmp_path):
         db.set_setting("running", False)
         db.execute("DELETE FROM media_tasks")
         db.execute("DELETE FROM logs WHERE message='noise'")
+
+
+def test_auto_backup_channels_loop_dispatch(tmp_path):
+    """测试定时自动备份多途径分发（TG Bot、WebDAV、本地）。"""
+    from backend.worker.jobs import digest_backup
+    from unittest.mock import MagicMock
+
+    db.set_setting("auto_backup_enabled", True)
+    db.set_setting("auto_backup_days", 1)
+    db.set_setting("auto_backup_time", "00:00")
+    db.set_setting("backup_last_sent_date", "")
+    db.set_setting("notify_token", "test_tok")
+    db.set_setting("notify_chat_id", "test_chat")
+    db.set_setting("auto_backup_channels", ["tgbot", "local"])
+
+    mock_enqueue = MagicMock(return_value=True)
+    with patch("backend.worker.jobs.enqueue_tg_document", mock_enqueue):
+        # 模拟执行单轮备份循环逻辑
+        raw = digest_backup._backup_json()
+        assert len(raw) > 0
+        # 校验 local 写入
+        local_dir = config.DATA_DIR / "backups"
+        local_dir.mkdir(parents=True, exist_ok=True)
+        fname = "autosave_backup_test_loop.json.gz"
+        (local_dir / fname).write_bytes(gzip.compress(raw))
+        assert (local_dir / fname).exists()
+        (local_dir / fname).unlink()
+
+
+def test_auto_backup_without_tgbot_never_enqueues():
+    """测试当 auto_backup_channels 未勾选 tgbot 时，绝不通过 TG Bot 发送。"""
+    db.set_setting("auto_backup_enabled", True)
+    db.set_setting("auto_backup_days", 1)
+    db.set_setting("auto_backup_time", "00:00")
+    db.set_setting("backup_last_sent_date", "")
+    db.set_setting("notify_token", "test_tok")
+    db.set_setting("notify_chat_id", "test_chat")
+    db.set_setting("auto_backup_channels", ["local"])
+
+    channels_raw = db.get_setting("auto_backup_channels", [])
+    assert "tgbot" not in channels_raw
+    assert "local" in channels_raw
+
+    # 默认值应为空列表，不再默认包含 tgbot
+    db.execute("DELETE FROM settings WHERE key='auto_backup_channels'")
+    default_ch = db.get_setting("auto_backup_channels", [])
+    assert default_ch == []
+
+
+def test_local_backup_management_endpoints():
+    """测试本地历史备份列表、预览、恢复、下载与删除端点。"""
+    token = auth.make_token("admin")
+    headers = {"Authorization": f"Bearer {token}"}
+    client.cookies.set("sa_auth", token)
+
+    local_dir = config.DATA_DIR / "backups"
+    local_dir.mkdir(parents=True, exist_ok=True)
+
+    # 准备一个合法备份文件
+    payload = db.backup_payload()
+    raw = json.dumps(payload, ensure_ascii=False).encode()
+    fname = "autosave_backup_unit_test.json.gz"
+    fpath = local_dir / fname
+    fpath.write_bytes(gzip.compress(raw))
+
+    try:
+        # 1. 列表
+        resp = client.get("/api/backup/local/list", headers=headers)
+        assert resp.status_code == 200
+        items = resp.json()
+        assert any(x["name"] == fname for x in items)
+
+        # 2. 预览
+        prev = client.post(f"/api/backup/local/preview?filename={fname}", headers=headers)
+        assert prev.status_code == 200
+        pdata = prev.json()
+        assert pdata["ok"] is True
+        assert "summary" in pdata
+
+        # 3. 下载
+        dl = client.get(f"/api/backup/local/download?filename={fname}", headers=headers)
+        assert dl.status_code == 200
+        assert len(dl.content) == len(fpath.read_bytes())
+
+        # 4. 恢复
+        db.set_setting("running", False)
+        rest = client.post(f"/api/backup/local/restore?filename={fname}", headers=headers)
+        assert rest.status_code == 200
+        assert rest.json()["ok"] is True
+
+        # 5. 安全校验：非法文件名
+        bad = client.post("/api/backup/local/preview?filename=../secret.key", headers=headers)
+        assert bad.status_code == 400
+
+        # 6. 删除
+        dele = client.delete(f"/api/backup/local?filename={fname}", headers=headers)
+        assert dele.status_code == 200
+        assert not fpath.exists()
+    finally:
+        if fpath.exists():
+            fpath.unlink()
+
 

@@ -11,8 +11,10 @@
       </el-form-item>
       <el-form-item label="TG 推送">
         <SecretConfig
+          v-slot="{ save, saving, cancel, configured: isConfigured }"
           :configured="!!(f.notify_token && f.notify_chat_id)"
           :save="saveNotify"
+          inline-actions
           @open="openNotify"
           @cancel="resetNotify"
         >
@@ -37,6 +39,8 @@
             >
               发送测试消息
             </el-button>
+            <el-button type="primary" size="small" :loading="saving" @click="save">保存</el-button>
+            <el-button v-if="isConfigured" size="small" @click="cancel">取消</el-button>
           </div>
           <div class="tip" style="width: 100%">
             填写后无需保存即可直接测试；测试失败会提示具体原因。收不到时检查：① Token 是否完整复制
@@ -90,8 +94,10 @@
       <div class="section-title">通知渠道扩展</div>
       <el-form-item label="Bark（iOS）">
         <SecretConfig
+          v-slot="{ save, saving, cancel, configured: isConfigured }"
           :configured="!!f.bark_url"
           :save="saveBark"
+          inline-actions
           @open="openBark"
           @cancel="resetBark"
         >
@@ -105,6 +111,8 @@
           </div>
           <div class="range-row" style="width: 100%">
             <el-button size="small" :loading="chTesting === 'bark'" @click="testChannel('bark')">发送测试</el-button>
+            <el-button type="primary" size="small" :loading="saving" @click="save">保存</el-button>
+            <el-button v-if="isConfigured" size="small" @click="cancel">取消</el-button>
           </div>
           <div class="tip" style="width: 100%">
             iOS Bark 推送：App Store 安装 Bark 后，复制 App 内显示的完整推送 URL
@@ -114,8 +122,10 @@
       </el-form-item>
       <el-form-item label="PushPlus">
         <SecretConfig
+          v-slot="{ save, saving, cancel, configured: isConfigured }"
           :configured="!!f.pushplus_token"
           :save="savePushPlus"
+          inline-actions
           @open="openPushPlus"
           @cancel="resetPushPlus"
         >
@@ -132,6 +142,8 @@
           </div>
           <div class="range-row" style="width: 100%">
             <el-button size="small" :loading="chTesting === 'pushplus'" @click="testChannel('pushplus')">发送测试</el-button>
+            <el-button type="primary" size="small" :loading="saving" @click="save">保存</el-button>
+            <el-button v-if="isConfigured" size="small" @click="cancel">取消</el-button>
           </div>
           <div class="tip" style="width: 100%">
             微信推送：官网 pushplus.plus 微信扫码登录后复制 Token，默认发给本人微信；
@@ -141,8 +153,10 @@
       </el-form-item>
       <el-form-item label="ntfy">
         <SecretConfig
+          v-slot="{ save, saving, cancel, configured: isConfigured }"
           :configured="!!f.ntfy_url"
           :save="saveNtfy"
+          inline-actions
           @open="openNtfy"
           @cancel="resetNtfy"
         >
@@ -159,6 +173,8 @@
           </div>
           <div class="range-row" style="width: 100%">
             <el-button size="small" :loading="chTesting === 'ntfy'" @click="testChannel('ntfy')">发送测试</el-button>
+            <el-button type="primary" size="small" :loading="saving" @click="save">保存</el-button>
+            <el-button v-if="isConfigured" size="small" @click="cancel">取消</el-button>
           </div>
           <div class="tip" style="width: 100%">
             完整的 ntfy 主题 URL，如 <code>https://ntfy.sh/my-115-topic</code>（自建服务器换域名）；
@@ -297,7 +313,8 @@ const testDigest = async () => {
     if (data.ok) {
       saveOk('摘要已推送', '请到已配置的通知渠道查看')
     } else {
-      const fail = Object.entries(data.detail || {}).filter(([, v]) => !v).map(([k]) => k).join('、')
+      const CH_LABEL = { tg: 'Telegram', bark: 'Bark', pushplus: 'PushPlus', ntfy: 'ntfy' }
+      const fail = Object.entries(data.detail || {}).filter(([, v]) => !v).map(([k]) => CH_LABEL[k] || k).join('、')
       ElMessage.error(`推送失败：${fail} 未成功（未配置或发送失败，请检查通知配置）`)
     }
   } catch (e) {

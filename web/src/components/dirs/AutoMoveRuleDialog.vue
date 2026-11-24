@@ -3,6 +3,7 @@
     v-model="visible"
     title="添加文件整理规则"
     :width="'min(540px, 94vw)'"
+    align-center
     destroy-on-close
     @open="onOpen"
   >

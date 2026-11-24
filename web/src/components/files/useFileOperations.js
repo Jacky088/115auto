@@ -115,7 +115,7 @@ export function useFileOperations({
     busy.value = true
     try {
       const { data } = await api.post('/api/files/delete', { ids })
-      saveOk('已移入回收站', `${data.count || rows.length} 项已删除`)
+      saveOk('已移入回收站', `${data.count || rows.length} 项可在回收站还原`)
       if (clipboard.value && clipboard.value.items.some((i) => ids.includes(String(i.id)))) {
         clipboard.value = null
       }

@@ -5,7 +5,7 @@
       <el-form-item id="setting-schedule-item" label="定时计划">
         <div class="switch-row">
           <el-switch v-model="f.schedule_enabled" />
-          <span class="tip">开启后仅在允许时段内执行转存、云下载与自动文件整理（任务排队保留，时段外自动等待，规避深夜异常特征）</span>
+          <span class="tip">开启后仅在允许时段内执行转存、云下载与定时文件整理（任务排队保留，时段外自动等待，规避深夜异常特征）</span>
         </div>
         <div v-if="f.schedule_enabled" class="range-row" style="margin-top: 8px">
           <el-time-select
@@ -92,7 +92,7 @@
               :precision="0"
               style="width: 126px"
             />
-            <span class="tip">分钟（区间：最短不能大于最长）</span>
+            <span class="tip row-hint">分钟（区间：最短不能大于最长）</span>
           </div>
         </template>
       </el-form-item>
@@ -109,7 +109,7 @@
         </div>
       </el-form-item>
 
-      <el-form-item label="查重目录缓存">
+      <el-form-item label="查重缓存">
         <div class="range-row">
           <el-select v-model="f.dedup_cache_ttl_sec" style="width: 220px" fit-input-width>
             <el-option label="不缓存（每次穿透查）" :value="0" />

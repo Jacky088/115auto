@@ -1,5 +1,5 @@
 <template>
-  <el-dialog :model-value="modelValue" title="手动导入 115 Cookie" :width="'min(600px, 94vw)'" top="6vh"
+  <el-dialog :model-value="modelValue" title="手动导入 115 Cookie" :width="'min(600px, 94vw)'" align-center
              :close-on-click-modal="false" @update:model-value="emitVisible" @open="cookie = ''">
     <el-alert type="info" :closable="false" show-icon class="ci-scene">
       <template #title>适用场景：服务器在海外/机房，扫码确认后被 115 风控拦截</template>
@@ -59,6 +59,15 @@ const submit = async () => {
   font-family: var(--font-family-mono); font-size: var(--fs-caption); color: var(--el-color-primary);
 }
 .ci-input { margin-top: 4px; }
-.ci-tip { font-size: var(--fs-caption); color: var(--text-warn); font-weight: 600; margin: 8px 0 0; }
+.ci-tip {
+  font-size: var(--fs-caption);
+  color: var(--text-warn);
+  background: rgba(217, 119, 6, 0.08);
+  border: 1px dashed rgba(217, 119, 6, 0.28);
+  border-radius: var(--r-sm);
+  padding: 6px 10px;
+  line-height: 1.5;
+  margin: 10px 0 0;
+}
 .ci-footer { display: flex; justify-content: flex-end; gap: 10px; }
 </style>

@@ -51,13 +51,20 @@ async def lifespan(app: FastAPI):
     _harden_credential_files()
     auth.ensure_initial_password()
     from .core import migration_bundle
-    migration_bundle.cleanup_stale_tmp_dirs()
+    # 启动阶段同样不阻塞事件循环：磁盘清理与大表 UPDATE 在宿主机负载高时可能耗时较久
+    await asyncio.to_thread(migration_bundle.cleanup_stale_tmp_dirs)
     logstream.info("system", "115 自动转存助手启动")
     # 进程重启恢复：上一轮被中断的 running 任务重新排队，否则会永久卡在「转存中」
-    recovered = db.execute("UPDATE transfers SET status='queued' WHERE status='running'")
-    db.execute("UPDATE media_tasks SET status='queued' WHERE task_kind='scrape' AND status='running' AND selected_tmdb_id IS NOT NULL")
-    db.execute("UPDATE media_tasks SET status='failed', error='进程重启中断，请重新扫描或重试' WHERE status='running'")
-    queued = db.query("SELECT count(*) c FROM transfers WHERE status='queued'", one=True)["c"]
+    recovered = await asyncio.to_thread(
+        db.execute, "UPDATE transfers SET status='queued' WHERE status='running'")
+    await asyncio.to_thread(
+        db.execute, "UPDATE media_tasks SET status='queued' WHERE task_kind='scrape'"
+                    " AND status='running' AND selected_tmdb_id IS NOT NULL")
+    await asyncio.to_thread(
+        db.execute, "UPDATE media_tasks SET status='failed', error='进程重启中断，请重新扫描或重试'"
+                    " WHERE status='running'")
+    queued = (await asyncio.to_thread(
+        db.query, "SELECT count(*) c FROM transfers WHERE status='queued'", one=True))["c"]
     if recovered or queued:
         logstream.info("transfer",
                        f"队列恢复：待转存 {queued} 个任务（分享+云下载）；今日已用额度续算不清零，"
@@ -65,7 +72,7 @@ async def lifespan(app: FastAPI):
     if recovered:
         logstream.warn("transfer", f"检测到 {recovered} 个上次中断的转存任务，已重新加入队列")
     # 后台任务
-    mode = db.get_setting("tg_mode", "polling")
+    mode = await asyncio.to_thread(db.get_setting, "tg_mode", "polling")
     if mode in ("polling", "both"):
         _background.append(asyncio.create_task(polling.polling_loop()))
     if mode in ("userbot", "both"):

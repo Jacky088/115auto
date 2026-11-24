@@ -253,6 +253,172 @@ html.dark .saas-hero-bg .el-card { background: var(--glass-bg) !important; }
 }
 
 /* ========================================================
+   全站表单排版基准：标签、控件、说明之间统一留白与左对齐
+   ======================================================== */
+/* 顶部标签与控件保持稳定间距，窄窗也不贴脸 */
+.el-form-item--label-top .el-form-item__label,
+.el-form--label-top .el-form-item__label {
+  margin-bottom: 10px;
+  padding-right: 0;
+  line-height: 1.45;
+}
+
+/* 内容区：控件与控件、控件与说明之间统一横向/纵向留白 */
+.el-form-item__content {
+  column-gap: 10px;
+  row-gap: 8px;
+}
+
+/* 说明文字统一左对齐并允许长词换行，避免窄窗挤成锯齿 */
+.el-form-item__content > .tip,
+.range-row > .tip {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+
+/* 开关操作行：统一垂直居中对齐，杜绝开关与文本高低错位 */
+.switch-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 28px;
+}
+
+.switch-row .el-switch {
+  flex: none;
+  margin: 0;
+}
+
+.switch-row .tip,
+.switch-row .tip-text,
+.switch-row > span {
+  flex: 1;
+  min-width: 0;
+  line-height: 1.5;
+}
+
+/* ---- 全站统一提示性文字规范（继承图1胶囊提示条风格：微透明底色 + 细虚线边框 + 圆角内边距） ---- */
+.tip-box,
+.tip-callout,
+.tip-block {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  font-size: var(--fs-caption);
+  line-height: 1.55;
+  padding: 6px 10px;
+  border-radius: var(--r-sm);
+  border: 1px dashed rgba(79, 107, 255, 0.25);
+  background: rgba(79, 107, 255, 0.08);
+  color: var(--saas-primary, #4f6bff);
+  margin: 4px 0 2px;
+  overflow-wrap: anywhere;
+}
+
+/* 变体 1：常规/中性说明（中性蓝灰，用于日常解释） */
+.tip-box--neutral,
+.tip-box.is-neutral {
+  color: var(--saas-text-sub);
+  background: rgba(79, 107, 255, 0.05);
+  border-color: rgba(126, 146, 196, 0.28);
+}
+
+/* 变体 2：警告/注意事项（暖黄色系，用于需重启、清空、风险等提示） */
+.tip-box--warn,
+.tip-box.is-warn,
+.tip-box:has(.warn-text),
+.tip-block:has(.warn-text) {
+  color: var(--text-warn, #d97706);
+  background: rgba(217, 119, 6, 0.08);
+  border-color: rgba(217, 119, 6, 0.28);
+}
+
+/* 变体 3：成功/安全保障（青绿色系） */
+.tip-box--success,
+.tip-box.is-success {
+  color: var(--el-color-success, #16a34a);
+  background: rgba(22, 163, 74, 0.08);
+  border-color: rgba(22, 163, 74, 0.28);
+}
+
+/* 暗黑模式自适应 */
+html.dark .tip-box,
+html.dark .tip-callout,
+html.dark .tip-block {
+  background: rgba(79, 107, 255, 0.14);
+  border-color: rgba(120, 145, 255, 0.35);
+  color: #9cb1ff;
+}
+
+html.dark .tip-box--neutral,
+html.dark .tip-box.is-neutral {
+  background: rgba(255, 255, 255, 0.04);
+  border-color: rgba(126, 146, 196, 0.22);
+  color: var(--saas-text-sub);
+}
+
+html.dark .tip-box--warn,
+html.dark .tip-box.is-warn,
+html.dark .tip-box:has(.warn-text),
+html.dark .tip-block:has(.warn-text) {
+  background: rgba(234, 138, 0, 0.14);
+  border-color: rgba(234, 138, 0, 0.35);
+  color: #f6ad55;
+}
+
+html.dark .tip-box--success,
+html.dark .tip-box.is-success {
+  background: rgba(22, 163, 74, 0.14);
+  border-color: rgba(34, 197, 94, 0.35);
+  color: #86efac;
+}
+
+/* 操作行：统一为可换行的横向流式布局，按钮/输入框/说明互不挤压 */
+.range-row,
+.input-btn-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+  width: 100%;
+  min-width: 0;
+}
+
+/* 行内长说明独占一行，始终左对齐在控件下方 */
+.range-row > .row-hint,
+.range-row > .range-tip,
+.range-row > .meta-empty-tip {
+  flex: 1 0 100%;
+  min-width: 0;
+  margin: 0;
+}
+
+/* 按钮与说明同排时：按钮在上、说明在下、左对齐，避免横向挤压 */
+.range-row:has(> .el-button) > .tip,
+.input-btn-row:has(> .el-button) > .tip {
+  flex: 1 0 100%;
+  margin: 0;
+}
+
+/* 窄窗口：左右布局的表单标签改为上下堆叠，防止标签与控件贴在一起 */
+@media (max-width: 640px) {
+  .el-form:not(.el-form--inline) .el-form-item {
+    display: block;
+  }
+  .el-form:not(.el-form--inline) .el-form-item__label {
+    display: block;
+    width: auto !important;
+    height: auto;
+    margin-bottom: 10px;
+    padding-right: 0;
+    text-align: left;
+    line-height: 1.45;
+  }
+}
+
+/* ========================================================
    数字步进器（el-input-number）：对称胶囊、居中数值、宽大触控区
    ======================================================== */
 .el-input-number {
@@ -687,6 +853,27 @@ html.dark .el-tag--info.is-plain {
 }
 html.dark .el-overlay {
   background-color: rgba(4, 8, 20, .58);
+}
+
+/* 全站弹窗全局视口垂直水平绝对居中（杜绝长页面滚屏时弹窗偏上被遮挡） */
+.el-overlay-dialog {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  overflow: auto !important;
+}
+
+.el-overlay-dialog > .el-dialog {
+  margin: 0 auto !important;
+  top: auto !important;
+  max-height: 92vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.el-overlay-dialog > .el-dialog > .el-dialog__body {
+  overflow-y: auto;
+  max-height: calc(92vh - 120px);
 }
 
 .el-dialog,

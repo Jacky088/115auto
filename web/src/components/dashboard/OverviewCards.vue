@@ -194,7 +194,7 @@ const spaceFree = computed(() => {
 const spaceLevel = computed(() => (spaceRatio.value >= 90 ? 'danger' : spaceRatio.value >= 70 ? 'warn' : 'ok'))
 const spaceColor = computed(() => (spaceRatio.value >= 90 ? '#ef4444' : spaceRatio.value >= 70 ? '#f59e0b' : '#4f6bff'))
 const spaceRatioLabel = computed(() => (
-  spaceRatio.value >= 90 ? '空间告急' : spaceRatio.value >= 70 ? '空间较满' : '空间充足'
+  spaceRatio.value >= 90 ? '空间不足' : spaceRatio.value >= 70 ? '空间偏满' : '空间充足'
 ))
 
 // ---- 分类占比计算 ----

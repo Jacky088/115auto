@@ -30,6 +30,12 @@ BACKUP_EXCLUDE_SETTINGS = {
     "tg_admin_id",         # TG Bot 授权用户绑定（auth 类配置，随登录凭据一并保留）
     "notify_chat_id",      # TG 通知目标会话：与 notify_token 同属推送目的地，恢复外来值
                            # 会把自动备份/通知导向未知会话，恢复后保留本机当前值
+    "webdav_url",          # WebDAV 备份服务地址（可能内嵌内网拓扑/账号信息）
+    "webdav_username",     # WebDAV 用户名，与密码同属云端写入凭据
+    "webdav_password",     # WebDAV 应用密码（等同云端备份写入权限）
+    "webdav_tested_url",   # 连接测试缓存：绑定具体地址/账号，不跨机恢复
+    "webdav_tested_user",
+    "webdav_last_test_ok", # 本机连通性状态，随地址/账号变化
 }
 
 # 绑定本机文件或引导完成的本地状态键：保留目标实例当前值，避免跨机恢复后把空机器误判为已登录/已配置
@@ -47,6 +53,9 @@ BACKUP_RUNTIME_SETTINGS = frozenset({
     "paused",
     "auto_stop_reason",
     "backfill_pending",
+    "webdav_last_backup_at",
+    "webdav_last_backup_date",
+    "webdav_last_backup_status",
 })
 BACKUP_RUNTIME_PREFIXES = ("poll_fail_",)
 

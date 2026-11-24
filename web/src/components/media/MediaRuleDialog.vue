@@ -7,6 +7,7 @@
       ? (ruleDialog.id ? '编辑目录整理规则' : '新增目录整理规则')
       : (ruleDialog.id ? '编辑媒体刮削目录' : '新增媒体刮削目录')"
     width="min(560px, 94vw)"
+    align-center
   >
     <!-- 必选项明确文字提示横幅 -->
     <div class="rule-dialog-hint">

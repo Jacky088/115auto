@@ -63,15 +63,15 @@
           </el-tab-pane>
 
           <el-tab-pane label="⏰ 定时维护" name="schedule">
-            <ScheduleSettings :f="f" />
+            <ScheduleSettings :f="f" @dirty="onChildDirty" />
           </el-tab-pane>
 
-          <el-tab-pane label="🧼 追更洗版" name="wash">
-            <WashSettings :f="f" @dirty="checkDirty" />
+          <el-tab-pane label="🧼 洗版升级" name="wash">
+            <WashSettings :f="f" @dirty="onChildDirty" />
           </el-tab-pane>
 
           <el-tab-pane label="💾 备份恢复" name="backup">
-            <BackupSettings ref="backupRef" :f="f" />
+            <BackupSettings ref="backupRef" :f="f" @dirty="onChildDirty" />
           </el-tab-pane>
 
           <el-tab-pane label="🔑 开放接口" name="api">
@@ -93,7 +93,7 @@
     </div>
 
     <!-- 系统自检弹窗 -->
-    <el-dialog v-model="doctorOpen" title="系统自检" width="min(760px, 94vw)">
+    <el-dialog v-model="doctorOpen" title="系统自检" width="min(760px, 94vw)" align-center>
       <div v-if="doctor" class="toolbar" style="margin-bottom: 10px">
         <el-tag :type="doctorTagType(doctor.overall)" effect="dark">
           {{ doctorTagText(doctor.overall) }}
@@ -157,7 +157,7 @@ const TAB_LABELS = {
   transfer: '🔄 转存控制',
   notify: '🔔 消息通知',
   schedule: '⏰ 定时维护',
-  wash: '🧼 追更洗版',
+  wash: '🧼 洗版升级',
   backup: '💾 备份恢复',
   api: '🔑 开放接口',
 }
@@ -171,7 +171,7 @@ const SEARCH_INDEX = [
   { value: '轮询检索间隔', tab: 'transfer', keywords: ['轮询', '间隔', '秒', '分钟', '频控'] },
   { value: '转存与云下载执行间隔', tab: 'transfer', keywords: ['转存', '云下载', '执行', '延迟', '间隔', '频控'] },
   { value: '失败重试退避阶梯 (60s/300s/1800s)', tab: 'transfer', keywords: ['重试', '失败', '退避', '报错', '阶梯'] },
-  { value: '115 空间不足自动暂停 (空间门闸)', tab: 'transfer', keywords: ['空间', '暂停', '门禁', '门闸', '熔断', 'gb', 'tb', '容量'] },
+  { value: '115 空间不足自动暂停', tab: 'transfer', keywords: ['空间', '暂停', '门禁', '门闸', '熔断', 'gb', 'tb', '容量'] },
   { value: '每日转存上限 (1~50 笔/天)', tab: 'transfer', keywords: ['每日', '限额', '上限', '额度', '50'] },
   { value: '分享体积下限 (过滤微小资源)', tab: 'transfer', keywords: ['体积', '下限', '过滤', '小文件', 'gb'] },
   { value: '拟人化连存小憩 (防风控休息)', tab: 'transfer', keywords: ['小憩', '休息', '连存', '防风控', '笔数', '时间'] },
@@ -189,14 +189,14 @@ const SEARCH_INDEX = [
   // 定时维护 (schedule)
   { value: '定时计划与避让时间段 (静默防风控)', tab: 'schedule', keywords: ['定时', '计划', '避让', '深夜', '时间段', '起止', '跨零点'] },
   { value: '开工随机扰动 (Jitter 随机微差)', tab: 'schedule', keywords: ['扰动', '随机', 'jitter', '微差', '防封'] },
-  { value: '运行健康巡检间隔 (离线任务检查)', tab: 'schedule', keywords: ['健康', '巡检', '离线', '检查', '间隔'] },
+  { value: '运行健康巡检间隔（云下载任务检查）', tab: 'schedule', keywords: ['健康', '巡检', '离线', '检查', '间隔', '云下载'] },
   { value: '日志保留天数与 SQLite 自动压缩', tab: 'schedule', keywords: ['日志', '清理', '保留', '天数', 'vacuum', '压缩', '瘦身'] },
 
   // 追更洗版 (wash)
   { value: '分享追更模式 (同一链接增量转存)', tab: 'wash', keywords: ['追更', '增量', '分享', '同链接', '集数', '加更'] },
   { value: '按文件名同名去重', tab: 'wash', keywords: ['去重', '同名', '查重', '文件名'] },
   { value: '智能画质洗版升级 (高画质替换低画质)', tab: 'wash', keywords: ['洗版', '画质', '4k', '1080p', '升级', '替换', '优质'] },
-  { value: '旧版文件归档目录与移入回收站', tab: 'wash', keywords: ['旧版', '归档', '回收站', '删除', '目录'] },
+  { value: '旧版文件归档目录（移入 115 回收站，可手动还原）', tab: 'wash', keywords: ['旧版', '归档', '回收站', '删除', '目录', '还原'] },
 
   // 备份恢复 (backup)
   { value: '定时自动备份至 Telegram Bot', tab: 'backup', keywords: ['自动备份', '定时', '计划', '天数', '时间', 'bot'] },
@@ -249,6 +249,10 @@ const syncF = (patch) => {
     dirty.value = false
     suppressWatch = false
   })
+}
+
+const onChildDirty = () => {
+  dirty.value = true
 }
 
 // ---- 系统自检 ----
@@ -338,6 +342,16 @@ const load = async () => {
       dedup_cache_ttl_sec: Number(raw.dedup_cache_ttl_sec ?? 90),
       auto_backup_days: Number(raw.auto_backup_days ?? 7),
       auto_backup_time: raw.auto_backup_time || '04:00',
+      auto_backup_channels: Array.isArray(raw.auto_backup_channels)
+        ? raw.auto_backup_channels
+        : (raw.auto_backup_channels ? String(raw.auto_backup_channels).split(',').map(s => s.trim()).filter(Boolean) : []),
+      bundle_meta_mode: raw.bundle_meta_mode || 'nfo',
+      bundle_slim_db: raw.bundle_slim_db !== undefined ? !!raw.bundle_slim_db : true,
+      bundle_include_credentials: raw.bundle_include_credentials !== undefined ? !!raw.bundle_include_credentials : false,
+      bundle_export_dest: raw.bundle_export_dest || 'local',
+      bundle_restore_source: raw.bundle_restore_source || 'local',
+      bundle_restore_credentials: raw.bundle_restore_credentials !== undefined ? !!raw.bundle_restore_credentials : false,
+      bundle_restore_meta: raw.bundle_restore_meta !== undefined ? !!raw.bundle_restore_meta : true,
       batch_rest_enabled: raw.batch_rest_enabled !== undefined ? !!raw.batch_rest_enabled : true,
     }
 
@@ -445,21 +459,36 @@ const validateForm = () => {
     }
   }
 
-  // 5. 定时自动备份 (1 ~ 365, HH:MM, TG Bot 校验)
+  // 5. 定时自动备份 (1 ~ 365, HH:MM, 途径与 TG Bot 校验)
   if (f.value.auto_backup_enabled) {
-    const token = String(f.value.notify_token || '').trim()
-    const chatId = String(f.value.notify_chat_id || '').trim()
-    if (!token || !chatId) {
-      ElMessage.warning('开启「定时自动备份」必须先配置下方 Telegram Bot（Token 与 Chat ID），否则备份文件无法送达')
+    const channels = Array.isArray(f.value.auto_backup_channels)
+      ? f.value.auto_backup_channels
+      : (typeof f.value.auto_backup_channels === 'string' && f.value.auto_backup_channels.trim()
+          ? f.value.auto_backup_channels.split(',').map((x) => x.trim()).filter(Boolean)
+          : [])
+    if (channels.length === 0) {
+      ElMessage.warning('开启「定时自动备份」需至少选择一种备份途径（Telegram Bot / WebDAV / 本地存储）')
+      activeTab.value = 'backup'
       return false
+    }
+    if (channels.includes('tgbot')) {
+      const token = String(f.value.notify_token || '').trim()
+      const chatId = String(f.value.notify_chat_id || '').trim()
+      if (!token || !chatId) {
+        ElMessage.warning('定时自动备份已勾选 Telegram Bot 途径，请先前往「消息通知」配置 Bot Token 与 Chat ID')
+        activeTab.value = 'notify'
+        return false
+      }
     }
     const bd = Number(f.value.auto_backup_days)
     if (!Number.isInteger(bd) || bd < 1 || bd > 365) {
       ElMessage.warning('自动备份间隔必须是 1 ~ 365 天之间的整数')
+      activeTab.value = 'backup'
       return false
     }
     if (!f.value.auto_backup_time) {
       ElMessage.warning('请选择自动备份的推送时间')
+      activeTab.value = 'backup'
       return false
     }
   }

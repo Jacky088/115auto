@@ -220,3 +220,85 @@ def test_recyclebin_list_and_revert():
         assert r_rev.status_code == 200
         assert r_rev.json() == {"ok": True, "count": 2}
         mock_client.recyclebin_revert.assert_called_once_with(["9001", "9002"])
+
+
+def test_list_files_composite_pagination_53_items():
+    """验证复合分页：9个文件夹 + 44个文件（共53项），每页50条时：
+
+    第 1 页严格只返回 50 条（9 文件夹 + 41 文件），绝不展示 53 条！
+    第 2 页自动转为 show_dir=0、offset=41、limit=3，精准返回剩余 3 个文件！
+    """
+    mock_client = MagicMock()
+
+    # 构造 9 个文件夹
+    folders_data = [
+        {"cid": str(1000 + i), "n": f"子目录_{i:02d}", "fc": "0", "user_utime": 1000 - i}
+        for i in range(9)
+    ]
+    # 构造 44 个文件
+    files_data = [
+        {"fid": str(2000 + i), "n": f"文件_{i:02d}.mkv", "fc": "1", "s": 1024 * 1024, "user_utime": 500 - i}
+        for i in range(44)
+    ]
+
+    def mock_fs_files(payload):
+        show_dir = payload.get("show_dir", 1)
+        offset = payload.get("offset", 0)
+        limit = payload.get("limit", 50)
+
+        # 115 原始机制：show_dir=1 时，全部文件夹置顶返回；文件根据 offset/limit 截取
+        ret_folders = folders_data if show_dir == 1 else []
+        ret_files = files_data[offset:offset + limit]
+
+        return {
+            "state": True,
+            "count": len(folders_data) + len(files_data),  # 53
+            "folder_count": len(folders_data),  # 9
+            "file_count": len(files_data),  # 44
+            "data": ret_folders + ret_files,
+            "path": [["根目录", "0"], ["测试剧集", "100"]],
+        }
+
+    mock_client.fs_files.side_effect = mock_fs_files
+
+    with patch("backend.pan115.client.check_login", return_value={"ok": True}), \
+            patch("backend.pan115.client._get_client", return_value=mock_client):
+        tc = _authed_client()
+
+        # 1) 请求第 1 页（page=1, size=50）
+        r1 = tc.get("/api/files/list", params={"cid": 100, "page": 1, "size": 50})
+        assert r1.status_code == 200
+        b1 = r1.json()
+        assert b1["total"] == 53
+        assert b1["folder_count"] == 9
+        assert b1["file_count"] == 44
+        # 核心断言：单页展示严格受 size 限制，绝不能返回 53 项！
+        assert len(b1["items"]) == 50
+        assert b1["items"][0]["name"] == "子目录_00"
+        assert b1["items"][8]["name"] == "子目录_08"
+        assert b1["items"][9]["name"] == "文件_00.mkv"
+        assert b1["items"][49]["name"] == "文件_40.mkv"
+
+        # 2) 请求第 2 页（page=2, size=50，带已知 fc=9, file_count=44）
+        r2 = tc.get("/api/files/list", params={"cid": 100, "page": 2, "size": 50, "fc": 9, "file_count": 44})
+        assert r2.status_code == 200
+        b2 = r2.json()
+        assert b2["total"] == 53
+        assert len(b2["items"]) == 3
+        assert b2["items"][0]["name"] == "文件_41.mkv"
+        assert b2["items"][1]["name"] == "文件_42.mkv"
+        assert b2["items"][2]["name"] == "文件_43.mkv"
+
+        # 验证调 115 时已自动优化为纯文件请求（show_dir=0, offset=41, limit=3）
+        last_payload = mock_client.fs_files.call_args.args[0]
+        assert last_payload["show_dir"] == 0
+        assert last_payload["offset"] == 41
+        assert last_payload["limit"] == 3
+
+        # 3) 请求超界第 3 页（page=3, size=50）
+        r3 = tc.get("/api/files/list", params={"cid": 100, "page": 3, "size": 50, "fc": 9, "file_count": 44})
+        assert r3.status_code == 200
+        b3 = r3.json()
+        assert b3["total"] == 53
+        assert len(b3["items"]) == 0
+

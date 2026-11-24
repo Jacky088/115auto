@@ -57,7 +57,7 @@
         <el-descriptions-item label="命中规则"><span class="mono">{{ testResult.matched_rule || '-' }}</span></el-descriptions-item>
         <el-descriptions-item label="黑名单">
           <el-tag v-if="testResult.blocked" type="danger" size="small">
-            拦截（{{ testResult.block_rule_type }}: {{ testResult.block_rule_value }}）
+            拦截（{{ ruleTypeLabel(testResult.block_rule_type) }}：{{ testResult.block_rule_value }}）
           </el-tag>
           <el-tag v-else type="success" size="small">通过</el-tag>
         </el-descriptions-item>
@@ -101,7 +101,7 @@
           <el-button v-if="blTab === 'keyword'" @click="blRestoreDefaults">恢复默认</el-button>
           <el-button v-if="blTab === 'file_pattern'" @click="regexHelpVisible = true">正则说明</el-button>
         </div>
-        <p style="color:var(--text-muted); font-size:var(--fs-caption); margin-top: 0">
+        <p class="tip-box is-neutral">
           {{ blHint }}
         </p>
         <el-table :data="blItems" size="small" empty-text="暂无条目">
@@ -137,7 +137,7 @@
               <el-tag size="small" :type="stageTag(row.stage)" style="margin-right: 5px">
                 {{ stageLabel(row.stage) }}
               </el-tag>
-              <el-tag size="small" type="danger" effect="plain">{{ row.rule_value || row.rule_type }}</el-tag>
+              <el-tag size="small" type="danger" effect="plain">{{ row.rule_value || ruleTypeLabel(row.rule_type) }}</el-tag>
             </template>
           </el-table-column>
           <el-table-column label="内容" min-width="300">
@@ -153,7 +153,7 @@
             <template #default="{ row }">
               <div class="table-actions">
                 <el-button text type="primary" @click="openDetail(row)">详情</el-button>
-                <el-button type="primary" text @click="releaseHit(row)">放行</el-button>
+                <el-button type="primary" text @click="releaseHit(row)">放行并转存</el-button>
               </div>
             </template>
           </el-table-column>
@@ -162,7 +162,7 @@
     </el-card>
 
     <!-- 使用帮助（匹配规则） -->
-    <el-dialog v-model="helpVisible" title="匹配规则使用帮助" :width="'min(780px, 94vw)'" top="4vh"
+    <el-dialog v-model="helpVisible" title="匹配规则使用帮助" :width="'min(780px, 94vw)'" align-center
                class="help-dialog">
       <div class="help-body">
         <h4>一、工作原理</h4>
@@ -189,7 +189,7 @@
             <template #default="{ row }">{{ row.example }}</template>
           </el-table-column>
         </el-table>
-        <p class="tip">字幕组列表无法穷举所有组名；未覆盖的资源可按下方方法自定义。</p>
+        <p class="tip-box">字幕组列表无法穷举所有组名；未覆盖的资源可按下方方法自定义。</p>
 
         <h4>三、不够用时：添加自定义规则</h4>
         <p>点击「添加规则」→ 填写正则 → 选择（或输入）分类 → 设置优先级 → <b>点击「保存规则」</b>。用下方测试器验证后再投入运行。</p>
@@ -210,7 +210,7 @@
           <li><b>转入指定目录</b>：在下拉框直接输入一个路径（如 <code>/待整理</code>），无法识别的资源统一进这里，
             之后你在 115 网盘里手动归档；也可以为它添加自定义规则（如 <code>短剧|微短剧</code> → 分类「电视剧」）让它以后自动分类。</li>
         </ul>
-        <p class="tip">该规则仅适用于 TG 频道，且对分享转存与云下载同时生效。手动输入目录时请以 <code>/</code> 开头，
+        <p class="tip-box">该规则仅适用于 TG 频道，且对分享转存与云下载同时生效。手动输入目录时请以 <code>/</code> 开头，
           回车确认后程序会自动创建该目录，点击「保存」后生效；目录格式不正确会弹窗提示修改。</p>
 
         <h4>五、注意事项</h4>
@@ -228,7 +228,7 @@
     </el-dialog>
 
     <!-- 拦截详情弹窗 -->
-    <el-dialog v-model="detailVisible" title="拦截详情" :width="'min(640px, 94vw)'" top="6vh">
+    <el-dialog v-model="detailVisible" title="拦截详情" :width="'min(640px, 94vw)'" align-center>
       <el-descriptions :column="2" border size="small" v-if="detailRow">
         <el-descriptions-item label="时间">{{ fmtTime(detailRow.created_at) }}</el-descriptions-item>
         <el-descriptions-item label="来源频道">
@@ -237,7 +237,7 @@
         <el-descriptions-item label="拦截环节">{{ stageLabel(detailRow.stage) }}</el-descriptions-item>
         <el-descriptions-item label="命中规则">
           <el-tag size="small" type="danger" effect="plain">
-            {{ detailRow.rule_type }}: {{ detailRow.rule_value }}
+            {{ ruleTypeLabel(detailRow.rule_type) }}：{{ detailRow.rule_value }}
           </el-tag>
         </el-descriptions-item>
       </el-descriptions>
@@ -254,7 +254,7 @@
     </el-dialog>
 
     <!-- 文件名正则帮助 -->
-    <el-dialog v-model="regexHelpVisible" title="文件名正则说明" :width="'min(780px, 94vw)'" top="4vh">
+    <el-dialog v-model="regexHelpVisible" title="文件名正则说明" :width="'min(780px, 94vw)'" align-center>
       <div class="help-body">
         <h4>一、作用机制</h4>
         <p>转存前会先读取分享内的<b>文件列表</b>：只要任意一个文件名命中你设置的正则，
@@ -437,6 +437,12 @@ const blHints = {
   file_pattern: '分享内文件名命中正则 → 该分享整体跳过（转存前检查）',
 }
 const blHint = computed(() => blHints[blTab.value] || blHints.keyword)
+// 黑名单规则类型 → 中文（避免界面直接显示英文枚举）
+const RULE_TYPE_LABEL = {
+  keyword: '关键词', channel: '频道', file_pattern: '文件名正则',
+  size_limit: '分享体积下限', category: '分类',
+}
+const ruleTypeLabel = (t) => RULE_TYPE_LABEL[t] || t || '-'
 
 const blRegexTips = [
   { frag: '\\.txt$', meaning: '以 .txt 结尾（$ 表示结尾）', },

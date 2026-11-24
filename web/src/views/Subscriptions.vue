@@ -37,11 +37,13 @@
         </el-table-column>
         <el-table-column label="最低画质" width="124">
           <template #default="{ row }">
-            <el-select :model-value="row.min_quality || ''" size="small" fit-input-width
-                       :disabled="!qualityPolicyOn"
-                       @change="(v) => setMinQuality(row, v)">
-              <el-option v-for="o in QUALITY_OPTS" :key="o.value" :label="o.label" :value="o.value" />
-            </el-select>
+            <el-tooltip :disabled="qualityPolicyOn" content="需先在「系统设置 → 洗版升级」开启质量策略" placement="top">
+              <el-select :model-value="row.min_quality || ''" size="small" fit-input-width
+                         :disabled="!qualityPolicyOn"
+                         @change="(v) => setMinQuality(row, v)">
+                <el-option v-for="o in QUALITY_OPTS" :key="o.value" :label="o.label" :value="o.value" />
+              </el-select>
+            </el-tooltip>
           </template>
         </el-table-column>
         <el-table-column label="最近集数" width="100">
@@ -59,8 +61,8 @@
         <el-table-column label="操作" width="180" fixed="right">
           <template #default="{ row }">
             <div class="table-actions">
-              <el-button type="primary" text @click="openBackfill(row)">补全</el-button>
-              <el-button type="warning" text @click="resetProgress(row)">重置</el-button>
+              <el-button type="primary" text @click="openBackfill(row)">向前补全</el-button>
+              <el-button type="warning" text @click="resetProgress(row)">重置进度</el-button>
               <el-button type="danger" text @click="del(row)">删除</el-button>
             </div>
           </template>
@@ -432,7 +434,7 @@ const openBackfill = (row) => backfillDialogRef.value?.openForSubscription(row)
 const del = async (row) => {
   if (!await confirmAction({
     title: `确认删除订阅「${row.keyword}」？`,
-    message: '删除后将不再按该关键词自动追剧与推送进度通知。',
+    message: '删除后将不再按该关键词自动追剧与推送进度通知；已转存的资源与历史记录不受影响。',
     confirmText: '确认删除',
     danger: true,
   })) return

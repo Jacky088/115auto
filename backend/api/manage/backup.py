@@ -2,7 +2,7 @@
 import asyncio
 import time
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 
 from ... import auth, database as db
 from ...core import logstream
@@ -81,6 +81,131 @@ async def backup_import(_=Depends(require_user)):
     """备份导入为预留接口：网页与 TG Bot 均支持 JSON / GZ / ZIP 恢复。"""
     raise HTTPException(400, "网页「系统设置」与 TG Bot 均支持 .json / .json.gz / .zip 恢复，"
                              "请在网页上传备份文件，或直接把备份文件发送给 Bot")
+
+
+# ---------- 本地备份管理 (data/backups/) ----------
+def _local_backup_dir():
+    from pathlib import Path
+    from ... import config
+    d = Path(config.DATA_DIR) / "backups"
+    d.mkdir(parents=True, exist_ok=True)
+    return d.resolve()
+
+
+def _resolve_safe_local_backup(filename: str):
+    from pathlib import Path
+    base_name = Path(filename).name
+    if not base_name or base_name != filename or base_name.startswith("."):
+        raise HTTPException(400, "非法备份文件名")
+    target = (_local_backup_dir() / base_name).resolve()
+    if target.parent != _local_backup_dir() or not target.is_file():
+        raise HTTPException(404, "备份文件不存在")
+    return target
+
+
+@router.get("/backup/local/list")
+async def backup_local_list(_=Depends(require_user)):
+    """获取本地 data/backups/ 目录下的历史备份列表。"""
+    def _scan():
+        d = _local_backup_dir()
+        items = []
+        for p in d.iterdir():
+            if not p.is_file() or p.name.startswith("."):
+                continue
+            name_lower = p.name.lower()
+            if not (name_lower.endswith(".json") or name_lower.endswith(".gz") or name_lower.endswith(".zip")):
+                continue
+            stat = p.stat()
+            items.append({
+                "name": p.name,
+                "size": stat.st_size,
+                "mtime": stat.st_mtime,
+                "mtime_str": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stat.st_mtime)),
+            })
+        items.sort(key=lambda x: x["mtime"], reverse=True)
+        return items
+
+    return await asyncio.to_thread(_scan)
+
+
+@router.post("/backup/local/preview")
+async def backup_local_preview(
+    filename: str = Query(..., description="本地备份文件名"),
+    _=Depends(require_user),
+):
+    """只读校验并预览指定的本地备份文件。"""
+    p = _resolve_safe_local_backup(filename)
+    raw = await asyncio.to_thread(p.read_bytes)
+    try:
+        data = db.parse_backup_bytes(raw, filename=p.name)
+        return {"ok": True, "filename": p.name, "summary": db.backup_counts(data)}
+    except ValueError as e:
+        if p.name.lower().endswith(".zip"):
+            try:
+                from ...core import migration_bundle
+                info = await asyncio.to_thread(migration_bundle.inspect_migration_bundle, p)
+                return {"ok": True, "filename": p.name, "summary": info.get("counts", {})}
+            except Exception:
+                pass
+        raise HTTPException(400, f"解析备份文件失败：{e}") from e
+
+
+@router.post("/backup/local/restore")
+async def backup_local_restore(
+    filename: str = Query(..., description="本地备份文件名"),
+    _=Depends(require_user),
+):
+    """从本地备份文件恢复业务数据（整体覆盖）。"""
+    try:
+        db.ensure_restore_idle_guard()
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+    p = _resolve_safe_local_backup(filename)
+    raw = await asyncio.to_thread(p.read_bytes)
+    try:
+        data = db.parse_backup_bytes(raw, filename=p.name)
+        stats = db.restore_payload(data)
+    except ValueError as e:
+        if p.name.lower().endswith(".zip"):
+            from ...core import migration_bundle
+            res = await migration_bundle.apply_migration_bundle(p, restore_credentials=False, restore_meta=True)
+            stats = res.get("counts", {})
+        else:
+            raise HTTPException(400, str(e)) from e
+
+    logstream.info("system", f"已从本地备份恢复数据（{p.name}）：{_format_backup_stats_text(stats)}")
+    return {"ok": True, "stats": stats}
+
+
+@router.delete("/backup/local")
+async def backup_local_delete(
+    filename: str = Query(..., description="本地备份文件名"),
+    _=Depends(require_user),
+):
+    """删除指定的本地历史备份文件。"""
+    p = _resolve_safe_local_backup(filename)
+    try:
+        p.unlink()
+        logstream.info("system", f"已删除本地备份文件：{p.name}")
+        return {"ok": True, "filename": p.name}
+    except Exception as e:
+        raise HTTPException(500, f"删除备份文件失败：{e}") from e
+
+
+@router.get("/backup/local/download")
+async def backup_local_download(
+    filename: str = Query(..., description="本地备份文件名"),
+    _=Depends(require_user),
+):
+    """下载指定的本地备份文件。"""
+    from fastapi.responses import FileResponse
+    p = _resolve_safe_local_backup(filename)
+    return FileResponse(
+        path=p,
+        filename=p.name,
+        media_type="application/octet-stream",
+    )
 
 
 # ---------- 全量迁移包（网页端流式打包导出 / 恢复） ----------

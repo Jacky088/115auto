@@ -1,9 +1,21 @@
 /* 转存目录与定时文件整理共享样式（作用域限定在 .dirs-page 下） */
 .dirs-page .page-tip {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
   margin: 0 0 12px;
-  color: var(--saas-text-sub);
-  line-height: 1.6;
+  color: var(--saas-primary, #4f6bff);
+  background: rgba(79, 107, 255, 0.08);
+  border: 1px dashed rgba(79, 107, 255, 0.25);
+  border-radius: var(--r-sm);
+  padding: 6px 10px;
+  line-height: 1.55;
   font-size: var(--fs-caption);
+}
+html.dark .dirs-page .page-tip {
+  color: #9cb1ff;
+  background: rgba(79, 107, 255, 0.14);
+  border-color: rgba(120, 145, 255, 0.35);
 }
 /* 弹窗内目录选择按钮：与表单输入框同高同圆角，保持整体主题一致（覆盖主题对 small 按钮的统一加高） */
 .dirs-page .dir-btn .el-icon {

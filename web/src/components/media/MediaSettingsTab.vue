@@ -20,8 +20,10 @@
 
       <div class="cfg-card-body">
         <el-form-item label="目录拼接 [tmdbid=xxx]">
-          <el-switch v-model="cfg.media_append_tmdb_tag" />
-          <span class="tip-inline">Emby / Jellyfin / Infuse 零误识核心开关（例：<code>狂飙 (2023) [tmdbid=215403]</code>）</span>
+          <div class="switch-row">
+            <el-switch v-model="cfg.media_append_tmdb_tag" />
+            <span class="tip-inline">Emby / Jellyfin / Infuse 零误识核心开关（例：<code>狂飙 (2023) [tmdbid=215403]</code>）</span>
+          </div>
         </el-form-item>
 
         <el-form-item label="电影目标路径模板">
@@ -37,7 +39,7 @@
         <el-form-item label="重名冲突策略">
           <el-radio-group v-model="cfg.media_conflict_policy">
             <el-radio-button value="skip">安全跳过</el-radio-button>
-            <el-radio-button value="replace_if_better">高画质洗版（旧版移至 _待清理旧版）</el-radio-button>
+            <el-radio-button value="replace_if_better">高画质洗版（旧版移至归档目录）</el-radio-button>
             <el-radio-button value="keep_both">保留双版本</el-radio-button>
           </el-radio-group>
         </el-form-item>
@@ -74,7 +76,7 @@
           <div class="slider-row">
             <el-slider v-model="cfg.media_scrape_confidence_threshold" :min="60" :max="98" show-input />
           </div>
-          <div class="tip-block">≥ 此分数且领先第 2 候选分差 ≥ {{ cfg.media_scrape_margin_threshold }} 分才全自动改名；否则 0 秒挂起交人工确认</div>
+          <div class="tip-block">≥ 此分数且领先第 2 候选分差 ≥ {{ cfg.media_scrape_margin_threshold }} 分才全自动改名；否则先挂起该条并等待人工确认</div>
         </el-form-item>
 
         <el-form-item label="一二名领先分差门禁">

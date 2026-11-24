@@ -5,9 +5,9 @@
         <div class="title-with-badge">
           <span class="card-title">历史日志</span>
           <el-tag size="small" class="count-tag">共 {{ total }} 条日志</el-tag>
-          <span class="tip">保留 7 天，到期自动删除</span>
+          <span class="tip">默认保留 7 天（可在系统设置中修改），到期自动删除</span>
         </div>
-        <el-button @click="exportTxt">导出选中日志</el-button>
+        <el-button @click="exportTxt">导出当天全部日志</el-button>
       </div>
     </template>
 
@@ -17,8 +17,8 @@
            @click="pickDay(d.d)">
         <div class="d-name">
           {{ dayLabel(d.d) }}
-          <span v-if="d.err" class="d-badge err">{{ d.err }} 错</span>
-          <span v-else-if="d.warn" class="d-badge warn">{{ d.warn }} 警</span>
+          <span v-if="d.err" class="d-badge err">错误 {{ d.err }}</span>
+          <span v-else-if="d.warn" class="d-badge warn">警告 {{ d.warn }}</span>
           <span v-else class="d-badge okdot"></span>
         </div>
         <div class="d-sub">
@@ -61,7 +61,7 @@
       </el-table-column>
       <el-table-column label="级别" width="80">
         <template #default="{ row }">
-          <el-tag :type="levelTag(row.level)" size="small">{{ row.level }}</el-tag>
+          <el-tag :type="levelTag(row.level)" size="small">{{ levelLabel[row.level] || row.level }}</el-tag>
         </template>
       </el-table-column>
       <el-table-column prop="module" label="模块" width="110">
@@ -103,6 +103,7 @@ const filter = reactive({ level: '', module: '', search: '' })
 const onSizeChange = () => { page.value = 1; load() }
 
 const levelTag = (lv) => ({ info: 'info', warn: 'warning', error: 'danger' }[lv] || 'info')
+const levelLabel = { info: '信息', warn: '警告', error: '错误' }
 
 const dayLabel = (d) => {
   const today = new Date()

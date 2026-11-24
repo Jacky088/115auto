@@ -44,6 +44,10 @@
    - **数字输入**：统一使用主题默认的左右 `-` / `+` 胶囊步进器（`el-input-number` **禁止**加 `controls-position="right"`），单位紧贴步进器右侧不换行，同时做前端整数/上下界校验与后端 Pydantic 严格校验。
    - **二次确认与危险操作视觉规范**：全站所有二次确认统一使用 `confirmAction`（[confirmDialog.js](web/src/composables/confirmDialog.js)）弹出居中 Aurora Glass 确认框（禁止再使用零散的 `el-popconfirm` 气泡）；所有删除、清空、覆盖、停止类确认按钮统一使用红色 `danger` 样式。
    - **字段/标题旁说明图标与悬浮提示规范**：全站所有标题、表头、表单标签或选项旁的说明提示统一使用 `<el-tooltip placement="top" effect="dark">` 搭配 14px `<el-icon class="info-tip-icon" :size="14" tabindex="0"><InfoFilled /></el-icon>`（默认浅灰 `--text-muted`，悬停/聚焦变主色 `--el-color-primary`，样式由 `web/src/style.css` 全局定义；禁止再使用 `QuestionFilled` 问号图标、自定义圆形 `?` 按钮或 `effect="light"` 浅色点击气泡）；带冒号的标签（如 `未分类动作：`）图标须放在**标签文字之后、冒号之前**（即 `标签名 ⓘ：`）。
+   - **提示性文字统一胶囊卡片规范（Tip Box / Callout）**：全站所有位于表单项下方、卡片内、弹窗内的独立功能解释、操作指引、注意事项或警告性提示文字，**必须统一采用虚线胶囊提示条风格（细虚线边框 + 半透明微透底色 + 圆角内边距，继承整机迁移包「核心保障」视觉规范）**，严禁使用散落无包裹的裸露纯文本；
+     - **视觉结构**：统一使用全局 `.tip-box` / `.tip-block`（或通过设置表单项子元素 `.tip` 自然继承），具备 `padding: 6px 10px; border-radius: var(--r-sm); border: 1px dashed ...; background: rgba(...); line-height: 1.55;`；
+     - **色彩语义自适应**：普通功能解释与指引采用浅蓝紫微透底与主色虚线；警告与重启注意事项（含 `⚠️`、`.warn-text`、`.is-warn`）采用暖橙黄微透底与橙黄虚线；成功与安全保证（`.is-success`）采用柔绿微透底与绿虚线，全站日间与暗黑模式全覆盖；
+     - **行内伴随文字隔离**：开关（`el-switch`）右侧的单行伴随说明、步进器右侧单位等行内跟随文字维持自然文本流排版，严禁误加外框与底色。
 
 ---
 

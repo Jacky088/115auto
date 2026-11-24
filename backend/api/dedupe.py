@@ -1,6 +1,7 @@
 """重复文件清理 REST API（清理规则 CRUD、Dry-Run 预览、确认执行、批次账本）。"""
 from __future__ import annotations
 
+import asyncio
 import time
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -142,7 +143,7 @@ async def preview_start(body: DedupePreviewIn | None = None):
     if rids:
         sql += " AND id IN (" + ",".join("?" for _ in rids) + ")"
         params.extend(int(x) for x in rids)
-    paths = [r["source_dir"] for r in db.query(sql, tuple(params))]
+    paths = [r["source_dir"] for r in await asyncio.to_thread(db.query, sql, tuple(params))]
     guard = scan_index.scope_guard(paths, confirm_large)
     if guard:
         return guard
@@ -165,7 +166,7 @@ async def preview_cancel(body: dict | None = None):
 
 @router.post("/run")
 async def run(body: DedupeRunIn):
-    if not dedupe_worker.is_system_running():
+    if not await asyncio.to_thread(dedupe_worker.is_system_running):
         raise HTTPException(400, "系统顶部运行开关已停止，请先启动系统后再执行重复清理")
     if transfer_gate.is_exclusive_busy():
         mode = transfer_gate.get_active_mode()
@@ -177,12 +178,13 @@ async def run(body: DedupeRunIn):
         req_ids = [int(body.rule_id)]
     if req_ids:
         placeholders = ",".join("?" for _ in req_ids)
-        rows = db.query(
+        rows = await asyncio.to_thread(
+            db.query,
             f"SELECT id FROM dedupe_rules WHERE enabled=1 AND id IN ({placeholders}) ORDER BY id ASC",
             tuple(req_ids),
         )
     else:
-        rows = db.query("SELECT id FROM dedupe_rules WHERE enabled=1 ORDER BY id ASC")
+        rows = await asyncio.to_thread(db.query, "SELECT id FROM dedupe_rules WHERE enabled=1 ORDER BY id ASC")
     active_ids = [int(r["id"]) for r in rows]
     if not active_ids:
         raise HTTPException(400, "清理规则不存在或已停用，请刷新后重试")

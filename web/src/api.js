@@ -37,8 +37,33 @@ export const markLoggedIn = () => localStorage.setItem('logged_in', '1')
 export const clearLoggedIn = () => localStorage.removeItem('logged_in')
 export const isLoggedInFlag = () => !!localStorage.getItem('logged_in')
 
-export const errMsg = (e, fallback = '请求失败') =>
-  e?.response?.data?.detail || e?.message || fallback
+/** HTTP 状态码 → 中文提示（后端未返回 detail 时兜底，避免把 axios 英文抛给用户） */
+const HTTP_ERR_HINT = {
+  400: '请求参数有误',
+  401: '登录已失效，请重新登录',
+  403: '没有权限执行该操作',
+  404: '请求的资源不存在',
+  409: '数据冲突，请刷新后重试',
+  429: '操作太频繁，请稍后重试',
+  500: '服务内部异常，请查看运行日志',
+  502: '服务网关异常，请稍后重试',
+  503: '服务暂不可用，请稍后重试',
+  504: '服务响应超时，请稍后重试',
+}
+const _hasCn = (s) => typeof s === 'string' && /[\u4e00-\u9fa5]/.test(s)
+
+export const errMsg = (e, fallback = '请求失败') => {
+  if (typeof e === 'string') return e
+  const detail = e?.response?.data?.detail
+  if (typeof detail === 'string' && detail) return detail
+  if (Array.isArray(detail)) return '请求参数校验失败，请检查填写内容'
+  if (e?.code === 'ECONNABORTED' || e?.code === 'ETIMEDOUT') return '请求超时，请检查网络后重试'
+  if (!e?.response) return '无法连接服务，请确认服务已启动且网络正常'
+  const hint = HTTP_ERR_HINT[e.response.status]
+  if (hint) return hint
+  // 自定义异常通常已是中文提示，保留；axios 英文原文不再直接展示
+  return _hasCn(e?.message) ? e.message : fallback
+}
 
 export const fmtSize = (b) => {
   if (!b && b !== 0) return '-'
@@ -51,13 +76,24 @@ export const fmtSize = (b) => {
 
 export const fmtTime = (ts) => {
   if (!ts) return '-'
-  const d = new Date(ts * 1000)
+  let d
+  if (typeof ts === 'number') {
+    d = new Date(ts > 1e11 ? ts : ts * 1000)
+  } else if (typeof ts === 'string') {
+    const num = Number(ts)
+    if (!isNaN(num) && num > 0) {
+      d = new Date(num > 1e11 ? num : num * 1000)
+    } else {
+      d = new Date(ts)
+    }
+  }
+  if (!d || isNaN(d.getTime()) || d.getFullYear() < 2000) return '-'
   const p = (n) => String(n).padStart(2, '0')
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
 }
 
 export const statusLabel = {
-  queued: '排队中', running: '转存中', submitted: '已提交下载', success: '成功', failed: '失败',
+  queued: '排队中', running: '转存中', submitted: '已提交云下载', success: '成功', failed: '失败',
   blocked: '黑名单', duplicate: '重复', skipped: '已跳过',
 }
 
@@ -82,7 +118,7 @@ const _canToast = (key, cooldownMs = 2500) => {
 /** 全站统一操作反馈门面（自动防抖、统一持续时间） */
 export const toast = {
   success: (title, message = '') => saveOk(title, message),
-  error: (err, fallback = '操作失败') => {
+  error: (err, fallback = '操作失败，请稍后重试') => {
     const msg = typeof err === 'string' ? err : errMsg(err, fallback)
     if (_canToast(`err:${msg}`, 2000)) {
       ElMessage({ type: 'error', message: msg, duration: 3500, grouping: false })

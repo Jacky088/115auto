@@ -12,6 +12,7 @@ from pydantic import BaseModel
 
 from .. import auth, config, database as db
 from ..core import logstream, tmdb_scraper, transfer_gate
+from ..core.executors import run_ext_thread
 from ..core.media_parser import validate_organize_template
 from ..worker import media_worker, scan_index
 from .manage import require_user
@@ -283,7 +284,7 @@ async def organize_preview(body: RuleIdsIn | None = None):
 @router.post("/organize/preview/start")
 async def organize_preview_start(body: RuleIdsIn | None = None):
     """异步预览：立即返回 job_id，轮询 /organize/preview/status 显示进度。"""
-    if not media_worker.is_system_running():
+    if not await asyncio.to_thread(media_worker.is_system_running):
         raise HTTPException(400, "系统处于停止状态，请先在顶栏点击「运行」后再预览")
     rids = body.rule_ids if body else None
     confirm_large = bool(body.confirm_large) if body else False
@@ -292,7 +293,7 @@ async def organize_preview_start(body: RuleIdsIn | None = None):
     if rids:
         sql += " AND id IN (" + ",".join("?" for _ in rids) + ")"
         params.extend(int(x) for x in rids)
-    paths = [r["source_dir"] for r in db.query(sql, tuple(params))]
+    paths = [r["source_dir"] for r in await asyncio.to_thread(db.query, sql, tuple(params))]
     guard = scan_index.scope_guard(paths, confirm_large)
     if guard:
         return guard
@@ -315,12 +316,13 @@ async def organize_preview_cancel(body: dict | None = None):
 
 @router.post("/organize/run")
 async def organize_run(body: RuleIdsIn | None = None):
-    if not media_worker.is_system_running():
+    if not await asyncio.to_thread(media_worker.is_system_running):
         raise HTTPException(400, "系统顶部运行开关已停止，请先启动系统后再运行目录整理")
     if transfer_gate.is_exclusive_busy():
         mode = transfer_gate.get_active_mode()
         raise HTTPException(409, f"当前有互斥任务（{mode}）正在排队或执行中，请勿同时启动！")
-    rules_cnt = db.query("SELECT count(*) c FROM media_rules WHERE enabled=1 AND organize_enabled=1", one=True)["c"]
+    rules_cnt = (await asyncio.to_thread(
+        db.query, "SELECT count(*) c FROM media_rules WHERE enabled=1 AND organize_enabled=1", one=True))["c"]
     if not rules_cnt:
         raise HTTPException(400, "请先在「目录规则」中新增并启用至少一条整理规则")
 
@@ -343,14 +345,15 @@ async def organize_run(body: RuleIdsIn | None = None):
 
 @router.post("/scrape/run")
 async def scrape_run(body: RuleIdsIn | None = None):
-    if not media_worker.is_system_running():
+    if not await asyncio.to_thread(media_worker.is_system_running):
         raise HTTPException(400, "系统顶部运行开关已停止，请先启动系统后再运行媒体刮削")
-    if not str(db.get_setting("tmdb_api_key", "") or "").strip():
+    if not str(await asyncio.to_thread(db.get_setting, "tmdb_api_key", "") or "").strip():
         raise HTTPException(400, "请先在「系统设置」配置 TMDB API Key 再运行媒体刮削")
     if transfer_gate.is_exclusive_busy():
         mode = transfer_gate.get_active_mode()
         raise HTTPException(409, f"当前有互斥任务（{mode}）正在排队或执行中，请勿同时启动！")
-    rules_cnt = db.query("SELECT count(*) c FROM media_rules WHERE enabled=1 AND scrape_enabled=1", one=True)["c"]
+    rules_cnt = (await asyncio.to_thread(
+        db.query, "SELECT count(*) c FROM media_rules WHERE enabled=1 AND scrape_enabled=1", one=True))["c"]
     if not rules_cnt:
         raise HTTPException(400, "请先在「目录规则」中新增并启用至少一条刮削规则")
 
@@ -411,11 +414,11 @@ async def select_task_candidate(task_id: int, body: SelectTaskIn):
     if body.cand_idx is not None:
         res = await asyncio.to_thread(media_worker.stage_task_selection, task_id, body.cand_idx, None, "web")
     elif body.tmdb_id:
-        api_key = str(db.get_setting("tmdb_api_key", "") or "").strip()
+        api_key = str(await asyncio.to_thread(db.get_setting, "tmdb_api_key", "") or "").strip()
         if not api_key:
             raise HTTPException(400, "未配置 TMDB API Key")
         kind = "tv" if body.kind == "tv" else "movie"
-        det = await asyncio.to_thread(tmdb_scraper.get_tmdb_detail, kind, int(body.tmdb_id), api_key)
+        det = await run_ext_thread(tmdb_scraper.get_tmdb_detail, kind, int(body.tmdb_id), api_key)
         if not det:
             raise HTTPException(404, f"TMDB 未查询到 {kind}/{body.tmdb_id}")
         title = str(det.get("name") or det.get("title") or "").strip()
@@ -501,7 +504,7 @@ async def search_tmdb_manual(q: str, kind: str = "multi", year: str = ""):
     kw = (q or "").strip()
     if not kw:
         return []
-    api_key = str(db.get_setting("tmdb_api_key", "") or "").strip()
+    api_key = str(await asyncio.to_thread(db.get_setting, "tmdb_api_key", "") or "").strip()
     if not api_key:
         raise HTTPException(400, "未配置 TMDB API Key")
     k = kind if kind in ("multi", "tv", "movie") else "multi"
@@ -509,7 +512,7 @@ async def search_tmdb_manual(q: str, kind: str = "multi", year: str = ""):
     if year and k in ("tv", "movie"):
         params["year" if k == "movie" else "first_air_date_year"] = year.strip()
     try:
-        resp = await asyncio.to_thread(tmdb_scraper.tmdb_get, f"/search/{k}", params)
+        resp = await run_ext_thread(tmdb_scraper.tmdb_get, f"/search/{k}", params)
     except Exception as e:
         # 异常文本可能内嵌带 api_key 的完整 URL，不回显给前端；详情只进服务端日志
         logstream.warn("scrape", f"TMDB 搜索网络异常（{kw[:40]}）: {logstream.exc(e)}")

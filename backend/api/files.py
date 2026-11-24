@@ -25,6 +25,7 @@ _STAT_MIN_GAP = 0.5
 _stat_cache_lock = threading.Lock()
 _stat_cache: dict[int, tuple[float, dict]] = {}
 _name_cache: dict[int, tuple[float, str]] = {}
+_counts_cache: dict[int, tuple[float, int, int, int]] = {}  # cid -> (expire_at, f_count, n_count, total)
 _stat_call_lock = threading.Lock()
 _last_stat_at = 0.0
 
@@ -33,6 +34,23 @@ def _clear_stat_cache():
     with _stat_cache_lock:
         _stat_cache.clear()
         _name_cache.clear()
+        _counts_cache.clear()
+
+
+def _get_counts_cache(cid: int) -> tuple[int, int, int] | None:
+    now = time.monotonic()
+    with _stat_cache_lock:
+        item = _counts_cache.get(cid)
+        if item and item[0] > now:
+            return item[1], item[2], item[3]
+    return None
+
+
+def _set_counts_cache(cid: int, f_count: int, n_count: int, total: int):
+    with _stat_cache_lock:
+        if len(_counts_cache) > _STAT_MAX_ENTRIES:
+            _counts_cache.clear()
+        _counts_cache[cid] = (time.monotonic() + _STAT_TTL, f_count, n_count, total)
 
 
 def _int(v, default: int = 0) -> int:
@@ -266,6 +284,9 @@ def list_files(
     file_type: int = Query(0, ge=0, le=7),
     page: int = Query(1, ge=1),
     size: int = Query(100, ge=1, le=500),
+    fc: int | None = Query(None, ge=0),
+    file_count: int | None = Query(None, ge=0),
+    total_count: int | None = Query(None, ge=0),
     _=Depends(require_user),
 ):
     """列出目录内容（支持服务端排序、类型筛选与当前目录/全盘搜索）。"""
@@ -289,7 +310,7 @@ def list_files(
         if file_type > 0:
             payload["type"] = file_type
         resp = _call_read("搜索", client.fs_search, payload)
-        items = _parse_items(resp.get("data"))
+        items = _parse_items(resp.get("data"))[:size]
         return {
             "items": items,
             "total": _int(resp.get("count"), len(items)),
@@ -299,10 +320,115 @@ def list_files(
             "path": [],
         }
 
+    # 常规全目录/文件浏览（fc_mix=0 目录置顶模式）：
+    # 115 的 fs_files 接口中，limit/offset 仅对文件生效，文件夹会作为置顶项全量返回。
+    # 为保证单页展示条数严格不超过 size、且翻页无空页或错位，采用复合两阶段分页算法。
+    cached_counts = _get_counts_cache(cid)
+    if fc is not None and file_count is not None:
+        known_f = fc
+        known_n = file_count
+        known_tot = total_count if total_count is not None else (known_f + known_n)
+    elif cached_counts:
+        known_f, known_n, known_tot = cached_counts
+    else:
+        known_f, known_n, known_tot = None, None, None
+
+    # 第一页或未掌握目录统计时：发起首轮读取并建立统计缓存
+    if page == 1 or known_f is None:
+        payload = {
+            "cid": cid,
+            "limit": size,
+            "offset": 0,
+            "o": order_col,
+            "asc": asc_flag,
+            "show_dir": 1,
+            "fc_mix": 0,
+            "custom_order": 1,
+            "count_folders": 1,
+        }
+        if file_type > 0:
+            payload["type"] = file_type
+            payload["cur"] = 1
+        resp = _call_read("读取目录", client.fs_files, payload)
+        raw_items = _parse_items(resp.get("data"))
+        folders = [x for x in raw_items if x["is_dir"]]
+        files = [x for x in raw_items if not x["is_dir"]]
+
+        resp_f = _opt_int(resp.get("folder_count"))
+        cur_f = resp_f if resp_f is not None else len(folders)
+        resp_n = _opt_int(resp.get("file_count"))
+        cur_n = resp_n if resp_n is not None else len(files)
+        cur_tot = _int(resp.get("count"), cur_f + cur_n)
+        _set_counts_cache(cid, cur_f, cur_n, cur_tot)
+
+        if page == 1:
+            folder_need = min(cur_f, size)
+            file_need = max(0, size - folder_need)
+            items = folders[:folder_need] + files[:file_need]
+            return {
+                "items": items,
+                "total": cur_tot,
+                "folder_count": _opt_int(resp.get("folder_count")),
+                "file_count": _opt_int(resp.get("file_count")),
+                "cid": cid,
+                "path": _breadcrumb(resp, cid),
+            }
+
+        known_f, known_n, known_tot = cur_f, cur_n, cur_tot
+
+    # page > 1 且已知目录与文件数：精确计算本页需跨越的文件夹与文件切片区间
+    start = (page - 1) * size
+    end = min(known_tot, page * size)
+    if start >= known_tot:
+        return {
+            "items": [],
+            "total": known_tot,
+            "folder_count": known_f,
+            "file_count": known_n,
+            "cid": cid,
+            "path": [],
+        }
+
+    f_start = max(0, min(known_f, start))
+    f_end = max(0, min(known_f, end))
+    f_need = f_end - f_start
+
+    n_start = max(0, min(known_n, start - known_f))
+    n_end = max(0, min(known_n, end - known_f))
+    n_need = n_end - n_start
+
+    if f_need == 0:
+        # 纯文件页：明确 show_dir=0，传精准的文件 offset 与 limit，115 不会返回多余置顶文件夹
+        payload = {
+            "cid": cid,
+            "limit": n_need,
+            "offset": n_start,
+            "o": order_col,
+            "asc": asc_flag,
+            "show_dir": 0,
+            "fc_mix": 0,
+            "custom_order": 1,
+            "count_folders": 1,
+        }
+        if file_type > 0:
+            payload["type"] = file_type
+            payload["cur"] = 1
+        resp = _call_read("读取目录", client.fs_files, payload)
+        file_items = _parse_items(resp.get("data"))[:n_need]
+        return {
+            "items": file_items,
+            "total": known_tot,
+            "folder_count": known_f,
+            "file_count": known_n,
+            "cid": cid,
+            "path": _breadcrumb(resp, cid),
+        }
+
+    # 跨文件夹页：show_dir=1 获取文件夹列表，并按文件偏移量获取文件
     payload = {
         "cid": cid,
-        "limit": size,
-        "offset": (page - 1) * size,
+        "limit": max(1, n_need),
+        "offset": n_start,
         "o": order_col,
         "asc": asc_flag,
         "show_dir": 1,
@@ -311,16 +437,18 @@ def list_files(
         "count_folders": 1,
     }
     if file_type > 0:
-        # 必须显式 cur=1：否则 115 在指定 type>0 时默认递归遍历整个目录树
         payload["type"] = file_type
         payload["cur"] = 1
     resp = _call_read("读取目录", client.fs_files, payload)
-    items = _parse_items(resp.get("data"))
+    raw_items = _parse_items(resp.get("data"))
+    folders = [x for x in raw_items if x["is_dir"]]
+    files = [x for x in raw_items if not x["is_dir"]]
+    items = folders[f_start:f_end] + files[:n_need]
     return {
         "items": items,
-        "total": _int(resp.get("count"), len(items)),
-        "folder_count": _opt_int(resp.get("folder_count")),
-        "file_count": _opt_int(resp.get("file_count")),
+        "total": known_tot,
+        "folder_count": known_f,
+        "file_count": known_n,
         "cid": cid,
         "path": _breadcrumb(resp, cid),
     }
@@ -541,7 +669,7 @@ def list_recyclebin(
     else:
         rows = []
     items = [_rb_item(x) for x in rows if isinstance(x, dict)]
-    items = [x for x in items if x["id"]]
+    items = [x for x in items if x["id"]][:size]
     return {"items": items, "total": _int(resp.get("count"), len(items))}
 
 

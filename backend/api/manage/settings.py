@@ -32,7 +32,9 @@ _BOOL_SETTINGS = {"enable_share_transfer", "enable_offline_download",
                   "subscription_only", "dedup_by_name", "organize_enabled",
                   "share_update_enabled", "quality_policy_enabled", "wash_enabled",
                   "space_guard_enabled",
-                  "digest_enabled", "auto_backup_enabled"}
+                  "digest_enabled", "auto_backup_enabled",
+                  "bundle_slim_db", "bundle_include_credentials",
+                  "bundle_restore_credentials", "bundle_restore_meta"}
 
 
 
@@ -90,6 +92,18 @@ def _norm_setting(k: str, v):
         if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", s):
             raise HTTPException(400, f"{k} 需为 HH:MM 格式（如 08:30）")
         return s
+    if k == "auto_backup_channels":
+        if isinstance(v, (list, tuple)):
+            return [str(x).strip() for x in v if str(x).strip() in ("tgbot", "webdav", "local")]
+        if isinstance(v, str):
+            return [x.strip() for x in v.split(",") if x.strip() in ("tgbot", "webdav", "local")]
+        return []
+    if k == "bundle_meta_mode":
+        s = str(v or "nfo").strip()
+        return s if s in ("nfo", "all", "none") else "nfo"
+    if k in ("bundle_export_dest", "bundle_restore_source"):
+        s = str(v or "local").strip()
+        return s if s in ("local", "webdav") else "local"
     if k == "tg_mode":
         s = str(v).strip()
         if s not in ("polling", "userbot", "both"):
@@ -193,6 +207,10 @@ def get_settings(_=Depends(require_user)):
             "bark_url", "pushplus_token", "pushplus_topic", "ntfy_url", "ntfy_token",
             "digest_enabled", "digest_time",
             "auto_backup_enabled", "auto_backup_days", "auto_backup_time",
+            "auto_backup_channels",
+            "bundle_meta_mode", "bundle_slim_db", "bundle_include_credentials",
+            "bundle_export_dest", "bundle_restore_source",
+            "bundle_restore_credentials", "bundle_restore_meta",
             "api_token", "auto_move_mode", "auto_move_season_folder", "auto_move_fuzzy_t2s",
             "auto_move_dedup_by_episode", "auto_move_enabled"]
     # 未配置过的键必须回代码默认值而非 null：前端会把 null 当「关」显示，
@@ -210,6 +228,10 @@ def get_settings(_=Depends(require_user)):
                 "space_guard_enabled": True,
                 "digest_enabled": True, "digest_time": "21:00",
                 "auto_backup_enabled": False, "auto_backup_days": 7, "auto_backup_time": "04:00",
+                "auto_backup_channels": [],
+                "bundle_meta_mode": "nfo", "bundle_slim_db": True, "bundle_include_credentials": False,
+                "bundle_export_dest": "local", "bundle_restore_source": "local",
+                "bundle_restore_credentials": False, "bundle_restore_meta": True,
                 "auto_move_enabled": False, "auto_move_dedup_by_episode": True,
                 "running_timeout_min": 60}
     # 密钥类键不回传明文（token/api_hash/推送 key/代理凭据等，口径与备份脱敏一致）：
@@ -243,6 +265,10 @@ def put_settings(body: dict, _=Depends(require_user)):
                "bark_url", "pushplus_token", "pushplus_topic", "ntfy_url", "ntfy_token",
                "digest_enabled", "digest_time",
                "auto_backup_enabled", "auto_backup_days", "auto_backup_time",
+               "auto_backup_channels",
+               "bundle_meta_mode", "bundle_slim_db", "bundle_include_credentials",
+               "bundle_export_dest", "bundle_restore_source",
+               "bundle_restore_credentials", "bundle_restore_meta",
                "api_token", "auto_move_mode", "auto_move_season_folder", "auto_move_fuzzy_t2s",
                "auto_move_dedup_by_episode", "auto_move_enabled"}
     # 先整体校验再落库：任一字段非法时不写入，避免半新半旧配置。
@@ -272,15 +298,25 @@ def put_settings(body: dict, _=Depends(require_user)):
         if s_start == s_end:
             raise HTTPException(400, "防风控定时计划的开始时间与结束时间不能相同（如需全天候运行请关闭定时计划开关）！")
 
-    # 2. 定时自动备份校验：开启时必须配置有效 Telegram Bot
+    # 2. 定时自动备份校验：仅当勾选 tgbot 途径时强制要求 Telegram Bot 凭据，仅当勾选 webdav 时校验配置
     backup_on = updates.get("auto_backup_enabled")
     if backup_on is None:
         backup_on = bool(db.get_setting("auto_backup_enabled", False))
     if backup_on:
-        tg_token = str(updates.get("notify_token", db.get_setting("notify_token", "")) or "").strip()
-        tg_chat_id = str(updates.get("notify_chat_id", db.get_setting("notify_chat_id", "")) or "").strip()
-        if not tg_token or not tg_chat_id:
-            raise HTTPException(400, "开启「定时自动备份」必须先配置并保存 Telegram Bot Token 与 Chat ID，否则备份文件无法送达！")
+        channels = updates.get("auto_backup_channels")
+        if channels is None:
+            channels = db.get_setting("auto_backup_channels", [])
+        if not isinstance(channels, (list, tuple)):
+            channels = [x.strip() for x in str(channels).split(",") if x.strip()]
+        if "tgbot" in channels:
+            tg_token = str(updates.get("notify_token", db.get_setting("notify_token", "")) or "").strip()
+            tg_chat_id = str(updates.get("notify_chat_id", db.get_setting("notify_chat_id", "")) or "").strip()
+            if not tg_token or not tg_chat_id:
+                raise HTTPException(400, "定时自动备份已勾选 Telegram Bot 途径，请先配置 Telegram Bot Token 与 Chat ID")
+        if "webdav" in channels:
+            from ...core import webdav
+            if not webdav.is_configured():
+                raise HTTPException(400, "定时自动备份已勾选 WebDAV 云端途径，请先配置 WebDAV 云端备份并测试通过")
 
     # 3. 洗版升级必须指定旧版归档目录：否则只能重复转存、无法安全替换旧版本
     wash_on = updates.get("wash_enabled")

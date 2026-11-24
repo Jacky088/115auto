@@ -3,6 +3,7 @@
     v-model="visible"
     title="向前补全早期分集"
     :width="'min(480px, 94vw)'"
+    align-center
     destroy-on-close
   >
     <el-form label-width="96px">
@@ -134,12 +135,12 @@ defineExpose({
 <style scoped>
 .bf-tip {
   font-size: var(--fs-caption);
-  line-height: 1.8;
-  color: var(--saas-text-sub);
-  background: rgba(79, 107, 255, .05);
-  border: 1px solid var(--saas-line);
-  border-radius: 8px;
-  padding: 10px 12px;
+  line-height: 1.55;
+  color: var(--saas-primary, #4f6bff);
+  background: rgba(79, 107, 255, 0.08);
+  border: 1px dashed rgba(79, 107, 255, 0.25);
+  border-radius: var(--r-sm);
+  padding: 8px 12px;
   margin-top: 10px;
 }
 .bf-line {

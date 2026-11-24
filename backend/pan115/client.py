@@ -102,6 +102,9 @@ _space_call_lock = threading.Lock()
 _LOGIN_OK_TTL = 60      # 登录有效：60 秒内复用
 _LOGIN_BAD_TTL = 30     # 登录失效：30 秒内复用（便于恢复后尽快识别）
 _SPACE_TTL = 300        # 容量信息: 5 分钟
+# 容量查询的等锁上限：锁内是真实网络请求，若持锁线程卡住，
+# 无上限等待会让调用线程（含事件循环线程）被永久挂起，因此统一限时并降级。
+_SPACE_LOCK_TIMEOUT = 10.0
 
 
 class Pan115Error(Exception):
@@ -163,8 +166,12 @@ def _space_num(v) -> int:
         return 0
 
 
-def space_info(force: bool = False) -> dict:
+def space_info(force: bool = False, timeout: int = 15) -> dict:
     """容量信息 {total, use, free, ratio}（字节）。默认复用 5 分钟缓存。
+
+    `timeout` 为真实请求的秒级上限：调度热路径（如工作器门禁轮询）传入更短的上限，
+    保证内层网络请求先于外层 `wait_for` 超时，从而走「沿用上次状态」的降级分支，
+    而不是被外层计时器打断导致整轮调度被丢弃。
 
     缓存未命中时非阻塞合并并发：同一时刻只放一个真实请求打 115，
     若已有线程正在打接口，其余调用直接复用现有旧缓存（0 毫秒响应），绝不排队等锁。
@@ -176,12 +183,21 @@ def space_info(force: bool = False) -> dict:
             cached = _space_cache
         if cached and now < cached[0]:
             return cached[1]
-    acquired = _space_call_lock.acquire(blocking=force)
+    if force:
+        acquired = _space_call_lock.acquire(timeout=_SPACE_LOCK_TIMEOUT)
+    else:
+        acquired = _space_call_lock.acquire(blocking=False)
     if not acquired:
         with _cache_lock:
             if _space_cache is not None:
                 return _space_cache[1]
-        _space_call_lock.acquire(blocking=True)
+        # 缓存为空（首次探测或上次失败）才真正等锁；限时等待，
+        # 避免 115 侧挂起时把调用线程（可能正是事件循环线程）无限期堵死。
+        if not _space_call_lock.acquire(timeout=_SPACE_LOCK_TIMEOUT):
+            with _cache_lock:
+                if _space_cache is not None:
+                    return _space_cache[1]
+            raise Pan115Error("115 容量查询排队超时，请稍后重试")
     try:
         if not force:
             with _cache_lock:
@@ -190,7 +206,7 @@ def space_info(force: bool = False) -> dict:
                 return cached[1]
         client = _get_client()
         try:
-            resp = client.user_space_info(timeout=15)
+            resp = client.user_space_info(timeout=timeout)
         except TypeError:
             resp = client.user_space_info()
         if not resp.get("state"):

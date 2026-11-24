@@ -7,7 +7,7 @@
         <div class="switch-row">
           <el-switch v-model="f.share_update_enabled" :disabled="!f.enable_share_transfer" />
           <span class="tip">
-            同一分享链接再次出现时不再判重：自动比对目标目录，只转存新增的集数文件，已存过的不重复（适配分享方往同一链接持续加更的追剧场景）
+            同一分享链接再次出现时不再查重：自动比对目标目录，只转存新增的集数文件，已存过的不重复（适配分享方往同一链接持续加更的追剧场景）
             <span v-if="!f.enable_share_transfer" class="warn-text">（需先开启上方「115 分享转存」总开关）</span>
           </span>
         </div>
@@ -32,7 +32,7 @@
 
     <!-- 订阅质量与洗版 -->
     <div class="section-card">
-      <div class="section-title">订阅质量与洗版</div>
+      <div class="section-title">订阅质量与洗版升级</div>
       <el-form-item label="质量策略">
         <div class="switch-row">
           <el-switch v-model="f.quality_policy_enabled" />
@@ -65,7 +65,7 @@
           </el-button>
           <el-button v-if="f.wash_archive_dir" text @click="clearArchiveDir">清空</el-button>
         </div>
-        <div class="tip">开启洗版必须选择该目录；升级后旧版本只会被移入此处，不会删除。无法确认旧版位置时放弃移动</div>
+        <div class="tip">开启洗版升级必须选择该目录；升级后旧版本只会被移入此处，不会删除。无法确认旧版位置时放弃移动</div>
       </el-form-item>
     </div>
 

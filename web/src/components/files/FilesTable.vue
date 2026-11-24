@@ -57,7 +57,7 @@
             :loading="!!dirStatLoading[row.id]"
             @click.stop="$emit('calc-dir-stat', row, false)"
           >
-            计算
+            统计大小
           </el-button>
         </template>
       </el-table-column>
@@ -109,7 +109,7 @@
         :page-size="size"
         :page-sizes="[20, 50, 100]"
         :current-page="page"
-        @current-change="$emit('update:page', $event)"
+        @current-change="onCurrentChange"
         @size-change="$emit('size-change', $event)"
       />
     </div>
@@ -139,7 +139,7 @@ defineProps({
   size: { type: Number, default: 50 },
 })
 
-defineEmits([
+const emit = defineEmits([
   'selection-change',
   'row-dblclick',
   'sort-change',
@@ -149,8 +149,14 @@ defineEmits([
   'row-command',
   'calc-dir-stat',
   'update:page',
+  'page-change',
   'size-change',
 ])
+
+const onCurrentChange = (val) => {
+  emit('update:page', val)
+  emit('page-change', val)
+}
 
 const tableRef = ref(null)
 

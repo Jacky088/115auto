@@ -7,7 +7,7 @@
       show-icon
       :closable="false"
       class="mb16"
-      title="系统未运行，请先点击顶栏「运行」"
+      title="系统未运行，请先点击顶栏「开始运行」"
     />
     <el-alert
       v-else-if="status.gate.active_mode === 'auto_move'"
@@ -23,7 +23,7 @@
       show-icon
       :closable="false"
       class="mb16"
-      :title="`后台正在执行「${mediaModeLabel}」，单线程互斥锁生效中...`"
+      :title="`后台正在执行「${mediaModeLabel}」。同一时间只能运行一个后台任务，请等待其结束后再操作。`"
     />
 
     <!-- 主工作台：三大独立程序与设置标签页 -->
@@ -130,9 +130,9 @@ const mediaModeLabel = computed(() => ({
 
 const phaseLabel = computed(() => {
   const mp = status.value.gate.media_progress || status.value.gate.progress || {}
-  if (status.value.gate.gate_state === 'draining' || mp.phase === 'draining') return '正在暂停转存并消化现有队列'
-  if (mp.phase === 'scanning') return '正在礼貌扫描 115 目录树'
-  return '单队列顺序处理中'
+  if (status.value.gate.gate_state === 'draining' || mp.phase === 'draining') return '正在暂停新转存，等待排队任务处理完'
+  if (mp.phase === 'scanning') return '正在扫描 115 目录树'
+  return '按顺序逐个处理中'
 })
 
 const activeProgressLabel = computed(() => {
@@ -140,7 +140,7 @@ const activeProgressLabel = computed(() => {
   const dp = status.value.gate.drain_progress || status.value.gate.drain_status || {}
   if (status.value.gate.gate_state === 'draining' || mp.phase === 'draining') {
     const rem = dp.remaining_total ?? dp.unfinished ?? '?'
-    return `排队消化剩余转存（待消化 ${rem} 个，已等 ${dp.elapsed_sec ?? 0}s）`
+    return `等待队列清空（剩余 ${rem} 个，已等待 ${dp.elapsed_sec ?? 0} 秒）`
   }
   return mp.label || '准备中...'
 })
@@ -180,7 +180,7 @@ async function loadRules() {
 
 async function stopMedia() {
   if (!await confirmAction({
-    title: '确认中断当前后台任务？',
+    title: `确认中断「${mediaModeLabel.value}」？`,
     message: '将在处理完当前文件后安全停止，已完成的改动保留，未处理的条目下次可继续。',
     confirmText: '确认中断',
     danger: true,

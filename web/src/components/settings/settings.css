@@ -2,16 +2,15 @@
 .settings-page .section-card {
   border: 1px solid var(--saas-line);
   border-radius: 12px;
-  padding: 0 18px 8px;
-  margin-bottom: 16px;
+  padding: 0 20px 10px;
+  margin-bottom: 0;
   background: var(--subcard-bg);
   overflow: hidden;
-  break-inside: avoid;
 }
 
 .settings-page .section-title {
-  margin: 0 -18px 14px;
-  padding: 11px 18px;
+  margin: 0 -20px 16px;
+  padding: 12px 20px;
   background: var(--subcard-head-bg);
   border-bottom: 1px solid var(--saas-line);
   font-weight: 700;
@@ -51,7 +50,7 @@
   color: var(--saas-text-main);
   line-height: 1.4;
   height: auto;
-  margin-bottom: 7px;
+  margin-bottom: 10px;
   padding-right: 0;
   display: inline-flex;
   align-items: center;
@@ -75,9 +74,78 @@
   line-height: 1.5;
 }
 
-.settings-page .settings-form .el-form-item__content > .tip {
-  margin-top: 6px;
+/* 提示性文字卡片块统一风格规范：继承图1胶囊提示条（半透明背景 + 细虚线边框 + 圆角内边距） */
+.settings-page .settings-form .el-form-item__content > .tip:not(.tip-inline),
+.settings-page .settings-form .tip[style*="100%"],
+.settings-page .range-tip,
+.settings-page .range-row > .row-hint,
+.settings-page .channel-desc,
+.settings-page .bundle-core-guarantee,
+.settings-page .tip-box {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  font-size: var(--fs-caption);
+  color: var(--saas-primary, #4f6bff);
+  background: rgba(79, 107, 255, 0.08);
+  border: 1px dashed rgba(79, 107, 255, 0.25);
+  border-radius: var(--r-sm);
+  padding: 6px 10px;
+  margin: 4px 0 2px;
   line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+/* 颜色保持语义：警告与注意事项（含 .warn-text、.is-warn、或 .tip-box--warn） */
+.settings-page .settings-form .el-form-item__content > .tip:has(.warn-text),
+.settings-page .settings-form .el-form-item__content > .tip.warn-text,
+.settings-page .settings-form .tip[style*="100%"]:has(.warn-text),
+.settings-page .range-tip:has(.warn-text),
+.settings-page .range-tip.warn-text,
+.settings-page .row-hint:has(.warn-text),
+.settings-page .row-hint.warn-text,
+.settings-page .channel-desc:has(.warn-text),
+.settings-page .tip-box.is-warn,
+.settings-page .tip-box--warn {
+  color: var(--text-warn, #d97706);
+  background: rgba(217, 119, 6, 0.08);
+  border-color: rgba(217, 119, 6, 0.28);
+}
+
+/* 常规/中性解释性提示 */
+.settings-page .settings-form .el-form-item__content > .tip.tip--neutral,
+.settings-page .tip-box.is-neutral {
+  color: var(--saas-text-sub);
+  background: rgba(79, 107, 255, 0.05);
+  border-color: rgba(126, 146, 196, 0.28);
+}
+
+/* 暗黑模式自适应 */
+html.dark .settings-page .settings-form .el-form-item__content > .tip:not(.tip-inline),
+html.dark .settings-page .settings-form .tip[style*="100%"],
+html.dark .settings-page .range-tip,
+html.dark .settings-page .row-hint,
+html.dark .settings-page .channel-desc,
+html.dark .settings-page .bundle-core-guarantee,
+html.dark .settings-page .tip-box {
+  background: rgba(79, 107, 255, 0.14);
+  border-color: rgba(120, 145, 255, 0.35);
+  color: #9cb1ff;
+}
+
+html.dark .settings-page .settings-form .el-form-item__content > .tip:has(.warn-text),
+html.dark .settings-page .settings-form .el-form-item__content > .tip.warn-text,
+html.dark .settings-page .settings-form .tip[style*="100%"]:has(.warn-text),
+html.dark .settings-page .range-tip:has(.warn-text),
+html.dark .settings-page .range-tip.warn-text,
+html.dark .settings-page .row-hint:has(.warn-text),
+html.dark .settings-page .row-hint.warn-text,
+html.dark .settings-page .channel-desc:has(.warn-text),
+html.dark .settings-page .tip-box.is-warn,
+html.dark .settings-page .tip-box--warn {
+  background: rgba(234, 138, 0, 0.14);
+  border-color: rgba(234, 138, 0, 0.35);
+  color: #f6ad55;
 }
 
 /* 设置页面顶栏与响应式工具区 */
@@ -161,15 +229,27 @@
   }
 }
 
-/* 各 Tab 内卡片网格响应式布局：宽屏自适应双列瀑布流，消除行间留白空洞；窄屏流式单列 */
+/* 各 Tab 内卡片瀑布流：双列纵向紧凑排布，短卡自动上提填补空白；窄屏单列 */
 .settings-page .transfer-settings-group,
 .settings-page .notify-settings-group,
 .settings-page .schedule-settings-group,
 .settings-page .wash-settings-group,
 .settings-page .backup-settings-group,
 .settings-page .api-settings-group {
-  columns: 2 460px;
+  columns: 2;
   column-gap: 16px;
+}
+
+.settings-page .transfer-settings-group > .section-card,
+.settings-page .notify-settings-group > .section-card,
+.settings-page .schedule-settings-group > .section-card,
+.settings-page .wash-settings-group > .section-card,
+.settings-page .backup-settings-group > .section-card,
+.settings-page .api-settings-group > .section-card {
+  break-inside: avoid;
+  -webkit-column-break-inside: avoid;
+  page-break-inside: avoid;
+  margin-bottom: 16px;
 }
 
 @media (max-width: 960px) {
@@ -180,7 +260,6 @@
   .settings-page .backup-settings-group,
   .settings-page .api-settings-group {
     columns: 1;
-    column-gap: 0;
   }
 }
 
@@ -236,15 +315,40 @@
   display: flex;
   align-items: center;
   gap: 10px;
+  min-height: 28px;
 }
 
 .settings-page .switch-row .el-switch {
   flex: none;
+  margin: 0;
 }
 
 .settings-page .switch-row .tip {
   flex: 1;
   min-width: 0;
+  line-height: 1.5;
+}
+
+/* 备份途径：与上方总开关一致的胶囊开关列表（宽屏流式并排，窄屏自适应折行） */
+.settings-page .backup-channel-switches {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 24px;
+  width: 100%;
+}
+
+.settings-page .backup-channel-switches .switch-row {
+  width: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+}
+
+.settings-page .backup-channel-switches .switch-row .tip {
+  flex: none;
+  line-height: 1.5;
 }
 
 /* 洗版归档目录 */
@@ -278,13 +382,62 @@
   width: 100%;
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px 10px;
   flex-wrap: wrap;
+  min-height: 32px;
 }
 
-.settings-page .range-tip {
-  flex: 1 1 180px;
+/* 长说明始终独占一行，避免与控件争抢宽度后产生参差换行 */
+.settings-page .range-tip,
+.settings-page .range-row > .row-hint,
+.settings-page .range-row > .meta-empty-tip {
+  flex: 1 0 100%;
   min-width: 0;
+  margin: 0;
+}
+
+.settings-page .range-row > .meta-empty-tip {
+  margin-left: 0;
+}
+
+/* 复选框组改为纵向等距排列，长选项不再横向挤成锯齿 */
+.settings-page .settings-form .el-checkbox-group {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.settings-page .settings-form .el-checkbox {
+  margin-right: 0;
+  height: auto;
+  align-items: flex-start;
+}
+
+.settings-page .settings-form .el-checkbox__input {
+  margin-top: 1px;
+}
+
+.settings-page .settings-form .el-checkbox__label {
+  line-height: 1.55;
+  white-space: normal;
+}
+
+/* 行内操作组固定靠右，与只读信息分离 */
+.settings-page .row-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  flex: none;
+}
+
+/* 已选文件名/路径过长时省略，避免把按钮挤出卡片 */
+.settings-page .selected-count {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .settings-page .input-btn-row .el-input {
@@ -303,15 +456,15 @@
 
 @media (max-width: 768px) {
   .settings-page .section-card {
-    padding: 0 14px 4px;
+    padding: 0 14px 8px;
   }
   .settings-page .section-title {
-    margin: 0 -14px 12px;
+    margin: 0 -14px 14px;
     padding: 11px 14px;
   }
   .settings-page .settings-form .el-form-item {
-    margin-bottom: 12px;
-    padding-bottom: 12px;
+    margin-bottom: 14px;
+    padding-bottom: 14px;
   }
   .settings-page .switch-row {
     gap: 10px;
@@ -330,16 +483,61 @@
 
 .settings-page .bundle-est-box {
   width: 100%;
-  background: #f8f9fb;
-  border: 1px solid #ebeef5;
+  background: var(--subcard-head-bg);
+  border: 1px solid var(--saas-line);
   border-radius: var(--r-sm);
-  padding: 8px 12px;
+  padding: 10px 12px;
 }
 
-.settings-page .bundle-est-metrics {
+.settings-page .bundle-est-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.settings-page .bundle-est-caption {
   font-size: var(--fs-caption);
-  color: #303133;
-  line-height: 1.6;
+  font-weight: 600;
+  color: var(--saas-text-main);
+}
+
+.settings-page .bundle-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 8px;
+}
+
+.settings-page .bundle-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  padding: 6px 10px;
+  border: 1px solid var(--saas-line);
+  border-radius: 8px;
+  background: var(--subcard-bg);
+}
+
+.settings-page .bm-label {
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+.settings-page .bm-value {
+  font-size: var(--fs-caption);
+  font-weight: 600;
+  color: var(--saas-text-main);
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-page .bundle-meta-root {
+  margin-top: 8px;
+  overflow-wrap: anywhere;
 }
 
 .settings-page .bundle-opts {
@@ -357,6 +555,8 @@
 .settings-page .bundle-capsule-radios {
   display: inline-flex;
   align-items: center;
+  flex-wrap: wrap;
+  max-width: 100%;
 }
 
 .settings-page .bundle-capsule-radios .el-radio-button {
@@ -366,8 +566,8 @@
 .settings-page .bundle-capsule-radios .el-radio-button__inner {
   height: 32px;
   line-height: 30px;
-  padding: 0 14px;
-  font-size: 12.5px;
+  padding: 0 11px;
+  font-size: 12px;
   font-weight: 500;
   border-color: rgba(126, 146, 196, 0.40);
   background: rgba(255, 255, 255, 0.70);
@@ -404,19 +604,38 @@ html.dark .settings-page .bundle-capsule-radios .el-radio-button__original-radio
   color: #ffffff !important;
 }
 
+.settings-page .meta-empty-tip {
+  margin-left: 10px;
+  color: var(--text-muted);
+  font-size: var(--fs-caption);
+}
+
+
 .settings-page .bundle-switch-group {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
 }
 
 .settings-page .bundle-check {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   font-size: var(--fs-caption);
   color: var(--el-text-color-regular);
+  line-height: 1.5;
   cursor: pointer;
+  min-height: 28px;
+}
+
+.settings-page .bundle-check .el-switch {
+  flex: none;
+  margin: 0;
+}
+
+.settings-page .bundle-check span {
+  display: inline-block;
+  line-height: 1.5;
 }
 
 .settings-page .bundle-progress-wrap {
@@ -429,6 +648,61 @@ html.dark .settings-page .bundle-capsule-radios .el-radio-button__original-radio
 
 .settings-page .sep {
   color: var(--text-muted);
+}
+
+/* WebDAV 卡片：状态信息与操作分行，长地址省略避免挤压按钮 */
+.settings-page .dav-status-row {
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.settings-page .dav-identity {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.settings-page .dav-identity-text {
+  display: inline-block;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+  color: var(--saas-text-main);
+}
+
+.settings-page .dav-subline,
+.settings-page .dav-last-backup {
+  margin-top: 6px;
+  overflow-wrap: anywhere;
+}
+
+.settings-page .dav-url-input {
+  flex: 1 1 260px;
+  min-width: 0;
+  max-width: 460px;
+}
+
+.settings-page .dav-cred-row .el-input {
+  flex: 1 1 170px;
+  min-width: 0;
+  width: auto;
+}
+
+.settings-page .dav-dir-input {
+  flex: 0 1 260px;
+  min-width: 0;
+}
+
+.settings-page .dav-tested {
+  flex: 1 0 100%;
+  color: var(--el-color-success);
+  font-size: 13px;
 }
 
 /* 底部浮动保存条：仅在存在未保存修改时出现，不遮挡表单操作 */

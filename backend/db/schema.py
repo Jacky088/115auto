@@ -326,6 +326,14 @@ DEFAULT_SETTINGS = {
     "auto_backup_enabled": False,     # 定时把数据备份 JSON 推送到 TG
     "auto_backup_days": 7,            # 备份间隔天数（1~365）
     "auto_backup_time": "04:00",       # 备份推送时间（HH:MM，默认凌晨 04:00）
+    "auto_backup_channels": [],       # 定时自动备份途径：tgbot, webdav, local（默认不自动勾选，须用户主动勾选）
+    "bundle_meta_mode": "nfo",
+    "bundle_slim_db": True,
+    "bundle_include_credentials": False,
+    "bundle_export_dest": "local",
+    "bundle_restore_source": "local",
+    "bundle_restore_credentials": False,
+    "bundle_restore_meta": True,
     "digest_last_sent": "",           # 内部状态：上次摘要日期
     "backup_last_sent": 0,            # 内部状态：上次备份时间戳
     "backup_last_sent_date": "",      # 内部状态：上次备份日期 YYYY-MM-DD

@@ -8,7 +8,7 @@
           <span class="organize-main-title">定时文件整理（自动归档与分流）</span>
           <el-tooltip
             :disabled="systemRunning"
-            content="系统未运行，请先点击顶栏「运行」"
+            content="系统未运行，请先点击顶栏「开始运行」"
             placement="top"
           >
             <span>
@@ -27,7 +27,7 @@
         <div class="header-actions">
           <el-tooltip
             :disabled="systemRunning && computedAutoMoveEnabled && !isMediaMutexActive"
-            :content="!systemRunning ? '系统处于停止状态，请先在顶栏点击「运行」启动系统' : (isMediaMutexActive ? `当前正在执行「${activeMode === 'organize' ? '目录整理' : '媒体刮削'}」，已开启写锁保护，请稍后再试` : '定时整理功能当前为关闭状态，请先开启左侧总开关')"
+            :content="!systemRunning ? '系统处于停止状态，请先在顶栏点击「开始运行」启动系统' : (isMediaMutexActive ? `当前正在执行「${activeMode === 'organize' ? '目录整理' : '媒体刮削'}」，请稍后再试` : '定时文件整理功能当前为关闭状态，请先开启左侧总开关')"
             placement="top"
           >
             <span>
@@ -139,7 +139,7 @@
 
           <div class="feature-switch-pill" :class="{ 'is-active': moveSettings.auto_move_dedup_by_episode }">
             <div class="feature-meta">
-              <span class="feature-name">按季集防重</span>
+              <span class="feature-name">按季集查重</span>
               <span class="feature-hint">同剧目标已有同季同集视频时跳过，防多版本重复</span>
             </div>
             <el-switch v-model="moveSettings.auto_move_dedup_by_episode" @change="saveMoveSettings" />
@@ -385,7 +385,7 @@ const computedAutoMoveEnabled = computed({
 
 const onToggleAutoMove = () => {
   if (!systemRunning.value) {
-    ElMessage.warning('系统当前处于停止状态，请先在顶栏点击「运行」开启系统！')
+    ElMessage.warning('系统当前处于停止状态，请先在顶栏点击「开始运行」开启系统！')
     moveSettings.value.auto_move_enabled = false
     return
   }

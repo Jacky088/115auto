@@ -6,7 +6,7 @@
       <div class="step-title-wrap">
         <span class="step-badge">步骤 1</span>
         <div>
-          <div class="step-title">确认清理目录（仅按 sha1 判重）</div>
+          <div class="step-title">确认清理目录（按文件内容指纹 sha1 查重）</div>
           <div class="step-desc">扫描指定目录中 sha1 完全相同的重复文件，sha1 为空的条目自动跳过；支持仅扫描当前层或含子目录。</div>
         </div>
       </div>
@@ -177,6 +177,7 @@
     v-model="dedupeRuleDialog.open"
     :title="dedupeRuleDialog.id ? '编辑重复清理规则' : '新增重复清理规则'"
     width="min(560px, 94vw)"
+    align-center
   >
     <el-form
       :model="dedupeRuleDialog"
@@ -220,7 +221,7 @@
             />
             <span class="min-size-unit">MB</span>
           </div>
-          <div class="tip-block">0 表示不忽略任何大小（仅限 0～1024000 整数）；小文件不参与判重</div>
+          <div class="tip-block">0 表示不忽略任何大小（仅限 0～1024000 整数）；小文件不参与查重</div>
         </div>
       </el-form-item>
       <el-form-item label="启用">
@@ -240,7 +241,7 @@
   </el-dialog>
 
   <!-- 重复文件预览与保留项选择弹窗 -->
-  <el-dialog v-model="dedupePreview.visible" title="重复文件预览 — 确认后移入 115 回收站" width="min(980px, 96vw)" top="4vh">
+  <el-dialog v-model="dedupePreview.visible" title="重复文件预览 — 确认后移入 115 回收站" width="min(980px, 96vw)" align-center>
     <div class="mb12" style="display: flex; flex-wrap: wrap; gap: 8px; align-items: center">
       <el-tag type="warning" effect="dark" size="small">重复组 {{ dedupePreview.stats.duplicate_groups || 0 }} 个</el-tag>
       <el-tag type="danger" size="small">可释放 {{ fmtSizeMb(dedupePreview.stats.freeable_bytes) || '0 MB' }}</el-tag>
@@ -369,7 +370,7 @@ const dedupeBtnDisabled = computed(() =>
 const dedupeBtnTip = computed(() => {
   if (!status.value.running) return '顶栏系统处于停止状态，请先启动系统'
   if (activeDedupeRules.value.length === 0) return '暂无启用的清理规则，请先点击上方添加'
-  if (isBusy.value) return '已有独占整理、刮削或清理任务运行中（严格互斥），请等待结束'
+  if (isBusy.value) return '正在执行目录整理 / 媒体刮削 / 重复清理，同一时间只能做一件，请稍候'
   return ''
 })
 

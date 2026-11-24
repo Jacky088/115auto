@@ -3,7 +3,7 @@
     <template #header>
       <div class="card-head">
         <div class="title-with-badge">
-          <span class="card-title">分流记录</span>
+          <span class="card-title">转存与整理记录</span>
           <el-tag size="small" class="count-tag">
             {{ activeTab === 'records' ? `共 ${total} 条转存` : `共 ${ledgerTotal} 条整理` }}
           </el-tag>
@@ -91,16 +91,16 @@
         <BackfillDialog ref="backfillDialogRef" />
 
         <!-- 手动转存 / Web Share Target 接收弹窗 -->
-        <el-dialog v-model="manualDialog.open" title="手动添加转存" width="min(540px, 94vw)" class="pc-dialog">
+        <el-dialog v-model="manualDialog.open" title="手动添加转存" width="min(540px, 94vw)" align-center class="pc-dialog">
           <el-form :model="manualDialog" label-width="84px" @submit.prevent>
             <el-form-item label="转存内容" required>
               <el-input v-model="manualDialog.text" type="textarea" :rows="4"
                         placeholder="支持粘贴 115 分享链接（含提取码）、磁力链接 (magnet:?)、电驴链接 (ed2k://)，或包含链接的整段消息文本..." />
             </el-form-item>
-            <el-form-item label="保存方式">
+            <el-form-item label="转存方式">
               <el-radio-group v-model="manualDialog.mode">
-                <el-radio value="route">按分类路由</el-radio>
-                <el-radio value="dir">指定 115 目录</el-radio>
+                <el-radio value="route">按分类自动选择目录</el-radio>
+                <el-radio value="dir">指定 115 网盘目录</el-radio>
               </el-radio-group>
             </el-form-item>
             <el-form-item v-if="manualDialog.mode === 'route'" label="指定分类">
@@ -133,7 +133,7 @@
             <div class="dialog-footer">
               <el-button @click="manualDialog.open = false">取消</el-button>
               <el-button type="primary" :loading="manualDialog.submitting" @click="submitManualTransfer">
-                提交入队
+                加入转存队列
               </el-button>
             </div>
           </template>
@@ -176,11 +176,11 @@
         </div>
 
         <el-alert type="info" :closable="false" show-icon style="margin-bottom: 10px"
-                  title="整理移动流水，撤销将文件移回源目录" />
+                  title="以下为整理的移动记录；撤销会把文件移回原目录" />
 
         <el-table :data="ledgerItems" size="small" v-loading="ledgerLoading">
           <template #empty>
-            <el-empty :image-size="60" description="暂无整理记录（账本自功能上线起记录）" />
+            <el-empty :image-size="60" description="暂无整理记录（自该功能上线起开始记录）" />
           </template>
           <el-table-column prop="created_at" label="时间" width="150">
             <template #default="{ row }">{{ fmtTime(row.created_at) }}</template>
@@ -211,7 +211,7 @@
                        @current-change="loadLedger" @size-change="onLedgerSizeChange" />
 
         <!-- 撤销确认弹窗：说明「再移走」后果，可选停用涉及规则 -->
-        <el-dialog v-model="undoDialog.visible" title="撤销整理" width="min(480px, 94vw)">
+        <el-dialog v-model="undoDialog.visible" title="撤销整理" width="min(480px, 94vw)" align-center>
           <p style="margin: 0 0 8px">
             将撤销 <b>{{ undoDialog.label }}</b>，文件会被移回整理前的源目录。
           </p>
@@ -307,7 +307,7 @@ const submitManualTransfer = async () => {
     } else if (res.skipped > 0) {
       ElMessage.warning('未匹配到有效目标目录（未命中分类或该分类设为「跳过」），请指定分类或切换到「指定 115 目录」后重试')
     } else {
-      ElMessage.warning('未能识别到有效的 115 分享或离线下载链接')
+      ElMessage.warning('未能识别到有效的 115 分享链接或云下载链接')
     }
   } catch (e) {
     ElMessage.error(errMsg(e))
@@ -393,8 +393,8 @@ const delSelected = async () => {
   if (!n) return
   try {
     await ElMessageBox.confirm(
-      '仪表盘的最近转存记录将同步移除。',
-      `删除选中的 ${n} 条任务记录？`,
+      '仅删除这里的转存记录，115 网盘中的文件不受影响；仪表盘的最近转存记录也会同步移除。',
+      `删除选中的 ${n} 条转存记录？`,
       { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消', confirmButtonClass: 'danger-confirm-btn' })
   } catch { return }  // 用户取消
   try {

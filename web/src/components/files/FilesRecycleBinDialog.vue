@@ -3,11 +3,11 @@
     :model-value="modelValue"
     title="115 回收站"
     :width="'min(780px, 94vw)'"
-    top="5vh"
+    align-center
     @update:model-value="$emit('update:modelValue', $event)"
   >
     <div class="rb-head">
-      <span class="rb-tip">支持单个或批量还原回原目录（防误删不提供彻底清空，如需清空请前往 115 客户端）。</span>
+      <span class="rb-tip">支持单个或批量还原回原目录（防误删不提供彻底清空，如需清空请前往 115 网盘网页端）。</span>
       <div class="rb-actions">
         <el-button
           v-if="rbSelected.length"

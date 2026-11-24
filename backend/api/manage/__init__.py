@@ -12,6 +12,7 @@ from . import (
     subscriptions,
     system,
     transfers,
+    webdav,
 )
 from ._common import (
     POSTER_COOKIE,
@@ -131,6 +132,7 @@ for _sub in (
     settings,
     backup,
     auto_move,
+    webdav,
 ):
     router.include_router(_sub.router)
 

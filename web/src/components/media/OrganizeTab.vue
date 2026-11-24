@@ -139,7 +139,7 @@
         <el-table-column prop="dest_name" label="整理后规范文件名" min-width="190" show-overflow-tooltip />
         <el-table-column prop="dest_path" label="目标规范目录" min-width="180" show-overflow-tooltip />
         <el-table-column label="动作" width="105">
-          <template #default="{ row }"><el-tag size="small" effect="plain">{{ row.action }}</el-tag></template>
+          <template #default="{ row }"><el-tag size="small" effect="plain">{{ actionLabel[row.action] || row.action }}</el-tag></template>
         </el-table-column>
         <el-table-column label="批次" width="120" prop="batch_id" />
         <el-table-column label="状态" width="85">
@@ -186,7 +186,7 @@
         已过滤：非视频 {{ previewDrawer.scan_stats.non_video }} ·
         类型互斥 {{ previewDrawer.scan_stats.media_type_skip }} ·
         花絮广告 {{ previewDrawer.scan_stats.extra_skip }} ·
-        其他规则认领 {{ previewDrawer.scan_stats.dedup_seen }}
+        已被其他规则处理 {{ previewDrawer.scan_stats.dedup_seen }}
       </div>
     </div>
     <div v-if="previewDrawer.items.length" class="mb12" style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center">
@@ -235,7 +235,7 @@
   </el-drawer>
 
 
-  <el-dialog v-model="orgPreview.visible" title="目录整理预览 — 确认后执行" :width="'min(920px, 96vw)'" top="5vh">
+  <el-dialog v-model="orgPreview.visible" title="目录整理预览 — 确认后执行" :width="'min(920px, 96vw)'" align-center>
     <div class="mb12" style="display: flex; flex-wrap: wrap; gap: 8px; align-items: center">
       <el-tag type="warning" effect="dark" size="small">待整理 {{ orgPreview.pending }} 条</el-tag>
       <el-tag type="success" size="small">已符合规范 {{ orgPreview.total - orgPreview.pending }} 条</el-tag>
@@ -397,6 +397,7 @@ const pagedRecords = computed(() => {
   return records.value.slice(start, start + recordPageSize.value)
 })
 watch(recordFilter, () => { recordPage.value = 1 })
+watch(recordPageSize, () => { recordPage.value = 1 })
 
 const organizeBtnDisabled = computed(() => !status.value.running || isBusy.value || activeOrganizeRules.value.length === 0)
 const organizeBtnTip = computed(() => {
@@ -569,6 +570,8 @@ const toggleOrgGroup = (path, val) => {
   for (const id of orgGroupIds(path)) next[id] = !!val
   orgSelected.value = next
 }
+// 整理动作码 → 中文（避免表格直接显示 rename/move/move_sub 等英文）
+const actionLabel = { rename: '重命名', move: '移动', move_sub: '字幕随动', copy: '复制' }
 const orgParsedLabel = (it) => {
   const parts = [it.parsed_title || it.orig_name]
   if (it.year) parts.push(`(${it.year})`)

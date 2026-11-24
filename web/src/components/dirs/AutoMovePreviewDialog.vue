@@ -1,6 +1,6 @@
 <template>
 <!-- 整理预览弹窗（两段式执行第一步）：确认后才真正排队执行 -->
-<el-dialog v-model="previewVisible" title="整理预览 — 将移动以下文件" :width="'min(860px, 96vw)'" top="6vh">
+<el-dialog v-model="previewVisible" title="整理预览 — 将移动以下文件" :width="'min(860px, 96vw)'" align-center>
   <el-alert v-if="previewFromCache" type="warning" :closable="false" show-icon style="margin-bottom: 10px"
             title="暂存的预览缓存，确认后重新扫描执行" />
   <el-alert v-else type="info" :closable="false" show-icon style="margin-bottom: 10px"
@@ -68,7 +68,7 @@
   />
   <div v-if="previewData?.rules?.some((r) => r.skip_ep > 0 || r.skip_movie > 0 || r.skip_ambiguous > 0 || r.skip_junk > 0 || r.error)" style="margin-top: 10px">
     <div v-for="r in previewData.rules" :key="r.rule_id" style="font-size: var(--fs-caption); color: var(--saas-text-sub); line-height: 1.7">
-      <span v-if="r.skip_ep > 0">「{{ r.target_dir }}」按季集防重将跳过 {{ r.skip_ep }} 个文件{{ r.skip_ep_samples?.length ? `（如 ${r.skip_ep_samples.slice(0, 2).join('、')}）` : '' }}；</span>
+      <span v-if="r.skip_ep > 0">「{{ r.target_dir }}」按季集查重将跳过 {{ r.skip_ep }} 个文件{{ r.skip_ep_samples?.length ? `（如 ${r.skip_ep_samples.slice(0, 2).join('、')}）` : '' }}；</span>
       <span v-if="r.skip_movie > 0">「{{ r.target_dir }}」电影库规则跳过 {{ r.skip_movie }} 个带集数标识的文件（留给剧集规则）；</span>
       <span v-if="r.skip_ambiguous > 0" style="color: var(--el-color-warning)">
         「{{ r.target_dir }}」同名歧义跳过 {{ r.skip_ambiguous }} 个文件（多库同名且无集数标识，留源目录待手动处理）{{ r.skip_ambiguous_samples?.length ? `（如 ${r.skip_ambiguous_samples.slice(0, 2).join('、')}）` : '' }}；

@@ -97,12 +97,17 @@ def _backup_json() -> bytes:
 
 
 async def auto_backup_loop():
-    """定时把数据备份（JSON/Gzip）推送到用户的 TG Bot。
-    按用户设定的间隔天数与具体推送时间点（如每 7 天 04:00）精准执行，并通过 TG 队列平滑推送。
-    """
+    """定时自动备份：按用户设定的间隔天数与具体时间点，通过多途径（TG Bot、WebDAV、本地）分发执行。"""
     while True:
         try:
             def _load_backup_meta():
+                channels_raw = db.get_setting("auto_backup_channels", [])
+                if isinstance(channels_raw, list):
+                    channels = [str(x) for x in channels_raw]
+                elif isinstance(channels_raw, str):
+                    channels = [x.strip() for x in channels_raw.split(",") if x.strip()]
+                else:
+                    channels = []
                 return (
                     bool(db.get_setting("auto_backup_enabled", False)),
                     int(db.get_setting("auto_backup_days", 7) or 7),
@@ -111,17 +116,22 @@ async def auto_backup_loop():
                     str(db.get_setting("auto_backup_time", "04:00") or "04:00").strip(),
                     str(db.get_setting("backup_last_sent_date", "") or "").strip(),
                     float(db.get_setting("backup_last_sent", 0) or 0),
+                    channels,
+                    int(db.get_setting("webdav_keep_count", 10) or 10),
+                    bool(db.get_setting("webdav_last_test_ok", False)),
                 )
 
-            enabled, days, token, chat_id, target_time, last_sent_date, last_ts = await asyncio.to_thread(
-                _load_backup_meta)
-            if enabled and days > 0:
+            (
+                enabled, days, token, chat_id, target_time, last_sent_date, last_ts,
+                channels, dav_keep, dav_test_ok,
+            ) = await asyncio.to_thread(_load_backup_meta)
+
+            if enabled and days > 0 and channels:
                 now = _bj_now()
                 today_str = now.strftime("%Y-%m-%d")
                 now_hm = now.strftime("%H:%M")
 
                 if not last_sent_date and last_ts > 0:
-                    # 与 _bj_now() 统一为北京时区：本地时区 fromtimestamp 在跨时区部署会错算天数
                     last_sent_date = datetime.datetime.fromtimestamp(
                         last_ts, tz=_bj_now().tzinfo).strftime("%Y-%m-%d")
 
@@ -138,32 +148,102 @@ async def auto_backup_loop():
                     except Exception:
                         should_send = True
 
-                if should_send and token and chat_id:
-                    raw = await asyncio.to_thread(_backup_json)
-                    # 体积超过 8MB 时自动使用 gzip 压缩，彻底规避 TG Bot 20MB 下载/50MB 发送限制
-                    if len(raw) > 8 * 1024 * 1024:
-                        import gzip
-                        content = gzip.compress(raw, compresslevel=9)
-                        fname = f"autosave_backup_{time.strftime('%Y%m%d_%H%M%S')}.json.gz"
-                        mime = "application/gzip"
-                        caption = f"🗄 定时自动备份（Gzip 压缩，原始 {len(raw) // 1024}KB → 压缩后 {len(content) // 1024}KB）"
-                    else:
-                        content = raw
-                        fname = f"autosave_backup_{time.strftime('%Y%m%d_%H%M%S')}.json"
-                        mime = "application/json"
-                        caption = f"🗄 定时自动备份（核心设置/业务规则/转存与整理台账，{len(content) // 1024}KB）"
+                if should_send:
+                    # 1. Telegram Bot 途径
+                    if "tgbot" in channels:
+                        if token and chat_id:
+                            raw = await asyncio.to_thread(_backup_json)
+                            if len(raw) > 8 * 1024 * 1024:
+                                import gzip
+                                content = gzip.compress(raw, compresslevel=9)
+                                fname = f"autosave_backup_{time.strftime('%Y%m%d_%H%M%S')}.json.gz"
+                                mime = "application/gzip"
+                                caption = f"🗄 定时自动备份（Gzip 压缩，原始 {len(raw) // 1024}KB → 压缩后 {len(content) // 1024}KB）"
+                            else:
+                                content = raw
+                                fname = f"autosave_backup_{time.strftime('%Y%m%d_%H%M%S')}.json"
+                                mime = "application/json"
+                                caption = f"🗄 定时自动备份（核心设置/业务规则/转存与整理台账，{len(content) // 1024}KB）"
 
-                    # 通过 TG 推送队列排队发送
-                    ok = _jobs().enqueue_tg_document(fname, content, mime, caption)
-                    if ok:
-                        def _mark_backup_sent():
-                            db.set_setting("backup_last_sent", time.time())
-                            db.set_setting("backup_last_sent_date", today_str)
+                            ok = _jobs().enqueue_tg_document(fname, content, mime, caption)
+                            if ok:
+                                logstream.info("system", f"定时自动备份已加入 TG 发送队列（{fname}，{len(content) // 1024}KB）")
+                            else:
+                                logstream.warn("system", "定时自动备份入队 TG 失败（队列已满）")
+                        else:
+                            logstream.warn("system", "定时自动备份已跳过 TG Bot 推送：未配置 Bot Token 或 Chat ID")
 
-                        await asyncio.to_thread(_mark_backup_sent)
-                        logstream.info("system", f"定时自动备份已加入 TG 发送队列（{fname}，{len(content) // 1024}KB）")
-                    else:
-                        logstream.warn("system", "定时自动备份入队失败（队列已满）")
+                    # 2. WebDAV 云端途径
+                    if "webdav" in channels:
+                        if dav_test_ok:
+                            from pathlib import Path
+                            from ...core import migration_bundle, webdav
+
+                            client = await asyncio.to_thread(webdav.create_configured_client)
+                            if client:
+                                def _run_dav_backup():
+                                    import shutil
+                                    work_dir = None
+                                    try:
+                                        work_dir, zip_path, fname, _ = migration_bundle.build_migration_bundle(
+                                            include_credentials=False,
+                                            meta_mode="nfo",
+                                            slim_db=True,
+                                            bundle_type="auto",
+                                        )
+                                        up_res = client.upload_file(zip_path, fname)
+                                        pruned = client.prune_backups(dav_keep)
+                                        return fname, up_res["bytes"], pruned
+                                    finally:
+                                        if work_dir and Path(work_dir).exists():
+                                            shutil.rmtree(work_dir, ignore_errors=True)
+
+                                try:
+                                    fname, size_b, pruned = await asyncio.to_thread(_run_dav_backup)
+                                    db.set_setting("webdav_last_backup_date", today_str)
+                                    db.set_setting("webdav_last_backup_at", time.time())
+                                    db.set_setting("webdav_last_backup_status", f"成功 ({fname})")
+                                    prune_msg = f"，已自动轮转清理 {pruned} 份旧备份" if pruned > 0 else ""
+                                    logstream.info("system", f"定时整机迁移包已成功上传至 WebDAV（{fname}，{size_b // 1024} KB{prune_msg}）")
+                                except Exception as e:
+                                    logstream.error("system", f"定时整机备份上传 WebDAV 失败: {logstream.exc(e)}")
+                                    db.set_setting("webdav_last_backup_status", f"失败: {str(e)[:100]}")
+                        else:
+                            logstream.warn("system", "定时自动备份已跳过 WebDAV：未配置或未通过测试连接")
+
+                    # 3. 本地存储途径
+                    if "local" in channels:
+                        def _run_local_backup():
+                            from ... import config
+                            import gzip
+                            local_dir = config.DATA_DIR / "backups"
+                            local_dir.mkdir(parents=True, exist_ok=True)
+                            raw = _backup_json()
+                            content = gzip.compress(raw, compresslevel=9)
+                            fname = f"autosave_backup_{time.strftime('%Y%m%d_%H%M%S')}.json.gz"
+                            (local_dir / fname).write_bytes(content)
+                            # 自动轮转保留最新 10 份
+                            existing = sorted(local_dir.glob("autosave_backup_*.json.gz"), key=lambda p: p.stat().st_mtime, reverse=True)
+                            if len(existing) > 10:
+                                for old_p in existing[10:]:
+                                    try:
+                                        old_p.unlink()
+                                    except Exception:
+                                        pass
+                            return fname, len(content)
+
+                        try:
+                            loc_name, loc_size = await asyncio.to_thread(_run_local_backup)
+                            logstream.info("system", f"定时自动备份已写入本地目录（{loc_name}，{loc_size // 1024} KB）")
+                        except Exception as e:
+                            logstream.error("system", f"定时自动备份写入本地失败: {logstream.exc(e)}")
+
+                    # 标记当轮备份已完成
+                    def _mark_backup_sent():
+                        db.set_setting("backup_last_sent", time.time())
+                        db.set_setting("backup_last_sent_date", today_str)
+
+                    await asyncio.to_thread(_mark_backup_sent)
         except Exception as e:
             logstream.error("system", f"自动备份异常: {logstream.exc(e)}")
         await asyncio.sleep(60)

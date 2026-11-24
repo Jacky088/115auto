@@ -3,6 +3,7 @@
     :model-value="modelValue"
     title="文件详情"
     :width="'min(560px, 94vw)'"
+    align-center
     @update:model-value="$emit('update:modelValue', $event)"
   >
     <template v-if="detailRow">

@@ -1,5 +1,4 @@
 """TG Bot 监控频道添加、追剧订阅与向前补全逻辑。"""
-import asyncio
 import json
 import re
 import time
@@ -8,6 +7,7 @@ import httpx
 
 from ... import database as db
 from ...core import logstream
+from ...core.executors import run_ext_thread
 from .link_flow import _usage_add
 from .state import USAGE_SUB, _SUB_NUMS, _SUB_SEARCH_CACHE, _SUB_SEARCH_TTL, _tg_proxy
 
@@ -136,8 +136,9 @@ async def sub_search_flow(client: httpx.AsyncClient, token: str,
     cands = []
     for k in ("tv", "movie"):
         try:
-            # TMDB 搜索是同步 httpx 调用，必须放线程池，否则慢代理下会卡死整个事件循环
-            resp = await asyncio.to_thread(
+            # TMDB 搜索是同步 httpx 调用，必须放外部网络专用池，
+            # 否则慢代理下既会卡死事件循环，也会挤占默认池拖累 TG 轮询
+            resp = await run_ext_thread(
                 _tmdb_get, f"/search/{k}",
                 {"api_key": api_key, "query": query, "language": "zh-CN"})
             if resp.status_code == 200:
@@ -159,7 +160,7 @@ async def sub_search_flow(client: httpx.AsyncClient, token: str,
     media, files, kept = [], {}, []  # files 必须是 dict（httpx multipart 字段名 → 内容）
     for it in cands:
         try:  # 海报经代理下载后以上传方式发给 TG（服务端通常也连不上 image.tmdb.org）
-            img = await asyncio.to_thread(
+            img = await run_ext_thread(
                 lambda p=it["poster_path"]: httpx.get(
                     f"https://image.tmdb.org/t/p/w200{p}", proxy=proxy, timeout=15).content)
         except Exception:

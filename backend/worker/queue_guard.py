@@ -114,7 +114,13 @@ def _space_gate() -> tuple[bool, str]:
         return _SPACE_PROBE["blocked"], _SPACE_PROBE["reason"]
     blocked, reason, ratio, free = False, "", 0.0, 0
     try:
-        sp = pan.space_info()
+        # 调度热路径：用 8s 内层上限，确保先于外层门禁轮询的 40s wait_for 超时；
+        # 等锁也限时（10s），整体（等锁+网络）远小于 40s，超时后走下面的 except
+        # 沿用上次空间状态，而不是整轮调度被打断。
+        try:
+            sp = pan.space_info(timeout=8)
+        except TypeError:
+            sp = pan.space_info()  # 兼容仅接受 force 的旧签名/测试桩
         total = int(sp.get("total") or 0)
         use = int(sp.get("use") or 0)
         free = int(sp.get("free") or 0)

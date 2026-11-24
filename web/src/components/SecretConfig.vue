@@ -9,8 +9,10 @@
     </template>
     <!-- 未配置 / 更换中：显示输入框 + 独立保存按钮（不联动页面底部保存） -->
     <template v-else>
-      <div class="sc-fields"><slot /></div>
-      <div class="sc-btns">
+      <div class="sc-fields">
+        <slot :save="onSave" :saving="saving" :cancel="onCancel" :configured="configured" />
+      </div>
+      <div v-if="!inlineActions" class="sc-btns">
         <el-button type="primary" size="small" :loading="saving" @click="onSave">保存</el-button>
         <el-button v-if="configured" size="small" @click="onCancel">取消</el-button>
       </div>
@@ -25,6 +27,7 @@ const props = defineProps({
   configured: Boolean,
   // 父组件提供的异步保存函数；抛错时保持编辑态
   save: { type: Function, required: true },
+  inlineActions: { type: Boolean, default: false },
 })
 const emit = defineEmits(['open', 'cancel'])
 

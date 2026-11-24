@@ -14,7 +14,7 @@
         </div>
         <div v-if="dirtyRoutes" class="routes-dirty-row">
           <el-tag type="danger" effect="plain" size="small">● 有未保存的更改</el-tag>
-          <el-button type="primary" size="small" @click="saveRoutes">保存映射</el-button>
+          <el-button type="primary" size="small" @click="saveRoutes">保存目录映射</el-button>
         </div>
         <div class="unclassified-block">
           <div class="unclassified-row">
@@ -172,7 +172,7 @@ const onPickDir = (val) => {
 const removeRoute = async (idx) => {
   if (!await confirmAction({
     title: '删除这条分类映射？',
-    message: '保存后立即生效。',
+    message: '删除后需点「保存目录映射」才生效；该分类资源之后将按「未分类动作」或其他规则处理。',
     confirmText: '删除',
     danger: true,
   })) return

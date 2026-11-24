@@ -166,6 +166,27 @@ def estimate_bundle() -> dict:
             asset_count += 1
             asset_bytes += sz
 
+    # 估算瘦身数据库体积：统计 logs 与 tmdb_cache 可剥离的数据量
+    prunable_bytes = 0
+    try:
+        log_row = db.query(
+            "SELECT count(*) c, coalesce(sum(length(message)), 0) s FROM logs",
+            one=True,
+        )
+        if log_row:
+            prunable_bytes += int(log_row["s"] or 0) + int(log_row["c"] or 0) * 40
+        tmdb_row = db.query(
+            "SELECT count(*) c, coalesce(sum(length(payload) + length(cache_key)), 0) s FROM tmdb_cache",
+            one=True,
+        )
+        if tmdb_row:
+            prunable_bytes += int(tmdb_row["s"] or 0) + int(tmdb_row["c"] or 0) * 48
+    except Exception:
+        pass
+
+    # 导出瘦身快照时会执行 VACUUM 紧凑重整，且不含 WAL 日志，保底预留 512 KB
+    slim_db_bytes = max(512 * 1024, min(db_bytes, db_bytes - prunable_bytes))
+
     pending_media = db.query(
         "SELECT count(*) c FROM media_tasks WHERE status IN ('need_confirm','staged','queued','skipped','running')",
         one=True,
@@ -173,6 +194,7 @@ def estimate_bundle() -> dict:
     total_media = db.query("SELECT count(*) c FROM media_tasks", one=True)["c"]
     return {
         "db_bytes": db_bytes,
+        "slim_db_bytes": slim_db_bytes,
         "credentials_count": cred_count,
         "credentials_bytes": cred_bytes,
         "meta_root": str(meta_root),
@@ -189,6 +211,7 @@ def build_migration_bundle(
     include_credentials: bool = False,
     meta_mode: str = "nfo",
     slim_db: bool = True,
+    bundle_type: str = "migration",
 ) -> tuple[Path, Path, str, dict]:
     """生成全量迁移 ZIP 包到临时工作目录，返回 (work_dir, zip_path, filename, manifest)。"""
     if meta_mode not in ("none", "nfo", "all"):
@@ -204,7 +227,8 @@ def build_migration_bundle(
         )
         db_size = snap_db.stat().st_size
 
-        fname = f"autosave_migration_{time.strftime('%Y%m%d_%H%M%S')}.zip"
+        prefix = "autosave_auto_" if bundle_type == "auto" else "autosave_migration_"
+        fname = f"{prefix}{time.strftime('%Y%m%d_%H%M%S')}.zip"
         zip_path = work_dir / fname
         cred_files: list[str] = []
         meta_nfo_count = 0
@@ -252,6 +276,7 @@ def build_migration_bundle(
                 "format": BUNDLE_FORMAT,
                 "version": BUNDLE_VERSION,
                 "app_version": config.APP_VERSION,
+                "bundle_type": bundle_type,
                 "exported_at": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "include_credentials": bool(include_credentials),
                 "meta_mode": meta_mode,

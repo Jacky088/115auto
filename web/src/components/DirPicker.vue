@@ -1,11 +1,11 @@
 <template>
-  <el-dialog :model-value="modelValue" :title="title" :width="'min(600px, 94vw)'" top="6vh"
+  <el-dialog :model-value="modelValue" :title="title" :width="'min(600px, 94vw)'" align-center
              :close-on-click-modal="false" @update:model-value="emitVisible" @open="onOpen">
     <!-- 未登录 115 时只提示，不展示目录 -->
     <el-alert v-if="loginErr" type="warning" show-icon :closable="false">
       <template #title>{{ loginErr }}</template>
       <div style="margin-top: 6px">
-        <el-button text type="primary" @click="goAccount">去账号管理扫码登录 →</el-button>
+        <el-button text type="primary" @click="goAccount">去账号管理登录（可扫码或手动导入 Cookie） →</el-button>
       </div>
     </el-alert>
 
@@ -44,7 +44,7 @@
             <span>新建文件夹</span>
           </el-button>
           <el-button v-if="allowSkip" @click="pickSpecial('skip')">跳过（不转存）</el-button>
-          <el-button v-if="allowEmpty" @click="pickSpecial('')">清空（跟随分享转存）</el-button>
+          <el-button v-if="allowEmpty" @click="pickSpecial('')">留空（跟随分享转存目录）</el-button>
         </div>
         <div class="dp-footer-right">
           <el-button @click="emitVisible(false)">取消</el-button>

@@ -118,7 +118,7 @@
           <el-button @click="step = 1">上一步</el-button>
           <el-button plain @click="step = 3">跳过，稍后配置</el-button>
           <el-button type="primary" :loading="adding" :disabled="wizardSubOnly === null"
-                     @click="addChannels">下一步</el-button>
+                     @click="addChannels">添加并继续</el-button>
         </div>
       </div>
 
@@ -156,8 +156,8 @@
                 </div>
               </div>
               <el-button type="primary" size="large" :loading="starting"
-                         :disabled="!ready.data?.ready" @click="startNow">运行</el-button>
-              <el-button plain @click="skipFinish">稍后再启动（直接进入系统，顶栏可随时点击「运行」）</el-button>
+                         :disabled="!ready.data?.ready" @click="startNow">开始运行</el-button>
+              <el-button plain @click="skipFinish">稍后再启动（直接进入系统，顶栏可随时点击「开始运行」）</el-button>
             </div>
           </template>
         </el-result>
@@ -168,7 +168,7 @@
     <CookieImportDialog v-model="cookieVisible" @success="onCookieImported" />
 
     <!-- Userbot 登录弹窗：选择 Userbot 模式后必须登录 TG 账号，否则校验不通过 -->
-    <el-dialog v-model="ubDialog" title="登录 Telegram Userbot" :width="'min(500px, 94vw)'"
+    <el-dialog v-model="ubDialog" title="登录 Telegram Userbot" :width="'min(500px, 94vw)'" align-center
                :close-on-click-modal="false">
       <UserbotLogin compact @update="onUbUpdate" />
       <template #footer>
@@ -309,7 +309,7 @@ const skipFinish = async () => {
       `当前还缺：
 ${reasons}
 
-进入后可在「账号管理」补全配置，再到顶栏点击「运行」。`,
+进入后可在「账号管理」补全配置，再到顶栏点击「开始运行」。`,
       '配置尚未完成，仍要进入系统？',
       {
         confirmButtonText: '进入系统',

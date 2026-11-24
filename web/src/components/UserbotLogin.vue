@@ -132,7 +132,7 @@ const startLogin = async () => {
 const _finish = async () => {
   resetFlow()
   await loadStatus()
-  ElMessage.success('Userbot 登录成功，建议点「测试」验证频道可见性')
+  ElMessage.success('Userbot 登录成功，建议点「测试连接与频道」验证频道可见性')
   emit('update')
 }
 

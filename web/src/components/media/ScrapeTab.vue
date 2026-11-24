@@ -332,7 +332,7 @@
   </div>
 
   <!-- 手动搜索 TMDB 弹窗 -->
-  <el-dialog v-model="manualDialog.open" title="手动搜索 TMDB 并暂存绑定" width="min(640px, 94vw)">
+  <el-dialog v-model="manualDialog.open" title="手动搜索 TMDB 并暂存绑定" width="min(640px, 94vw)" align-center>
     <div class="mb12 meta-hint">
       待绑定文件：<b>{{ manualDialog.task?.orig_name }}</b>（选定后置为「已选待提交」，需点「提交队列」才执行）
     </div>
@@ -347,7 +347,7 @@
       <el-button type="primary" :loading="manualDialog.loading" @click="searchManualTmdb">搜索</el-button>
     </div>
     <div v-if="!manualDialog.results.length && !manualDialog.loading" class="empty-box">
-      请输入关键片名搜索 TMDB，或在上方输入框输入结果后点击右侧「设为候选」。
+      请输入片名或剧名搜索 TMDB；在结果列表中点击右侧「选定暂存」即可加入待提交候选。
     </div>
     <div class="manual-results">
       <div v-for="r in manualDialog.results" :key="r.kind + '-' + r.tmdb_id" class="mr-row">
@@ -380,7 +380,7 @@
   </el-dialog>
 
   <!-- 本地元数据 NFO / 海报预览弹窗 -->
-  <el-dialog v-model="metaDialog.open" title="本地持久化 NFO 与海报详情（零 115 上传）" width="min(760px, 94vw)">
+  <el-dialog v-model="metaDialog.open" title="本地持久化 NFO 与海报详情（零 115 上传）" width="min(760px, 94vw)" align-center>
     <div v-if="metaDialog.data" class="meta-view">
       <div class="mb12" style="font-size:12px;color:var(--text-muted)">
         存储位置：<code>{{ metaDialog.data.meta_dir }}</code>
@@ -400,7 +400,7 @@
 </template>
 
 <script setup>
-import { computed, inject, ref } from 'vue'
+import { computed, inject, ref, watch } from 'vue'
 import { api, errMsg, fmtTime, toast } from '../../api'
 import { confirmAction } from '../../composables/confirmDialog'
 
@@ -435,6 +435,7 @@ const pagedTasks = computed(() => {
   const start = (taskPage.value - 1) * taskPageSize.value
   return tasks.value.slice(start, start + taskPageSize.value)
 })
+watch(taskPageSize, () => { taskPage.value = 1 })
 
 const scrapeBtnDisabled = computed(() => !status.value.running || isBusy.value || !status.value.tmdb_configured || activeScrapeRules.value.length === 0)
 const commitDisabled = computed(() =>
@@ -460,6 +461,9 @@ function taskStatusText(t) {
     skipped: '已跳过',
     failed: '失败',
     ignored: '已忽略',
+    no_match: '未匹配到影片',
+    pending: '待处理',
+    canceled: '已取消',
   }[t.status] || t.status
 }
 

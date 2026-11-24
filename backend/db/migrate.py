@@ -1,4 +1,5 @@
 """数据库轻量迁移与告警日志。"""
+import json
 import sqlite3
 
 def _migrate(conn=None):
@@ -106,6 +107,27 @@ def _migrate(conn=None):
             " WHERE status IN ('queued','running','submitted')")
     except sqlite3.Error:
         pass  # 极端情况下仍有冲突数据：跳过索引，竞态兜底由 pipeline 捕获冲突
+
+    # 迁移：脱钩定时自动备份的默认 TG Bot 开通状态；
+    # 旧版本升级时 auto_backup_channels 尚不存在，若此前已开启定时备份，回填 TG Bot 通道，
+    # 避免升级后调度条件因通道为空而静默跳过（用户后续手动清空则不再回填）。
+    try:
+        row_ch = conn.execute("SELECT value FROM settings WHERE key='auto_backup_channels'").fetchone()
+        row_en = conn.execute("SELECT value FROM settings WHERE key='auto_backup_enabled'").fetchone()
+        try:
+            enabled = bool(json.loads(row_en[0])) if row_en else False
+        except Exception:
+            enabled = False
+        if row_ch is None:
+            if enabled:
+                conn.execute(
+                    "INSERT INTO settings(key,value) VALUES('auto_backup_channels','[\"tgbot\"]')"
+                    " ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+        elif row_ch[0] in ('["tgbot"]', "['tgbot']") and not enabled:
+            conn.execute("UPDATE settings SET value='[]' WHERE key='auto_backup_channels'")
+    except Exception:
+        pass
+
     return _warnings
 
 

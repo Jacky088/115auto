@@ -14,6 +14,7 @@ import time
 
 from .. import database as db
 from ..core import classifier, filters, logstream, transfer_gate
+from ..core.executors import run_ext_thread
 from ..pan115 import client as pan
 from . import jobs
 
@@ -522,9 +523,10 @@ async def queue_worker():
     space_logged = False
     last_schedule_active = False
     # 启动时清掉上次进程遗留的挂起标记：门闸会在首轮重新探测，避免误显示「空间不足」
-    if db.get_setting("space_blocked", False):
-        db.set_setting("space_blocked", False)
-        db.set_setting("space_blocked_reason", "")
+    # （协程内不直调同步 SQLite，与同文件其它位置口径一致，避免全局锁竞争时阻塞事件循环）
+    if await asyncio.to_thread(db.get_setting, "space_blocked", False):
+        await asyncio.to_thread(db.set_setting, "space_blocked", False)
+        await asyncio.to_thread(db.set_setting, "space_blocked_reason", "")
     while True:
         try:
             mark_worker_alive()
@@ -532,9 +534,13 @@ async def queue_worker():
             await transfer_gate.wait_transfer_worker_allowed()
 
             try:
-                gates = await asyncio.wait_for(asyncio.to_thread(_poll_worker_gates), timeout=15.0)
+                # 走 115 专用线程池：门禁轮询内含真实空间请求（内层 8s 上限），
+                # 放在默认 asyncio 线程池会与整理/刮削/备份等阻塞任务抢线程而饿死。
+                # 外层给 40s：这是「线程池排队 + SQLite 读取 + 网络请求」的总预算，
+                # 必须明显大于内层（等锁 10s + 网络 8s），否则 DB 段或排队耗时就足以先触发超时。
+                gates = await asyncio.wait_for(pan.run_pan_thread(_poll_worker_gates), timeout=40.0)
             except asyncio.TimeoutError:
-                logstream.warn("transfer", "工作器门禁状态轮询超时（>15s），跳过本轮等待下次检测")
+                logstream.warn("transfer", "工作器门禁状态轮询超时（>40s），跳过本轮等待下次检测")
                 await asyncio.sleep(5)
                 continue
             (running, paused, sched_on, in_win, jitter_min, limit, quota, waiting,
@@ -567,8 +573,8 @@ async def queue_worker():
                                    "任务保留在队列，清理空间后自动恢复")
                     await asyncio.to_thread(db.set_setting, "space_blocked", True)
                     await asyncio.to_thread(db.set_setting, "space_blocked_reason", space_reason)
-                    await asyncio.to_thread(jobs.check_space_alert,
-                                            f"转存队列已暂停（{space_reason}）")
+                    await run_ext_thread(jobs.check_space_alert,
+                                         f"转存队列已暂停（{space_reason}）")
                     space_logged = True
                 await asyncio.sleep(60)
                 continue
@@ -577,7 +583,7 @@ async def queue_worker():
                 space_logged = False
                 await asyncio.to_thread(db.set_setting, "space_blocked", False)
                 await asyncio.to_thread(db.set_setting, "space_blocked_reason", "")
-                await asyncio.to_thread(jobs.notify, "✅ 115 空间已恢复，转存队列自动继续。")
+                await run_ext_thread(jobs.notify, "✅ 115 空间已恢复，转存队列自动继续。")
 
             # 定时计划窗口检查
             if not in_win:
@@ -677,7 +683,7 @@ async def queue_worker():
                 )
                 logstream.error("transfer", f"任务永久失败: {str(e)}")
                 pan.note_115_error(str(e))
-                await asyncio.to_thread(
+                await run_ext_thread(
                     jobs.notify_failure, job.get("kind", "share"),
                     classifier.headline(job.get("title", "")) or job.get("title", ""),
                     job.get("category", ""), job.get("channel", ""),
