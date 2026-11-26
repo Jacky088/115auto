@@ -7,16 +7,30 @@
         <template #header><b>115 网盘</b></template>
         <el-descriptions :column="1" border size="small">
           <el-descriptions-item label="登录状态">
-            <el-tag v-if="s115.login" type="success" size="small">有效</el-tag>
-            <el-tag v-else type="danger" size="small">未登录 / 失效</el-tag>
+            <div class="status-cell">
+              <el-tag v-if="s115.login" type="success" size="small">有效</el-tag>
+              <el-tag v-else type="danger" size="small">未登录 / 失效</el-tag>
+              <span v-if="s115.latency_ms !== undefined && s115.latency_ms !== null" class="status-meta-tip">
+                · 延迟 <b>{{ s115.latency_ms }}ms</b>
+              </span>
+              <span v-if="s115.checked_at" class="status-meta-tip">
+                （检测于 {{ fmtClock(s115.checked_at) }}）
+              </span>
+            </div>
           </el-descriptions-item>
           <el-descriptions-item label="账号">{{ s115.name || '-' }}</el-descriptions-item>
-          <el-descriptions-item label="说明">转存通过 Cookie 完成，系统按「设置 → 后台巡检周期」自动巡检有效性。国内服务器推荐扫码登录；海外服务器扫码易被风控，可点击「手动导入 Cookie」</el-descriptions-item>
+          <el-descriptions-item label="说明">使用 Cookie 维持登录，并按「系统设置 → 风控管理」自动检测有效性。国内推荐扫码登录，海外服务器建议「手动导入 Cookie」。</el-descriptions-item>
         </el-descriptions>
         <div class="btn-row" style="margin-top: 14px">
           <el-button type="primary" title="重新扫码会覆盖当前 Cookie" @click="openQr">扫码登录 / 重新登录</el-button>
           <el-button @click="cookieVisible = true">手动导入 Cookie</el-button>
-          <el-button @click="load">刷新状态</el-button>
+          <el-button
+            :loading="s115Refreshing"
+            :disabled="s115Cooldown > 0"
+            @click="refresh115Status"
+          >
+            {{ s115Cooldown > 0 ? `已刷新 (${s115Cooldown}s)` : '刷新状态' }}
+          </el-button>
         </div>
       </el-card>
 
@@ -30,15 +44,29 @@
             </el-tag>
           </el-descriptions-item>
           <el-descriptions-item label="连接状态">
-            <el-tag :type="tg.connected ? 'success' : 'danger'" size="small">
-              {{ tg.connected ? '已连接' : '未连接' }}
-            </el-tag>
+            <div class="status-cell">
+              <el-tag :type="tg.connected ? 'success' : 'danger'" size="small">
+                {{ tg.connected ? '已连接' : '未连接' }}
+              </el-tag>
+              <span v-if="tgTestResult?.latency_ms !== undefined && tgTestResult?.latency_ms !== null" class="status-meta-tip">
+                · 延迟 <b>{{ tgTestResult.latency_ms }}ms</b>
+              </span>
+              <span v-if="tgTestResult?.tested_at" class="status-meta-tip">
+                （检测于 {{ fmtClock(tgTestResult.tested_at) }}）
+              </span>
+            </div>
           </el-descriptions-item>
           <el-descriptions-item label="说明">用于实时监听频道（含私密频道）。建议使用小号；api_id/api_hash 从 my.telegram.org 申请</el-descriptions-item>
         </el-descriptions>
         <div class="btn-row" style="margin-top: 14px">
           <el-button type="primary" @click="tgVisible = true">登录 / 重新登录</el-button>
-          <el-button :loading="tgTesting" @click="runTgTest">测试连接与频道</el-button>
+          <el-button
+            :loading="tgTesting"
+            :disabled="tgCooldown > 0"
+            @click="runTgTest"
+          >
+            {{ tgCooldown > 0 ? `已测试 (${tgCooldown}s)` : '测试连接与频道' }}
+          </el-button>
         </div>
         <div v-if="tgTestResult" class="tg-test">
           <el-alert v-if="!tgTestResult.ok && tgTestResult.err" :title="tgTestResult.err"
@@ -114,12 +142,18 @@
             <el-switch :model-value="!!row.enabled" @change="(v) => toggle(row, v)" />
           </template>
         </el-table-column>
-        <el-table-column label="仅订阅" width="90">
+        <el-table-column label="仅订阅" width="100">
           <template #header>
-            <el-tooltip content="开启后该频道只转存命中订阅关键词的内容；关闭则全盘转存。每个频道独立设置"
-                        placement="top">
-              <span>仅订阅 ⓘ</span>
-            </el-tooltip>
+            <span class="info-tip-label">
+              <span>仅订阅</span>
+              <el-tooltip
+                content="开启后该频道只转存命中订阅关键词的内容；关闭则全盘转存。每个频道独立设置"
+                placement="top"
+                effect="dark"
+              >
+                <el-icon class="info-tip-icon" :size="14" tabindex="0"><InfoFilled /></el-icon>
+              </el-tooltip>
+            </span>
           </template>
           <template #default="{ row }">
             <el-tooltip
@@ -133,7 +167,7 @@
             </el-tooltip>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="180" fixed="right">
+        <el-table-column label="操作" width="220" fixed="right">
           <template #default="{ row }">
             <div class="table-actions">
               <el-button type="primary" text @click="preview(row)">预览</el-button>
@@ -146,7 +180,7 @@
     </el-card>
 
     <!-- 115 扫码对话框 -->
-    <el-dialog v-model="qrVisible" title="115 扫码登录" :width="'min(380px, 94vw)'" align-center @close="stopQrPoll">
+    <el-dialog v-model="qrVisible" title="115 扫码登录" :width="'min(380px, calc(100vw - 36px))'" align-center @close="stopQrPoll">
       <div style="text-align: center; min-height: 220px">
         <template v-if="qr.svg">
           <!-- 后端生成的 SVG 改用 data URI 承载：不再以 v-html 直插外部接口数据 -->
@@ -171,12 +205,13 @@
     <CookieImportDialog v-model="cookieVisible" @success="load" />
 
     <!-- Userbot 登录对话框 -->
-    <el-dialog v-model="tgVisible" title="Userbot 登录" :width="'min(480px, 94vw)'" align-center @close="load">
+    <el-dialog v-model="tgVisible" title="Userbot 登录" :width="'min(480px, calc(100vw - 36px))'" align-center @close="load">
       <UserbotLogin compact @update="load" />
     </el-dialog>
 
     <!-- 添加频道对话框 -->
-    <el-dialog v-model="addVisible" title="添加监控频道" :width="'min(460px, 94vw)'" align-center>
+    <el-dialog v-model="addVisible" title="添加监控频道" :width="'min(460px, calc(100vw - 36px))'" align-center
+               @close="addForm.name = ''; addForm.subOnly = null">
       <el-form label-width="96px">
         <el-form-item label="频道">
           <el-input v-model="addForm.name" placeholder="@channel_name 或 https://t.me/s/xxx" />
@@ -194,11 +229,10 @@
               <el-radio :value="true">仅订阅</el-radio>
             </el-radio-group>
             <div class="tip" style="margin-top: 4px">
-              全盘转存 = 该频道的所有资源链接都转存；仅订阅 = 只转存命中订阅关键词的内容
-              （与 Bot 指令 /add 的 on|off 一致）
+              全盘转存：转存该频道全部资源；仅订阅：仅转存命中订阅关键词的内容。
             </div>
             <div v-if="addForm.subOnly === null" class="warn-text" style="font-size: var(--fs-caption); margin-top: 4px">
-              ⚠️ 必须选择订阅模式（全盘转存 或 仅订阅），选择后才能确定
+              ⚠️ 请先选择订阅模式
             </div>
           </div>
         </el-form-item>
@@ -233,14 +267,18 @@
 <script setup>
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, CircleCheckFilled, CircleCloseFilled } from '@element-plus/icons-vue'
-import { api, errMsg, fmtTime, highlightLinks, statusLabel, statusTagType } from '../api'
+import { Plus, CircleCheckFilled, CircleCloseFilled, InfoFilled } from '@element-plus/icons-vue'
+import { api, errMsg, fmtClock, fmtTime, highlightLinks, saveOk, statusLabel, statusTagType } from '../api'
 import { confirmAction } from '../composables/confirmDialog'
+import { useCooldown } from '../composables/useCooldown'
 import CookieImportDialog from '../components/CookieImportDialog.vue'
 import UserbotLogin from '../components/UserbotLogin.vue'
 
 // ---------- 115 与 Userbot 账号状态 ----------
 const s115 = ref({})
+const s115Refreshing = ref(false)
+const { cooldown: s115Cooldown, startCooldown: startS115Cooldown } = useCooldown(5)
+
 const tg = ref({})
 const qrVisible = ref(false)
 const cookieVisible = ref(false)
@@ -250,6 +288,26 @@ let pollErrCount = 0
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const stopQrPoll = () => { pollSeq++ }
+
+const refresh115Status = async () => {
+  if (s115Refreshing.value || s115Cooldown.value > 0) return
+  s115Refreshing.value = true
+  try {
+    const { data } = await api.get('/api/account/115/status?force=1')
+    s115.value = data
+    startS115Cooldown(5)
+    const lat = data.latency_ms !== undefined && data.latency_ms !== null ? `（耗时 ${data.latency_ms}ms）` : ''
+    if (data.login) {
+      saveOk(`115 账号状态有效${lat}`)
+    } else {
+      ElMessage.warning(`115 未登录或 Cookie 已失效${lat}`)
+    }
+  } catch (e) {
+    ElMessage.error(errMsg(e))
+  } finally {
+    s115Refreshing.value = false
+  }
+}
 
 // ---------- 频道管理状态与逻辑 ----------
 const channels = ref([])
@@ -346,15 +404,28 @@ const pollLoop = async (my) => {
 const tgVisible = ref(false)
 const tgTesting = ref(false)
 const tgTestResult = ref(null)
+const { cooldown: tgCooldown, startCooldown: startTgCooldown } = useCooldown(5)
 
 const runTgTest = async () => {
+  if (tgTesting.value || tgCooldown.value > 0) return
   tgTesting.value = true
   tgTestResult.value = null
   try {
-    tgTestResult.value = (await api.post('/api/tg/userbot/test')).data
+    const { data } = await api.post('/api/tg/userbot/test')
+    tgTestResult.value = data
+    startTgCooldown(5)
+    const lat = data.latency_ms !== undefined && data.latency_ms !== null ? `（耗时 ${data.latency_ms}ms）` : ''
+    if (data.ok) {
+      saveOk(`Userbot 连接测试通过${lat}`)
+    } else {
+      ElMessage.warning(`Userbot 连接测试未通过：${data.err || '部分频道无法访问'}${lat}`)
+    }
   } catch (e) {
     tgTestResult.value = { ok: false, err: errMsg(e) }
-  } finally { tgTesting.value = false }
+    ElMessage.error(errMsg(e))
+  } finally {
+    tgTesting.value = false
+  }
 }
 
 // ---- 频道增删改查操作 ----
@@ -433,9 +504,9 @@ const changeType = async (row, v) => {
     const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
       .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;')
     ElMessageBox.alert(
-      `已将 @${esc(row.name)} 的接入方式改为「${label[v]}」。<br/><br/>` +
-      `<b>⚠️ 注意：</b>如系统当前正在运行，需点击顶栏的「停止运行」再「开始运行」（或重启容器）以重启监听线程。`,
-      '修改成功（需重启监听生效）',
+      `已将 @${esc(row.name)} 改为「${label[v]}」。<br/><br/>` +
+      `<b>⚠️ 注意：</b>若系统正在运行，请在顶栏「停止运行」后再「开始运行」使其生效。`,
+      '修改成功（需重启运行生效）',
       { dangerouslyUseHTMLString: true, confirmButtonText: '知道了' },
     ).catch(() => {})
   } catch (e) {
@@ -449,12 +520,14 @@ const reset = async (row) => {
     title: `确认重置频道 @${row.name}？`,
     message: '将清除该频道已处理与去重记录，并从最新消息重新开始抓取。',
     confirmText: '确认重置',
+    danger: true,
   })) return
   try {
     const { data } = await api.post(`/api/channels/${row.id}/reset`)
     ElMessage.success(`已重置 @${row.name}：清除已处理记录，从最新消息开始抓取`)
     row.msg_count = data.msg_count ?? 0
     row.fail_count = 0
+    row.last_fetch_at = null
   } catch (e) { ElMessage.error(errMsg(e)) }
 }
 
@@ -516,14 +589,17 @@ onUnmounted(() => {
 .account-grid :deep(.el-descriptions__label) { white-space: nowrap; }
 .qr-box { width: 200px; margin: 0 auto; cursor: pointer; background: #fff; padding: 8px; border-radius: 8px; }
 .qr-box :deep(svg), .qr-box img { width: 100%; height: auto; display: block; }
-.qr-err { color: #f56c6c; font-size: var(--fs-body); margin: 4px; }
+.qr-err { color: var(--el-color-danger, #ef4444); font-size: var(--fs-body); margin: 4px; }
 .tg-test { margin-top: 12px; display: flex; flex-direction: column; gap: 6px; }
 .tg-ch { display: flex; align-items: center; gap: 6px; font-size: var(--fs-body); }
 .tg-ch .ok { color: var(--el-color-success); }
-.tg-ch .bad { color: #f56c6c; }
+.tg-ch .bad { color: var(--el-color-danger, #ef4444); }
 .tg-ch-name { font-weight: 600; }
 .tg-ch-sub { color: var(--el-text-color-secondary); }
-.tg-ch-err { color: #f56c6c; font-size: var(--fs-caption); }
+.tg-ch-err { color: var(--el-color-danger, #ef4444); font-size: var(--fs-caption); }
+
+.status-cell { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.status-meta-tip { font-size: var(--fs-caption); color: var(--text-muted); }
 
 /* 消息预览卡片 */
 .msg-item {

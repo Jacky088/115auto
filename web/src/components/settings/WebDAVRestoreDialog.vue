@@ -2,7 +2,7 @@
   <el-dialog
     :model-value="modelValue"
     title="从 WebDAV 浏览并恢复历史备份"
-    width="760px"
+    :width="'min(760px, calc(100vw - 44px))'"
     align-center
     @update:model-value="$emit('update:modelValue', $event)"
   >
@@ -79,10 +79,6 @@
         恢复将整库覆盖当前运行库，自动迁移媒体元数据并保持系统停止；恢复前建议先在本地留存备份。
       </div>
     </div>
-
-    <template #footer>
-      <el-button @click="$emit('update:modelValue', false)">关闭</el-button>
-    </template>
   </el-dialog>
 </template>
 
@@ -96,6 +92,8 @@ const props = defineProps({
   modelValue: { type: Boolean, default: false },
   rootDir: { type: String, default: '/115AutoSave_Backup' },
   initialFilter: { type: String, default: 'all' },
+  restoreCredentials: { type: Boolean, default: false },
+  restoreMeta: { type: Boolean, default: true },
 })
 
 defineEmits(['update:modelValue'])
@@ -168,10 +166,20 @@ const restoreItem = async (row) => {
   if (!row?.name) return
   restoringFile.value = row.name
   try {
-    // 1. 获取预览
-    const { data: prevResp } = await api.post(`/api/backup/webdav/restore_preview?filename=${encodeURIComponent(row.name)}`)
+    // 1. 获取预览（大包需流式从 WebDAV 下载，给予 10 分钟超时上限）
+    const { data: prevResp } = await api.post(
+      `/api/backup/webdav/restore_preview?filename=${encodeURIComponent(row.name)}`,
+      null,
+      { timeout: 600000 },
+    )
     const p = prevResp.preview || {}
     const c = p.counts || {}
+    const credTip = props.restoreCredentials
+      ? '凭据与 Session：将随包覆盖还原并刷新登录令牌；'
+      : '凭据与 Session：保持本机当前密码与登录态不变；'
+    const metaTip = props.restoreMeta
+      ? '媒体刮削资产：将还原并自动迁移路径到本机目录。'
+      : '媒体刮削资产：跳过不还原。'
 
     const ok = await confirmAction({
       title: '从 WebDAV 恢复迁移包？',
@@ -179,7 +187,8 @@ const restoreItem = async (row) => {
         `确定拉取并恢复此迁移包？\n` +
         `文件名：${row.name}（${fmtSize(row.size)}）\n` +
         `导出时间：${p.exported_at || '未知'}\n` +
-        `数据库内容：设置 ${c.settings || 0} 项、转存规则 ${c.rules || 0} 条、转存记录 ${c.transfers || 0} 条\n\n` +
+        `数据库内容：设置 ${c.settings || 0} 项、转存规则 ${c.rules || 0} 条、转存记录 ${c.transfers || 0} 条\n` +
+        `${credTip}\n${metaTip}\n\n` +
         `恢复将整体替换当前数据，系统将回到停止状态。`
       ),
       confirmText: '覆盖恢复',
@@ -189,8 +198,13 @@ const restoreItem = async (row) => {
     })
     if (!ok) return
 
-    // 2. 执行恢复
-    await api.post(`/api/backup/webdav/restore_apply?filename=${encodeURIComponent(row.name)}&restore_credentials=false&restore_meta=true`)
+    // 2. 执行恢复（透传用户勾选的凭据与元数据开关，10 分钟长超时）
+    const q = new URLSearchParams({
+      filename: row.name,
+      restore_credentials: String(!!props.restoreCredentials),
+      restore_meta: String(!!props.restoreMeta),
+    })
+    await api.post(`/api/backup/webdav/restore_apply?${q.toString()}`, null, { timeout: 600000 })
     await ElMessageBox.alert('WebDAV 迁移包恢复完成，页面即将刷新。', '恢复成功', { confirmButtonText: '刷新页面' })
     location.reload()
   } catch (e) {
@@ -234,5 +248,19 @@ const restoreItem = async (row) => {
   display: flex;
   align-items: center;
   gap: 4px;
+}
+
+@media (max-width: 768px) {
+  .webdav-restore-dialog .dialog-tip-row {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+  }
+  .dialog-controls {
+    width: 100%;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
 }
 </style>

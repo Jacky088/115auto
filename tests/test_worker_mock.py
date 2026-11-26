@@ -437,7 +437,7 @@ jobs.httpx.post = lambda url, **k: (sent_bodies.append(k["json"]), _Resp(200))[1
 from backend.api import manage as _manage  # noqa: E402
 r = _manage.test_notify({"token": "unsaved:tok", "chat_id": "777"})
 check("API 用传入值测试", sent_bodies[0]["chat_id"] == "777", str(sent_bodies))
-check("成功返回 ok", r == {"ok": True})
+check("成功返回 ok", r.get("ok") is True)
 jobs.httpx.post = orig_post
 
 print("\n=== 14. 分享转存 / 云下载分别指定目录 ===")
@@ -1151,6 +1151,7 @@ from backend.core import subscribe as sub_mod  # noqa: E402
 db.set_setting("subscription_only", True)
 db.execute("INSERT OR IGNORE INTO subscriptions(keyword,created_at) VALUES('某某电影',?)",
            (time.time(),))
+sub_mod.invalidate_cache()
 try:
     r = pipeline.process_message("test_ch", next_mid(),
                                  "别的剧集分享 https://115.com/s/sub0000?password=ab12")
@@ -1167,6 +1168,7 @@ try:
     db.execute("INSERT INTO subscriptions(keyword,aliases,created_at) VALUES"
                "('多订阅测试 第二季',?,?)",
                (json.dumps(["多订阅测试 2"], ensure_ascii=False), time.time()))
+    sub_mod.invalidate_cache()
     hits = sub_mod.match_all("多订阅测试 第二季 S02E01 1080p")
     check("一条消息命中多个订阅", len({h["id"] for h in hits}) >= 2, str(hits))
     row1 = dict(db.query("SELECT * FROM subscriptions WHERE keyword='多订阅测试'", one=True))
@@ -1186,6 +1188,7 @@ try:
 finally:
     db.set_setting("subscription_only", False)
     db.execute("DELETE FROM subscriptions WHERE keyword LIKE '多订阅测试%'")
+    sub_mod.invalidate_cache()
 
 print("\n=== 28. （已移除）TMDB 刮削 → 确认模块删除后转存不受影响 ===")
 r = pipeline.process_message("test_ch", next_mid(),

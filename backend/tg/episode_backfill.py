@@ -16,6 +16,7 @@
 """
 import asyncio
 import re
+import threading
 import uuid
 
 import httpx
@@ -31,14 +32,16 @@ _PAGE_SLEEP = 1.5     # 翻页间隔（秒），防限流
 _queue: asyncio.Queue | None = None
 _searched_min: dict[tuple[str, str], int] = {}  # (频道, 剧名) → 已翻到的最早消息 ID
 _PENDING_KEY = "backfill_pending"  # 待处理补全请求持久化（重启后重新入队）
+_persist_lock = threading.Lock()
 
 
 def _persist_add(req: dict) -> None:
     """补全请求落库：重启后不丢失用户显式发起的补全。"""
     try:
-        pending = db.get_setting(_PENDING_KEY, []) or []
-        pending.append(req)
-        db.set_setting(_PENDING_KEY, pending)
+        with _persist_lock:
+            pending = db.get_setting(_PENDING_KEY, []) or []
+            pending.append(req)
+            db.set_setting(_PENDING_KEY, pending)
     except Exception as e:
         # 只影响「重启后自动恢复」，当前请求仍会正常执行；记日志便于排查为何重启后丢失
         logstream.warn("backfill", f"补全请求持久化失败（重启后不会自动恢复）: {e}")
@@ -51,13 +54,14 @@ def _persist_done(req: dict) -> None:
     按值相等删除会把未处理的另一条一并删掉（重启后丢失）。旧版请求没有 uid，
     回退按值比较以兼容升级前的存量数据。"""
     try:
-        pending = db.get_setting(_PENDING_KEY, []) or []
-        uid = req.get("uid")
-        if uid:
-            pending = [p for p in pending if p.get("uid") != uid]
-        else:
-            pending = [p for p in pending if p != req]
-        db.set_setting(_PENDING_KEY, pending)
+        with _persist_lock:
+            pending = db.get_setting(_PENDING_KEY, []) or []
+            uid = req.get("uid")
+            if uid:
+                pending = [p for p in pending if p.get("uid") != uid]
+            else:
+                pending = [p for p in pending if p != req]
+            db.set_setting(_PENDING_KEY, pending)
     except Exception as e:
         logstream.warn("backfill", f"补全请求落库清理失败（重启后可能重复处理）: {e}")
 
@@ -189,9 +193,10 @@ async def episode_backfill_loop():
             # 门闸协同：处于整理排空或独占移动期时挂起等待，避免向排空中队列插入新任务
             await transfer_gate.wait_intake_allowed()
             await _process_request(req)
-            await asyncio.to_thread(_persist_done, req)
         except Exception as e:
             logstream.error("backfill", f"追剧向前补全异常: {logstream.exc(e)}")
+        finally:
+            await asyncio.to_thread(_persist_done, req)
 
 
 async def _process_request(req: dict) -> None:

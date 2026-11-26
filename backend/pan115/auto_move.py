@@ -52,6 +52,7 @@ def move_matched_files_for_rule(source_dir: str, target_dir: str,
                                 rule_media_type: str = "auto",
                                 ambiguous_kws: set | frozenset | None = None,
                                 match_by_dir: bool = False,
+                                allow_english: bool = False,
                                 skip_stats_out: dict | None = None,
                                 include_ids: set[str] | None = None) -> tuple:
     """按映射规则排队移动满足条件的文件（做好 115 严格风控）：
@@ -181,8 +182,8 @@ def move_matched_files_for_rule(source_dir: str, target_dir: str,
                 continue
             if parse_season_number(sd_name) is not None:
                 continue  # 排除裸露的季目录
-            if not _CHINESE_CHAR_RE.search(sd_name):
-                continue  # 必须包含中文汉字，排除纯英文/纯数字目录
+            if not allow_english and not _CHINESE_CHAR_RE.search(sd_name):
+                continue  # 默认必须包含中文汉字；开启 allow_english 后允许英文剧集/电影目录
             sd_kw = extract_target_folder_name(sd_name)
             sd_norm_kw = normalize_title(sd_kw, fuzzy_t2s=fuzzy_t2s)
             if len(sd_norm_kw) < 2:
@@ -233,7 +234,10 @@ def move_matched_files_for_rule(source_dir: str, target_dir: str,
                 limit=2000 if cur_depth == 0 else 1000,
                 sleep_sec=0.2 if cur_depth == 0 else 0.25,
             )
-        except Exception:
+        except Exception as e:
+            if cur_depth == 0 or _pan()._hits_risk_keyword(str(e).lower()):
+                raise
+            logstream.warn("auto_move", f"跳过不可读子目录 {cur_folder_name or cur_cid}: {e}")
             continue
 
         # BDMV / VIDEO_TS 原盘目录保护：不拆散枚举内部流文件
@@ -285,9 +289,11 @@ def move_matched_files_for_rule(source_dir: str, target_dir: str,
                 canon_names = {strip_duplicate_suffix(n)[0] for n in raw_names}
                 dest_file_cache[cid] = raw_names
                 dest_canon_cache[cid] = canon_names
-            except Exception:
-                dest_file_cache[cid] = set()
-                dest_canon_cache[cid] = set()
+            except Exception as e:
+                if _pan()._hits_risk_keyword(str(e).lower()):
+                    raise
+                logstream.warn("auto_move", f"列举目标目录 {cid} 文件名失败，暂跳过缓存: {e}")
+                return set(), set()
         return dest_file_cache[cid], dest_canon_cache[cid]
 
     dest_sha_cache: dict[int, set[str]] = {}
@@ -304,8 +310,11 @@ def move_matched_files_for_rule(source_dir: str, target_dir: str,
                     str(e.get("sha1") or "")
                     for e in _pan().list_entries(cid, limit=2000) if e.get("sha1")
                 }
-            except Exception:
-                dest_sha_cache[cid] = set()
+            except Exception as e:
+                if _pan()._hits_risk_keyword(str(e).lower()):
+                    raise
+                logstream.warn("auto_move", f"列举目标目录 {cid} SHA1 失败，暂跳过缓存: {e}")
+                return set()
         return dest_sha_cache[cid]
 
     def get_dir_episode_keys(cid: int, folder_hint: str = "") -> set[tuple[int, int, str, str]]:
@@ -334,8 +343,11 @@ def move_matched_files_for_rule(source_dir: str, target_dir: str,
                         if s_idx is not None:
                             mapping[s_idx] = int(str(item["id"]))
                             names_map[s_idx] = sname
-            except Exception:
-                pass
+            except Exception as e:
+                if _pan()._hits_risk_keyword(str(e).lower()):
+                    raise
+                logstream.warn("auto_move", f"列举剧集季目录 {drama_cid} 失败: {e}")
+                return {}
             drama_season_cache[drama_cid] = mapping
             drama_season_names[drama_cid] = names_map
         return drama_season_cache[drama_cid]
@@ -391,9 +403,9 @@ def move_matched_files_for_rule(source_dir: str, target_dir: str,
         ext = os.path.splitext(fname)[1].lower()
         if ext not in _MEDIA_EXTENSIONS:
             continue
-        # 中文硬指标：必须含有汉字（纯数字、纯英文坚决不移动）；
-        # 云下载目录模式下身份由任务目录名承载，放开文件名中文要求（垃圾由下方过滤拦截）
-        if not match_by_dir and not _CHINESE_CHAR_RE.search(fname):
+        # 中文硬指标：默认必须含有汉字（纯数字、纯英文坚决不移动）；
+        # 云下载目录或开启 allow_english 后放开文件名中文要求
+        if not match_by_dir and not allow_english and not _CHINESE_CHAR_RE.search(fname):
             continue
         # 预告/花絮非正片过滤
         fname_lower = fname.lower()

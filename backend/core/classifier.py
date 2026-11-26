@@ -73,8 +73,19 @@ def _rules() -> list[dict]:
     now = time.time()
     if now - _cache[1] > _CACHE_TTL:
         rows = db.query("SELECT * FROM rules WHERE enabled=1 ORDER BY priority ASC, id ASC")
-        # 空正则 re.search("") 会命中一切——过滤掉，避免整站分类被一条坏规则劫持
-        _cache = ([dict(r) for r in rows if (r["pattern"] or "").strip()], now)
+        compiled_rows = []
+        for r in rows:
+            pat = (r["pattern"] or "").strip()
+            if not pat:
+                continue
+            try:
+                cp = re.compile(pat, re.IGNORECASE)
+            except re.error:
+                continue
+            d = dict(r)
+            d["_compiled"] = cp
+            compiled_rows.append(d)
+        _cache = (compiled_rows, now)
     return _cache[0]
 
 
@@ -91,24 +102,28 @@ def invalidate():
 MAX_MATCH_LEN = 4000
 
 
+def _classify_detail(text: str) -> tuple[str, str, str, int | None]:
+    """返回 (category, matched_pattern, match_source, match_priority)。"""
+    if not text:
+        return "", "", "", None
+    text = text[:MAX_MATCH_LEN]
+    cat, tag = _tag_category(text)
+    if cat:
+        return cat, tag, "tag", None
+    for rule in _rules():
+        cp = rule.get("_compiled")
+        if cp is not None and cp.search(text):
+            return rule["category"], rule["pattern"], "rule", rule.get("priority")
+    return "", "", "", None
+
+
 def classify(text: str) -> tuple[str, str]:
     """返回 (category, matched_pattern)。未命中返回 ("", "")。
 
     优先采用频道消息里的显式标签（#电影/#剧集/#动漫…），其次才按规则匹配标题。
     """
-    if not text:
-        return "", ""
-    text = text[:MAX_MATCH_LEN]
-    cat, tag = _tag_category(text)
-    if cat:
-        return cat, tag
-    for rule in _rules():
-        try:
-            if re.search(rule["pattern"], text, re.IGNORECASE):
-                return rule["category"], rule["pattern"]
-        except re.error:
-            continue
-    return "", ""
+    cat, pat, _, _ = _classify_detail(text)
+    return cat, pat
 
 
 def resolve_target(category: str, kind: str = "share") -> str:
@@ -125,11 +140,12 @@ def resolve_target(category: str, kind: str = "share") -> str:
     return "" if (not d or d == "skip") else d
 
 
-def test_text(text: str) -> dict:
-    """规则测试器：完整模拟一条标题的处理结果（含功能开关状态与分类型目标目录）。"""
-    from . import extractor, filters
-    category, pattern = classify(text)
-    blocked, rule_type, rule_value = filters.check_message(text, channel=None)
+def test_text(text: str, channel: str | None = None) -> dict:
+    """规则测试器：完整模拟一条标题的处理结果（含频道黑名单、订阅命中、链接提取与目标目录）。"""
+    from . import extractor, filters, subscribe
+    ch = (channel or "").strip() or None
+    category, pattern, match_source, match_priority = _classify_detail(text)
+    blocked, rule_type, rule_value = filters.check_message(text, channel=ch)
     unclassified_action = db.get_setting("unclassified_action", "skip")
     if not category:
         target = "" if unclassified_action == "skip" else str(unclassified_action)
@@ -147,10 +163,16 @@ def test_text(text: str) -> dict:
         disabled_kinds.append("云下载")
     # 云下载目标（消息含 ED2K/磁力时显示）
     offline_target = resolve_target(category, kind="offline") if category else ""
+    matched_subs = [s["keyword"] for s in subscribe.match_all(text) if s.get("keyword")]
+    share_cnt = sum(1 for l in links if l.get("kind", "share") != "offline")
+    offline_cnt = sum(1 for l in links if l.get("kind", "share") == "offline")
     return {
         "text": text,
+        "channel": ch or "",
         "category": category,
         "matched_rule": pattern,
+        "match_source": match_source,
+        "match_priority": match_priority,
         "blocked": blocked,
         "block_rule_type": rule_type,
         "block_rule_value": rule_value,
@@ -159,4 +181,8 @@ def test_text(text: str) -> dict:
         "offline_target_dir": offline_target,
         "skipped": skipped,
         "disabled_kinds": disabled_kinds,
+        "matched_subscriptions": matched_subs,
+        "extracted_links": len(links),
+        "share_links": share_cnt,
+        "offline_links": offline_cnt,
     }

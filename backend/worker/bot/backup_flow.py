@@ -12,13 +12,14 @@ from .state import _RESTORE_PENDING, _RESTORE_TTL
 
 
 def _backup_summary(data: dict) -> str:
-    """备份 payload 的一行摘要（用于确认提示与结果展示）。"""
+    """备份 payload 的分段摘要（用于确认提示与结果展示）。"""
     c = db.backup_counts(data)
-    return (f"导出于 {c['exported_at']}｜设置 {c['settings']} 项｜"
-            f"频道 {c['channels']}｜规则 {c['rules']}｜路由 {c['routes']}｜黑名单 {c['blacklist']}｜"
-            f"订阅 {c['subscriptions']}｜转存记录 {c['transfers']}｜"
-            f"自动整理 {c['auto_move_rules']}｜整理刮削 {c['media_rules']}｜"
-            f"操作账本 {c['organized_records']}｜待刮削任务 {c['media_tasks']}")
+    return (
+        f"导出于 {c['exported_at']}\n"
+        f"配置：设置 {c['settings']}｜频道 {c['channels']}｜规则 {c['rules']}｜路由 {c['routes']}｜黑名单 {c['blacklist']}\n"
+        f"业务：订阅 {c['subscriptions']}｜转存 {c['transfers']}｜自动归档 {c['auto_move_rules']}｜"
+        f"整理刮削 {c['media_rules']}｜账本 {c['organized_records']}｜待刮削 {c['media_tasks']}"
+    )
 
 
 async def restore_upload_flow(client: httpx.AsyncClient, token: str, chat_id: str,
@@ -52,19 +53,17 @@ async def restore_upload_flow(client: httpx.AsyncClient, token: str, chat_id: st
         return f"文件解析失败（{e}），确认发送的是自动备份/网页导出的 .json、.json.gz 或 .zip 文件"
     _RESTORE_PENDING[chat_id] = (data, time.time())
     return ("⚠️ 检测到备份文件\n" + _backup_summary(data) +
-            "\n\n恢复将【整体覆盖】当前的设置/频道/规则/路由/黑名单/订阅/转存记录/自动整理/整理刮削/操作账本/待处理刮削任务"
-            "（登录密码与通知密钥不变）。\n"
-            "确认恢复请回复：/restore confirm（10 分钟内有效，或直接忽略即取消）")
+            "\n\n恢复将【覆盖】当前全部配置与业务数据（登录密码与通知密钥除外）。\n"
+            "确认恢复请回复：/restore confirm（10 分钟内有效，忽略即取消）")
 
 
 def _restore_guide() -> str:
     """恢复操作三步引导（/menu 按钮、/restore 指令共用）。"""
     return ("♻️ 从备份恢复（三步）：\n"
-            "① 直接把备份文件（.json / .json.gz / .zip）发送给本 Bot（自动备份或网页导出的文件均可）\n"
-            "② 我会校验并回显备份摘要\n"
+            "① 发送备份文件（.json / .json.gz / .zip）给本 Bot\n"
+            "② 确认我回显的备份摘要\n"
             "③ 回复 /restore confirm 确认恢复（10 分钟内有效）\n\n"
-            "恢复会整体覆盖当前的设置/频道/规则/路由/黑名单/订阅/转存记录/自动整理/整理刮削/操作账本/待处理刮削任务"
-            "（登录密码与通知密钥不变），完成并校验一致后我会回复恢复结果")
+            "恢复将覆盖当前全部配置与业务数据（登录密码与通知密钥除外）。")
 
 
 def _verify_restore(data: dict) -> str:
@@ -152,8 +151,11 @@ async def send_backup_flow(client: httpx.AsyncClient, token: str, chat_id: str):
             )
     except Exception as e:
         logstream.error("system", f"TG 发送备份异常: {logstream.exc(e)}")
-        await client.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": chat_id, "text": f"❌ 发送备份异常: {e}"},
-            timeout=15,
-        )
+        try:
+            await client.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json={"chat_id": chat_id, "text": f"❌ 发送备份异常: {e}"},
+                timeout=15,
+            )
+        except Exception:
+            pass

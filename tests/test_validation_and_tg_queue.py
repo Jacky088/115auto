@@ -155,7 +155,7 @@ def test_bot_link_header_routing():
     db.set_setting("unclassified_action", "skip")
     m3 = "magnet:?xt=urn:btih:" + "c" * 40
     reply = bot_commands._bot_enqueue_links(f"云下载 {m3}", 993006)
-    assert "未入队" in reply and "未分类" in reply and "分类 → 目录映射" in reply
+    assert "未入队" in reply and "未分类" in reply and "转存整理" in reply
 
     # 7. 指令头后写分类名 → 按该分类的云下载目录存放
     db.set_setting("unclassified_action", "/待整理")

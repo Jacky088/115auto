@@ -81,7 +81,7 @@ def _handle_sub(args: list[str]) -> str:
         mark = "" if r["enabled"] else "⏸ "
         lines.append(f"· {mark}{r['keyword']}{ep}")
     lines.append("")
-    lines.append(USAGE_SUB)
+    lines.append("用法：/sub <片名> 搜索订阅，/sub del <关键词> 删除")
     return "\n".join(lines)
 
 
@@ -118,6 +118,7 @@ def _sub_add(name: str, note: str, aliases: list | None = None,
         " VALUES(?,?,?,?,?,?)",
         (name, note, json.dumps(al, ensure_ascii=False), tmdb_id,
          kind if kind in ("tv", "movie") else "", time.time()))
+    _sub.invalidate_cache()
     logstream.info("subscribe", f"已通过 TG Bot 搜索订阅: {name}（{note}，别名 {len(al)} 个）")
     return (f"✅ 已订阅「{name}」\n"
             "命中该剧的频道消息后会记录追更进度并推送通知；"
@@ -261,14 +262,14 @@ def _backfill_confirm(tid: int, ep_hint: int = 0) -> tuple[str, dict | None]:
     if ep is None or ep <= 1:
         return ("该记录标题未识别出集数（需 S01E52 / 第52集 等格式）。\n"
                 "请改用 /backfill <剧名关键词> <当前集数> 发起，"
-                "或在网页「转存记录」页发起并手动填写"), None
+                "或在网页「记录查询」页发起并手动填写"), None
     kb = {"inline_keyboard": [[{"text": "✅ 确认补全", "callback_data": f"bfgo:{tid}:{ep}"}]]}
     rng = (f"S{season:02d} " if season is not None else "") + f"E01~E{ep - 1:02d}"
     return (f"向前补全：《{base}》\n"
             f"频道：@{row['channel']}\n"
             f"当前已存：E{ep:02d}\n"
             f"将向前查找：{rng}（最多翻 50 页历史）\n"
-            f"补全任务将优先消耗每日额度；早期链接已失效的集数会失败并注明原因。"), kb
+            f"将优先消耗每日额度，完成后推送汇总。"), kb
 
 
 async def _backfill_execute(tid: int, ep_hint: int = 0) -> str:
@@ -287,8 +288,7 @@ async def _backfill_execute(tid: int, ep_hint: int = 0) -> str:
         return f"❌ 无法发起补全：{e}"
     logstream.info("system", f"用户（TG）发起向前补全：《{summary['base']}》{summary['episodes']}，"
                              "补全任务将优先入队")
-    return (f"🔎 已开始向前补全：《{summary['base']}》{summary['episodes']}\n"
-            "补全任务将优先入队并优先消耗每日额度；完成后会推送汇总。")
+    return f"🔎 已开始向前补全：《{summary['base']}》{summary['episodes']}，完成后将推送汇总。"
 
 
 async def _handle_subpick(client: httpx.AsyncClient, token: str,
@@ -300,8 +300,10 @@ async def _handle_subpick(client: httpx.AsyncClient, token: str,
         cands = []  # 过期按钮不再指向新的缓存，避免订错片
     else:
         cands = entry[1]
-    if idx == "x" or not cands:
-        reply = "已取消，或搜索选项已过期，请重新发送 /sub <片名>"
+    if idx == "x":
+        reply = "已取消订阅"
+    elif not cands:
+        reply = "搜索选项已过期，请重新发送 /sub <片名>"
     else:
         try:
             it = cands[int(idx)]

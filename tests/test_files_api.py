@@ -302,3 +302,40 @@ def test_list_files_composite_pagination_53_items():
         assert b3["total"] == 53
         assert len(b3["items"]) == 0
 
+
+def test_files_read_risk_cooldown_and_list_cache():
+    from backend.pan115 import client as pan
+
+    mock_client = MagicMock()
+    mock_client.fs_files.return_value = {
+        "state": True, "count": 1, "folder_count": 0, "file_count": 1,
+        "data": [{"fid": "10", "n": "A.mkv", "fc": "1", "s": 1024}],
+        "path": [["根目录", "0"]],
+    }
+    mock_client.fs_delete.return_value = {"state": True}
+
+    with patch("backend.pan115.client.check_login", return_value={"ok": True}), \
+            patch("backend.pan115.client._get_client", return_value=mock_client):
+        tc = _authed_client()
+        # 1. 短缓存生效：连续两次请求同一目录只打 1 次 115
+        assert tc.get("/api/files/list", params={"cid": 200}).status_code == 200
+        assert tc.get("/api/files/list", params={"cid": 200}).status_code == 200
+        assert mock_client.fs_files.call_count == 1
+
+        # 2. 写操作自动失效目录缓存
+        assert tc.post("/api/files/delete", json={"ids": ["10"]}).status_code == 200
+        assert tc.get("/api/files/list", params={"cid": 200}).status_code == 200
+        assert mock_client.fs_files.call_count == 2
+
+        # 3. 风控冷却期内拦截读取（429），不打 115
+        pan.note_115_error("errno=405 rate limit")
+        try:
+            r_cool = tc.get("/api/files/list", params={"cid": 201})
+            assert r_cool.status_code == 429
+            assert mock_client.fs_files.call_count == 2
+        finally:
+            with pan._risk_lock:
+                pan._consec_risk = 0
+                pan._risk_cooldown_until = 0.0
+
+

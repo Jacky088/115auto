@@ -144,7 +144,7 @@ async def preview_start(body: DedupePreviewIn | None = None):
         sql += " AND id IN (" + ",".join("?" for _ in rids) + ")"
         params.extend(int(x) for x in rids)
     paths = [r["source_dir"] for r in await asyncio.to_thread(db.query, sql, tuple(params))]
-    guard = scan_index.scope_guard(paths, confirm_large)
+    guard = await asyncio.to_thread(scan_index.scope_guard, paths, confirm_large)
     if guard:
         return guard
     res = scan_index.start_job(

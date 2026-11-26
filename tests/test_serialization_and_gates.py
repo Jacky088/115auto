@@ -390,3 +390,37 @@ def test_run_pan_thread_does_not_starve_default_to_thread_pool():
             await asyncio.gather(*tasks, return_exceptions=True)
 
     asyncio.run(scenario())
+
+
+def test_check_login_urllib3_timeout_preserves_cookie_ok_and_mkdirs_guards_zero_cid():
+    """urllib3_future 超时应判定为网络异常(ok=None)且不误清 cookie_ok；mkdirs 禁止返回根目录 cid=0。"""
+    import pytest
+    from urllib3_future.exceptions import ReadTimeoutError
+    from backend.pan115 import dirs as pan_dirs
+
+    db.init()
+    db.set_setting("cookie_ok", True)
+    db.set_setting("cookie", "UID=1_A1_1; CID=2; SEID=3; KID=4")
+    pan._login_cache = None
+
+    class _Timeout115:
+        def user_my_info(self):
+            raise ReadTimeoutError(None, "https://115.com", "read timed out")
+
+    with patch.object(pan, "_get_client", return_value=_Timeout115()):
+        res = pan.check_login(force=True)
+    assert res["ok"] is None
+    assert res["network"] is True
+    assert db.get_setting("cookie_ok") is True
+
+    class _ZeroCid115:
+        def fs_mkdir(self, *_args, **_kwargs):
+            return {"state": True, "cid": 0, "data": {"cid": 0}}
+
+    pan_dirs._dir_cache.clear()
+    with patch.object(pan, "_get_client", return_value=_ZeroCid115()), \
+         patch.object(pan, "pan_call", side_effect=lambda fn, *a, **kw: fn(*a, **kw)), \
+         patch.object(pan_dirs, "_list_dir", return_value={}):
+        with pytest.raises(pan.Pan115Error):
+            pan.mkdirs("/新建测试目录")
+

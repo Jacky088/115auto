@@ -12,11 +12,13 @@
       </el-card>
     </div>
     <!-- 第二行：115 空间（胶囊进度条 + 三项指标）+ 全历史分类占比（左紧凑圆环 + 右分类明细榜） -->
+    <RiskCooldownCard :risk="stats.risk_115 || {}" @recovered="load" />
     <OverviewCards
       :space="space"
       :space-loaded="spaceLoaded"
       :categories="stats.categories || {}"
     />
+    <TrendChart v-if="stats.trend && stats.trend.length" :trend="stats.trend" />
 
     <el-card shadow="never" class="page-card">
       <template #header>
@@ -58,7 +60,7 @@
         <div class="toolbar" style="margin-bottom: 0">
           <span>实时日志</span>
           <el-button @click="autoScroll = !autoScroll">{{ autoScroll ? '暂停滚动' : '自动滚动' }}</el-button>
-          <el-tooltip content="仅清空当前显示，不影响「日志查询」中的历史日志">
+          <el-tooltip content="仅清空当前窗口，不影响「系统日志」中的历史记录">
             <el-button @click="lines = []">清屏</el-button>
           </el-tooltip>
           <el-tag size="small" :type="wsOk ? 'success' : 'danger'">{{ wsOk ? '已连接' : '未连接' }}</el-tag>
@@ -73,8 +75,8 @@
               :aria-pressed="modFilter === ''" aria-label="显示全部模块日志"
               @click="modFilter = ''" @keydown.enter="modFilter = ''" @keydown.space.prevent="modFilter = ''">全部</span>
         <span v-for="m in logModules" :key="m" class="m-chip" :class="{ active: modFilter === m }"
-              role="button" tabindex="0" :aria-pressed="modFilter === m" :aria-label="'只看 ' + m + ' 模块日志'"
-              @click="modFilter = m" @keydown.enter="modFilter = m" @keydown.space.prevent="modFilter = m">{{ m }}</span>
+              role="button" tabindex="0" :aria-pressed="modFilter === m" :aria-label="'只看 ' + moduleLabel(m) + ' 模块日志'"
+              @click="modFilter = m" @keydown.enter="modFilter = m" @keydown.space.prevent="modFilter = m">{{ moduleLabel(m) }}</span>
       </div>
       <div class="log-window" ref="logBox" @touchstart.passive="autoScroll = false">
         <div v-for="(l, i) in shownLines" :key="i" class="log-line">
@@ -90,9 +92,11 @@
 
 <script setup>
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
-import { api, fmtSize, fmtTime, statusLabel } from '../api'
+import { api, fmtSize, fmtTime, statusLabel, statusTagType } from '../api'
 import { usePolling } from '../composables/usePolling'
 import OverviewCards from '../components/dashboard/OverviewCards.vue'
+import RiskCooldownCard from '../components/dashboard/RiskCooldownCard.vue'
+import TrendChart from '../components/dashboard/TrendChart.vue'
 
 const stats = ref({})
 const space = ref({ total: 0, use: 0, free: 0, ratio: 0 })
@@ -104,6 +108,33 @@ const autoScroll = ref(true)
 const logBox = ref(null)
 
 // ---- 模块筛选：从日志流中出现过的 module 动态收集 ----
+const MODULE_LABELS = {
+  system: '系统',
+  transfer: '转存',
+  polling: '网页轮询',
+  userbot: 'TG 客户端',
+  pipeline: '消息处理',
+  resolver: '链接解析',
+  backfill: '缺口补漏',
+  subscribe: '追剧订阅',
+  offline: '云下载',
+  115: '115 网盘',
+  auto_move: '归档整理',
+  organize: '目录整理',
+  scrape: '媒体刮削',
+  dedupe: '重复清理',
+  scan: '目录扫描',
+  rules: '匹配规则',
+  blacklist: '黑名单',
+  channels: '频道管理',
+  database: '数据库',
+  wizard: '初始化向导',
+  backup: '备份恢复',
+  webdav: 'WebDAV',
+  notify: '消息通知',
+  auth: '登录鉴权',
+}
+const moduleLabel = (m) => MODULE_LABELS[m] || m
 const modFilter = ref('')
 const logModules = ref([])
 const shownLines = computed(() => modFilter.value
@@ -120,8 +151,7 @@ const cards = computed(() => {
   ]
 })
 
-const statusTag = (s) => ({ success: 'success', failed: 'danger', blocked: 'warning',
-                            queued: 'info', running: 'primary' }[s] || 'info')
+const statusTag = statusTagType
 const ts = (t) => {
   const d = new Date(t * 1000)
   const p = (n) => String(n).padStart(2, '0')
@@ -234,13 +264,13 @@ onUnmounted(() => {
 }
 .module-chips { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
 .m-chip {
-  padding: 3px 14px; border-radius: var(--r-pill); font-size: var(--fs-caption); cursor: pointer; user-select: none;
+  padding: 3px 12px; border-radius: 6px; font-size: var(--fs-caption); cursor: pointer; user-select: none;
   border: 1px solid var(--saas-line); color: var(--saas-text-sub);
   background: var(--glass-bg-strong); transition: all .15s ease;
 }
-.m-chip:hover { border-color: var(--el-color-primary); background: rgba(79, 107, 255, .12); color: var(--el-color-primary); }
+.m-chip:hover { border-color: var(--el-color-primary); background: var(--saas-hover); color: var(--el-color-primary); }
 .m-chip.active {
-  background: var(--grad-brand); border-color: transparent; color: #fff;
-  box-shadow: 0 3px 10px rgba(79, 107, 255, .35);
+  background: var(--el-color-primary, #256bf5); border-color: transparent; color: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.22);
 }
 </style>

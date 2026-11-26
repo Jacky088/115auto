@@ -26,10 +26,6 @@ _TIMEOUT = httpx.Timeout(20.0)
 _backfill_state: dict[int, dict] = {}  # channel_id -> {until_id, before, hi}（内存态，重启重新检测）
 
 
-def _proxy() -> str | None:
-    return str(db.get_setting("proxy", "") or "") or None
-
-
 def _parse_page(html: str):
     """延迟导入 parse_page，避免与 polling.py 循环导入。"""
     from .polling import parse_page
@@ -40,7 +36,7 @@ async def _fetch_before(client: httpx.AsyncClient, name: str, before: int) -> li
     resp = await client.get(f"https://t.me/s/{name}?before={before}", timeout=_TIMEOUT)
     if resp.status_code != 200:
         raise RuntimeError(f"HTTP {resp.status_code}")
-    return _parse_page(resp.text)
+    return await asyncio.to_thread(_parse_page, resp.text)
 
 
 def _daily_backfill_budget() -> int:

@@ -98,33 +98,39 @@ async def status() -> dict:
             connected = bool(client.is_connected()) and bool(await client.is_user_authorized())
         except Exception:
             connected = False
+    api_id = await asyncio.to_thread(db.get_setting, "tg_api_id")
+    api_hash = await asyncio.to_thread(db.get_setting, "tg_api_hash")
+    ok = await asyncio.to_thread(db.get_setting, "userbot_ok", None)
     return {
-        "configured": bool(db.get_setting("tg_api_id") and db.get_setting("tg_api_hash")),
+        "configured": bool(api_id and api_hash),
         "connected": connected,
         "login_pending": bool(_login_flow.get("pending")),
-        "ok": db.get_setting("userbot_ok", None),
+        "ok": ok,
     }
 
 
 async def test() -> dict:
     """一键自检：连接 + 授权 + 逐个验证 Userbot 频道可见性（能否真正收到消息）。
 
-    返回 {ok, me, channels: [{name, ok, title, err}], err}；未连接时 ok=False。
+    返回 {ok, me, channels: [{name, ok, title, err}], latency_ms, tested_at, err}；未连接时 ok=False。
     """
+    t0 = time.monotonic()
+    now_ts = time.time()
     if client is None:
-        return {"ok": False, "err": "Userbot 未登录，请先完成登录"}
+        return {"ok": False, "err": "Userbot 未登录，请先完成登录", "tested_at": now_ts}
     try:
         if not (client.is_connected() and await client.is_user_authorized()):
-            return {"ok": False, "err": "Userbot 已断开或登录失效，请重新登录"}
+            return {"ok": False, "err": "Userbot 已断开或登录失效，请重新登录", "tested_at": now_ts}
     except Exception as e:
-        return {"ok": False, "err": f"连接检查失败: {type(e).__name__}: {e}"}
+        return {"ok": False, "err": f"连接检查失败: {type(e).__name__}: {e}", "tested_at": now_ts}
     try:
         me = await client.get_me()
     except Exception as e:
-        return {"ok": False, "err": f"获取账号信息失败: {type(e).__name__}: {e}"}
+        return {"ok": False, "err": f"获取账号信息失败: {type(e).__name__}: {e}", "tested_at": now_ts}
     who = getattr(me, "username", None) or getattr(me, "first_name", "") or ""
 
-    rows = [dict(r) for r in db.query("SELECT name FROM channels WHERE type='userbot' AND enabled=1")]
+    rows = [dict(r) for r in await asyncio.to_thread(
+        db.query, "SELECT name FROM channels WHERE type='userbot' AND enabled=1")]
     channels: list[dict] = []
     ok_all = True
     if rows:
@@ -144,10 +150,8 @@ async def test() -> dict:
             err = (f"无法访问（账号未加入该频道，或用户名/ID 填错？）"
                    f"{type(e).__name__}: {str(e)[:120]}")
         channels.append({"name": name, "ok": not err, "title": title, "err": err})
-    if not channels:
-        # 尚未添加 Userbot 类型频道：只验证连接与授权
-        pass
-    return {"ok": ok_all, "me": who, "channels": channels}
+    latency = round((time.monotonic() - t0) * 1000)
+    return {"ok": ok_all, "me": who, "channels": channels, "latency_ms": latency, "tested_at": now_ts}
 
 
 async def check_channel(name: str) -> dict:
@@ -313,9 +317,9 @@ async def _finish_login(c: TelegramClient, flow: dict):
             # 不等下次进程重启（启动时的 _harden_credential_files 只覆盖已存在文件）
             config.secure_file(dst)
 
-    db.set_setting("tg_api_id", int(flow["api_id"]))
-    db.set_setting("tg_api_hash", flow["api_hash"])
-    db.set_setting("tg_phone", flow["phone"])
+    await asyncio.to_thread(db.set_setting, "tg_api_id", int(flow["api_id"]))
+    await asyncio.to_thread(db.set_setting, "tg_api_hash", flow["api_hash"])
+    await asyncio.to_thread(db.set_setting, "tg_phone", flow["phone"])
 
     # 用新的主 session 重新连接并校验，确认登录态真正可用
     c2 = _make(int(flow["api_id"]), flow["api_hash"])
@@ -325,7 +329,7 @@ async def _finish_login(c: TelegramClient, flow: dict):
         raise RuntimeError("登录状态校验失败，请重新发起登录")
 
     client = c2
-    db.set_setting("userbot_ok", True)
+    await asyncio.to_thread(db.set_setting, "userbot_ok", True)
     _login_flow.clear()
     _remove_session_files(_LOGIN_SESSION)
     _register_handlers(c2)
@@ -359,14 +363,14 @@ async def _pump(c: TelegramClient):
             await c.connect()
             if await c.is_user_authorized():
                 logstream.info("userbot", "Userbot 自动重连成功")
-                db.set_setting("userbot_ok", True)
+                await asyncio.to_thread(db.set_setting, "userbot_ok", True)
                 asyncio.create_task(catch_up(c), name="userbot-catchup")
                 asyncio.create_task(_pump(c), name="userbot-pump")
                 return
             await c.disconnect()
         except Exception as e:
             logstream.warn("userbot", f"自动重连第 {attempt} 次失败: {e}")
-    db.set_setting("userbot_ok", False)
+    await asyncio.to_thread(db.set_setting, "userbot_ok", False)
     logstream.warn("userbot", "Userbot 自动重连失败，请到「账号管理」重新登录")
 
 
@@ -451,7 +455,11 @@ async def catch_up(c: TelegramClient):
     依赖 messages 表（主键 channel+message_id）天然去重，已处理过的不会重复入队；
     补偿在连接建立后立即执行，事件流继续实时收新消息，两边互不冲突。
     """
+    global _missed_while_stopped
     try:
+        if not await asyncio.to_thread(db.get_setting, "running", False):
+            _missed_while_stopped = True
+            return
         watched = [dict(r) for r in await asyncio.to_thread(
             db.query, "SELECT name FROM channels WHERE type='userbot' AND enabled=1")]
         if not watched:
@@ -517,8 +525,8 @@ async def disconnect_for_restore():
 async def start_if_configured():
     """应用启动时：若已配置且 session 存在，自动连接。"""
     global client
-    api_id = db.get_setting("tg_api_id")
-    api_hash = db.get_setting("tg_api_hash")
+    api_id = await asyncio.to_thread(db.get_setting, "tg_api_id")
+    api_hash = await asyncio.to_thread(db.get_setting, "tg_api_hash")
     if not (api_id and api_hash):
         return
     try:
@@ -526,15 +534,15 @@ async def start_if_configured():
         await c.connect()
         if await c.is_user_authorized():
             client = c
-            db.set_setting("userbot_ok", True)
+            await asyncio.to_thread(db.set_setting, "userbot_ok", True)
             _register_handlers(c)
             asyncio.create_task(_pump(c), name="userbot-pump")
             asyncio.create_task(catch_up(c), name="userbot-catchup")
             logstream.info("userbot", "Userbot 已自动连接")
         else:
             await c.disconnect()
-            db.set_setting("userbot_ok", False)
+            await asyncio.to_thread(db.set_setting, "userbot_ok", False)
             logstream.warn("userbot", "已配置但登录已失效，请到网页「账号管理」重新登录")
     except Exception as e:
-        db.set_setting("userbot_ok", False)
+        await asyncio.to_thread(db.set_setting, "userbot_ok", False)
         logstream.error("userbot", f"自动连接失败: {logstream.exc(e)}")

@@ -63,6 +63,7 @@ class MediaSettingsIn(BaseModel):
     media_organize_template_movie: str | None = None
     media_organize_template_tv: str | None = None
     media_conflict_policy: str | None = None
+    media_bdmv_prefer_best: bool | None = None
     media_move_subtitles: bool | None = None
     media_skip_extras: bool | None = None
     media_extra_min_mb: int | None = None
@@ -71,6 +72,7 @@ class MediaSettingsIn(BaseModel):
     media_scrape_margin_threshold: int | None = None
     media_scrape_write_local_nfo: bool | None = None
     media_scrape_download_poster: bool | None = None
+    media_scrape_tg_confirm: bool | None = None
     media_scrape_wait_seconds: int | None = None
     media_local_meta_dir: str | None = None
     media_op_delay_min: float | None = None
@@ -80,6 +82,7 @@ class MediaSettingsIn(BaseModel):
     media_organize_schedule_type: str | None = None
     media_organize_schedule_hours: int | None = None
     media_organize_fixed_times: list[str] | str | None = None
+    wash_archive_dir: str | None = None
 
 
 class SelectTaskIn(BaseModel):
@@ -91,6 +94,12 @@ class SelectTaskIn(BaseModel):
 class BatchStageIn(BaseModel):
     mode: str = "auto_top1"  # auto_top1 | ignore_all
     min_score: float = 0.0
+
+
+class BatchApplyTmdbIn(BaseModel):
+    parsed_title: str
+    tmdb_id: int
+    kind: str = "tv"
 
 
 class CommitIn(BaseModel):
@@ -214,6 +223,17 @@ def save_settings(body: MediaSettingsIn):
     data = body.model_dump(exclude_none=True)
     if "media_conflict_policy" in data and data["media_conflict_policy"] not in ("skip", "replace_if_better", "keep_both"):
         raise HTTPException(400, "非法冲突处理策略")
+    if "wash_archive_dir" in data:
+        raw_arch = str(data["wash_archive_dir"] or "").strip()
+        if raw_arch:
+            if not raw_arch.startswith("/") or raw_arch == "/" or ".." in raw_arch.split("/"):
+                raise HTTPException(400, "旧版归档目录须为以 / 开头的 115 网盘子目录，不能为根目录 /")
+            raw_arch = "/" + raw_arch.strip("/")
+        data["wash_archive_dir"] = raw_arch
+    eff_policy = data.get("media_conflict_policy", db.get_setting("media_conflict_policy", "skip"))
+    eff_arch = str(data.get("wash_archive_dir", db.get_setting("wash_archive_dir", "")) or "").strip()
+    if eff_policy == "replace_if_better" and not eff_arch:
+        raise HTTPException(400, "选择「高画质替换（旧版移至归档目录）」必须先选择旧版归档目录")
     for tpl_key, tpl_kind in (("media_organize_template_movie", "movie"), ("media_organize_template_tv", "tv")):
         if tpl_key in data:
             try:
@@ -258,12 +278,15 @@ def save_settings(body: MediaSettingsIn):
             raise HTTPException(400, "元数据目录包含非法空字符")
         if raw_dir:
             resolved_dir = Path(raw_dir).expanduser().resolve()
+            data_dir_resolved = config.DATA_DIR.resolve()
             if (
                 len(resolved_dir.parts) <= 1
                 or resolved_dir.is_relative_to(_APP_BACKEND_DIR)
                 or _APP_BACKEND_DIR.is_relative_to(resolved_dir)
+                or resolved_dir.is_relative_to(data_dir_resolved)
+                or data_dir_resolved.is_relative_to(resolved_dir)
             ):
-                raise HTTPException(400, "本地元数据目录不允许设为系统根目录或程序目录")
+                raise HTTPException(400, "本地元数据目录不允许设为系统根目录、程序目录或系统数据目录")
             resolved_dir.mkdir(parents=True, exist_ok=True)
             data["media_local_meta_dir"] = str(resolved_dir)
         else:
@@ -294,7 +317,7 @@ async def organize_preview_start(body: RuleIdsIn | None = None):
         sql += " AND id IN (" + ",".join("?" for _ in rids) + ")"
         params.extend(int(x) for x in rids)
     paths = [r["source_dir"] for r in await asyncio.to_thread(db.query, sql, tuple(params))]
-    guard = scan_index.scope_guard(paths, confirm_large)
+    guard = await asyncio.to_thread(scan_index.scope_guard, paths, confirm_large)
     if guard:
         return guard
     res = scan_index.start_job(
@@ -318,9 +341,6 @@ async def organize_preview_cancel(body: dict | None = None):
 async def organize_run(body: RuleIdsIn | None = None):
     if not await asyncio.to_thread(media_worker.is_system_running):
         raise HTTPException(400, "系统顶部运行开关已停止，请先启动系统后再运行目录整理")
-    if transfer_gate.is_exclusive_busy():
-        mode = transfer_gate.get_active_mode()
-        raise HTTPException(409, f"当前有互斥任务（{mode}）正在排队或执行中，请勿同时启动！")
     rules_cnt = (await asyncio.to_thread(
         db.query, "SELECT count(*) c FROM media_rules WHERE enabled=1 AND organize_enabled=1", one=True))["c"]
     if not rules_cnt:
@@ -332,6 +352,9 @@ async def organize_run(body: RuleIdsIn | None = None):
         include_ids = [str(x).strip() for x in body.include_ids if str(x).strip()]
         if not include_ids:
             raise HTTPException(400, "请至少选择一个需要执行目录整理的文件")
+    if transfer_gate.is_exclusive_busy():
+        mode = transfer_gate.get_active_mode()
+        raise HTTPException(409, f"当前有互斥任务（{mode}）正在排队或执行中，请勿同时启动！")
     t = media_worker._ACTIVE_TASK_REF.get("organize")
     if t and not t.done():
         raise HTTPException(409, "目录整理已在执行队列中")
@@ -349,15 +372,15 @@ async def scrape_run(body: RuleIdsIn | None = None):
         raise HTTPException(400, "系统顶部运行开关已停止，请先启动系统后再运行媒体刮削")
     if not str(await asyncio.to_thread(db.get_setting, "tmdb_api_key", "") or "").strip():
         raise HTTPException(400, "请先在「系统设置」配置 TMDB API Key 再运行媒体刮削")
-    if transfer_gate.is_exclusive_busy():
-        mode = transfer_gate.get_active_mode()
-        raise HTTPException(409, f"当前有互斥任务（{mode}）正在排队或执行中，请勿同时启动！")
     rules_cnt = (await asyncio.to_thread(
         db.query, "SELECT count(*) c FROM media_rules WHERE enabled=1 AND scrape_enabled=1", one=True))["c"]
     if not rules_cnt:
         raise HTTPException(400, "请先在「目录规则」中新增并启用至少一条刮削规则")
 
     rids = body.rule_ids if body else None
+    if transfer_gate.is_exclusive_busy():
+        mode = transfer_gate.get_active_mode()
+        raise HTTPException(409, f"当前有互斥任务（{mode}）正在排队或执行中，请勿同时启动！")
     t = media_worker._ACTIVE_TASK_REF.get("scrape")
     if t and not t.done():
         raise HTTPException(409, "媒体刮削已在执行队列中")
@@ -455,6 +478,35 @@ async def ignore_task(task_id: int):
     return res
 
 
+@router.post("/tasks/{task_id}/retry")
+async def retry_task(task_id: int):
+    """重试失败的刮削任务：已有选定 TMDB 则重新入队执行，否则退回待确认或清除。"""
+    row = await asyncio.to_thread(db.query, "SELECT * FROM media_tasks WHERE id=?", (task_id,), one=True)
+    if not row:
+        raise HTTPException(404, "任务不存在")
+    r = dict(row)
+    if r.get("status") != "failed":
+        raise HTTPException(409, f"当前状态（{r.get('status')}）不支持重试")
+    now = time.time()
+    if r.get("selected_tmdb_id"):
+        await asyncio.to_thread(
+            db.execute,
+            "UPDATE media_tasks SET status='queued', error='', updated_at=? WHERE id=?",
+            (now, task_id),
+        )
+        media_worker.schedule_commit_runner_if_idle()
+        return {"ok": True, "msg": f"任务 #{task_id} 已重新加入提交队列"}
+    cands = json.loads(r.get("candidates_json") or "[]")
+    if cands:
+        await asyncio.to_thread(
+            db.execute,
+            "UPDATE media_tasks SET status='need_confirm', error='', updated_at=? WHERE id=?",
+            (now, task_id),
+        )
+        return {"ok": True, "msg": f"任务 #{task_id} 已退回待确认列表"}
+    raise HTTPException(400, "该任务无可用候选记录，请重新运行媒体刮削扫描")
+
+
 @router.post("/tasks/batch-stage")
 async def batch_stage(body: BatchStageIn):
     rows = [dict(r) for r in await asyncio.to_thread(
@@ -473,6 +525,47 @@ async def batch_stage(body: BatchStageIn):
                 if res["ok"]:
                     cnt += 1
     return {"ok": True, "count": cnt, "msg": f"已批量操作 {cnt} 条（未动 115，点「提交队列」后统一生效）"}
+
+
+@router.post("/tasks/batch-apply-tmdb")
+async def batch_apply_tmdb(body: BatchApplyTmdbIn):
+    """按解析剧名一键将同一 TMDB 条目批量套用到所有待确认的同名刮削任务。"""
+    from ..core.media_parser import normalize_title
+
+    kw = normalize_title(body.parsed_title or "", fuzzy_t2s=True)
+    if not kw or int(body.tmdb_id or 0) <= 0:
+        raise HTTPException(400, "请提供剧名与有效的 TMDB ID")
+    api_key = str(await asyncio.to_thread(db.get_setting, "tmdb_api_key", "") or "").strip()
+    if not api_key:
+        raise HTTPException(400, "未配置 TMDB API Key")
+    kind = "tv" if body.kind == "tv" else "movie"
+    det = await run_ext_thread(tmdb_scraper.get_tmdb_detail, kind, int(body.tmdb_id), api_key)
+    if not det:
+        raise HTTPException(404, f"TMDB 未查询到 {kind}/{body.tmdb_id}")
+    title = str(det.get("name") or det.get("title") or "").strip()
+    dt = str(det.get("first_air_date") or det.get("release_date") or "").strip()
+    manual_cand = {
+        "tmdb_id": int(det["id"]),
+        "kind": kind,
+        "title": title,
+        "year": dt[:4] if len(dt) >= 4 else "",
+        "poster_path": str(det.get("poster_path") or ""),
+    }
+    rows = [dict(r) for r in await asyncio.to_thread(
+        db.query, "SELECT id, parsed_json FROM media_tasks WHERE status='need_confirm' AND task_kind='scrape' ORDER BY id ASC"
+    )]
+    cnt = 0
+    for r in rows:
+        try:
+            parsed = json.loads(r.get("parsed_json") or "{}")
+        except Exception:
+            parsed = {}
+        if normalize_title(str(parsed.get("title") or ""), fuzzy_t2s=True) != kw:
+            continue
+        res = await asyncio.to_thread(media_worker.stage_task_selection, int(r["id"]), None, manual_cand, "web")
+        if res.get("ok"):
+            cnt += 1
+    return {"ok": True, "count": cnt, "title": title, "msg": f"已为同名「{body.parsed_title}」共 {cnt} 条任务批量套用《{title}》"}
 
 
 @router.post("/tasks/commit")

@@ -422,7 +422,17 @@ def inspect_migration_bundle(zip_path: Path, stage_dir: Path) -> dict:
         if db_info is None:
             raise ValueError("迁移包缺少核心数据库 app.db")
 
-        manifest_bytes = zf.read(manifest_info)[: 2 * 1024 * 1024]
+        manifest_limit = 2 * 1024 * 1024
+        buf = bytearray()
+        with zf.open(manifest_info, "r") as mf:
+            while True:
+                chunk = mf.read(65536)
+                if not chunk:
+                    break
+                buf.extend(chunk)
+                if len(buf) > manifest_limit:
+                    raise ValueError("manifest.json 体积超出 2 MB 安全上限")
+        manifest_bytes = bytes(buf)
         try:
             manifest = json.loads(manifest_bytes)
         except Exception as e:

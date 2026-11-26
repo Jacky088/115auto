@@ -77,7 +77,8 @@ self.addEventListener('fetch', (event) => {
         return res
       }).catch(() => {
         return caches.match(req).then((cached) => {
-          return cached || caches.match('/') || caches.match('/index.html')
+          if (cached) return cached
+          return caches.match('/').then((rootHit) => rootHit || caches.match('/index.html'))
         })
       })
     )

@@ -35,6 +35,9 @@ def _migrate(conn=None):
     rcols = {r["name"] for r in conn.execute("PRAGMA table_info(routes)")}
     if "offline_dir" not in rcols:
         conn.execute("ALTER TABLE routes ADD COLUMN offline_dir TEXT NOT NULL DEFAULT ''")
+    rule_cols = {r["name"] for r in conn.execute("PRAGMA table_info(rules)")}
+    if "note" not in rule_cols:
+        conn.execute("ALTER TABLE rules ADD COLUMN note TEXT DEFAULT ''")
     # 频道级订阅模式开关（旧库无此列，默认全盘转存）
     ccols = {r["name"] for r in conn.execute("PRAGMA table_info(channels)")}
     if "sub_only" not in ccols:
@@ -55,11 +58,13 @@ def _migrate(conn=None):
     # 若未来改为动态来源，必须先过白名单
     scols = {r["name"] for r in conn.execute("PRAGMA table_info(subscriptions)")}
     for col, ddl in (("aliases", "TEXT DEFAULT ''"),
+                     ("exclude_keywords", "TEXT DEFAULT ''"),
                      ("tmdb_id", "INTEGER"),
                      ("kind", "TEXT DEFAULT ''"),
                      ("last_season", "INTEGER"),
                      ("last_episode", "INTEGER"),
-                     ("min_quality", "TEXT DEFAULT ''")):
+                     ("min_quality", "TEXT DEFAULT ''"),
+                     ("auto_disable_movie", "INTEGER NOT NULL DEFAULT 1")):
         if col not in scols:
             conn.execute(f"ALTER TABLE subscriptions ADD COLUMN {col} {ddl}")
     # 老库迁移：向导已完成的部署视为已启动，保持原有运行行为
@@ -84,6 +89,8 @@ def _migrate(conn=None):
     am_cols = {r["name"] for r in conn.execute("PRAGMA table_info(auto_move_rules)")}
     if "mode" not in am_cols:
         conn.execute("ALTER TABLE auto_move_rules ADD COLUMN mode TEXT NOT NULL DEFAULT 'default'")
+    if "allow_english" not in am_cols:
+        conn.execute("ALTER TABLE auto_move_rules ADD COLUMN allow_english INTEGER NOT NULL DEFAULT 0")
 
     # 活动任务唯一性：同一分享码同时最多一个 排队/转存中/已提交 任务。
     # 先清理历史竞态产生的重复活动行（保留优先级最高、最早入队的一条），再建部分唯一索引；
@@ -129,20 +136,6 @@ def _migrate(conn=None):
         pass
 
     return _warnings
-
-
-def _emit_migrate_warnings(messages):
-    """锁外补发 _migrate 的告警日志（延迟导入避免循环依赖；失败不影响主流程）。"""
-    if not messages:
-        return
-    try:
-        from .core import logstream
-        for w in messages:
-            logstream.warn("database", w)
-    except Exception:
-        pass
-
-
 
 
 def _emit_migrate_warnings(messages):

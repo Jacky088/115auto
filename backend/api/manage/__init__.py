@@ -11,6 +11,7 @@ from . import (
     settings,
     subscriptions,
     system,
+    tmdb_browse,
     transfers,
     webdav,
 )
@@ -127,6 +128,7 @@ for _sub in (
     system,
     channels,
     subscriptions,
+    tmdb_browse,
     rules,
     transfers,
     settings,

@@ -93,13 +93,10 @@ let unclassifiedSaved = 'skip'
 // 说明文案跟随当前选择：跳过 / 待整理 / 用户自定义目录分别给出对应描述
 const unclassifiedTip = computed(() => {
   if (unclassifiedAction.value === 'skip') {
-    return '当前规则：跳过（不转存、不云下载）。说明：规则仅适用于 TG 频道，' +
-           '对转存和云下载同时生效！'
+    return '跳过未分类的 TG 频道资源（分享转存与云下载均不处理）。'
   }
   const dir = unclassifiedAction.value || '/待整理'
-  return `当前规则：未分类资源将转存到 ${dir}（目录不存在时程序会自动创建）。` +
-         '说明：规则仅适用于 TG 频道，对转存和云下载同时生效！' +
-         '如需更换目录，请手动输入目录名称，如：/未整理，回车确认，点击保存后生效！'
+  return `未分类的 TG 频道资源将转存至 ${dir}（不存在时自动创建）；可手动输入路径后回车并保存。`
 })
 
 // 手动输入的未分类目录校验：必须是 / 开头的 115 网盘子目录（与后端校验一致）

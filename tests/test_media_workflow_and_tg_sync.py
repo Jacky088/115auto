@@ -260,9 +260,9 @@ def test_scrape_0sec_skip_plain_tg_report_and_web_commit(tmp_path):
     assert "🎬 115 媒体刮削本轮完成" in msg
     assert "自动落盘 1 项｜跳过待确认 1 部" in msg
     assert "🎬 星球大战 (1977) [tmdbid=11]（1 部｜NFO + 海报）" in msg
-    assert "已跳过并加入网页「待确认列表」" in msg
+    assert "待确认作品" in msg and "待确认列表" in msg
     assert "沙丘" in msg and "最高候选" in msg
-    assert "待确认列表" in msg and "提交队列" in msg
+    assert "待确认列表" in msg and "确认并提交" in msg
     assert "▶️ 主程序转存与云下载已恢复运行" in msg
 
     task_row = dict(db.query("SELECT * FROM media_tasks WHERE status='need_confirm' ORDER BY id DESC LIMIT 1", one=True))
@@ -344,15 +344,22 @@ def test_media_api_routes_and_bot_callbacks(tmp_path):
         assert r_stop_org.status_code == 400
         assert r_stop_scr.status_code == 400
 
-        # 2) 配置读写与范围校验
+        # 2) 配置读写与范围校验（高画质替换未配归档目录时拒绝 400）
+        r_cfg_bad = tc.put("/api/media/settings", json={
+            "media_conflict_policy": "replace_if_better",
+            "wash_archive_dir": "",
+        }, headers=headers)
+        assert r_cfg_bad.status_code == 400
         r_cfg = tc.put("/api/media/settings", json={
             "media_append_tmdb_tag": True,
             "media_conflict_policy": "replace_if_better",
+            "wash_archive_dir": "/旧版归档",
             "media_scrape_confidence_threshold": 88,
         }, headers=headers)
         assert r_cfg.status_code == 200
         s_data = tc.get("/api/media/settings", headers=headers).json()
         assert s_data["media_conflict_policy"] == "replace_if_better"
+        assert s_data["wash_archive_dir"] == "/旧版归档"
         assert s_data["media_scrape_confidence_threshold"] == 88
 
         # 3) 创建待确认任务 -> 历史 TG /scid 与 sc* 按钮均已下线且不改状态 -> 网页选片提交生效
@@ -420,6 +427,7 @@ def test_conflict_replace_if_better_bdmv_and_cancel_mid_queue(tmp_path):
         (time.time(),),
     )
     db.set_setting("media_conflict_policy", "replace_if_better")
+    db.set_setting("wash_archive_dir", "/旧版归档")
 
     pan_ops = []
 
@@ -449,9 +457,11 @@ def test_conflict_replace_if_better_bdmv_and_cancel_mid_queue(tmp_path):
 
     def fake_ensure_subdir(base_cid, rel_dir):
         pan_ops.append(("subdir", rel_dir))
-        if rel_dir == "_待清理旧版":
-            return 999
         return 601
+
+    def fake_mkdirs(path):
+        pan_ops.append(("mkdirs", path))
+        return 999 if path == "/旧版归档" else 600
 
     def fake_list_entries(cid, limit=2000):
         # 目的目录已存在 720p 旧版本 `Dune (2021).mkv` 应触发高画质洗版搬去 _待清理旧版
@@ -467,7 +477,7 @@ def test_conflict_replace_if_better_bdmv_and_cancel_mid_queue(tmp_path):
 
     with patch.object(pan, "resolve_dir_cid", return_value=500), \
          patch.object(pan, "walk_media_tree", side_effect=fake_walk), \
-         patch.object(pan, "mkdirs", return_value=600), \
+         patch.object(pan, "mkdirs", side_effect=fake_mkdirs), \
          patch.object(pan, "ensure_subdir", side_effect=fake_ensure_subdir), \
          patch.object(pan, "list_entries", side_effect=fake_list_entries), \
          patch.object(pan, "rename_entry", side_effect=fake_rename), \
@@ -492,7 +502,7 @@ def test_conflict_replace_if_better_bdmv_and_cancel_mid_queue(tmp_path):
              "files": [{"id": "6001", "name": "Dune.2021.2160p.mkv", "size": 20 * 1024**3, "sha1": "NEW", "parent_cid": "500", "dir_path": "/来片", "parent_dirs": [], "sibling_names": [], "sibling_entries": []}],
              "bdmv_dirs": [], "dirs": [],
          }), \
-         patch.object(pan, "mkdirs", return_value=600), \
+         patch.object(pan, "mkdirs", side_effect=fake_mkdirs), \
          patch.object(pan, "ensure_subdir", side_effect=fake_ensure_subdir), \
          patch.object(pan, "list_entries", return_value=[{"id": "old1", "name": "Dune (2021) - 2160p.mkv", "size": 2 * 1024**3, "is_dir": False}]), \
          patch.object(pan, "rename_entry", side_effect=lambda f, n: pan_ops.append(("rename", str(f), n))), \
@@ -886,7 +896,7 @@ def test_organize_tg_notification_aggregation_and_schedule_silence():
     assert "📺 狂飙 (2023) [tmdbid=215403]（2 集）" in msg
     assert "🎬 电影1" in msg and "含 2 个字幕" in msg
     assert "另有 2 部作品（共 2 项）" in msg  # 8 部作品仅展示前 6 部，余 2 部折叠
-    assert "操作账本" in msg
+    assert "记录查询 → 整理记录" in msg
     assert "▶️ 主程序转存与云下载已恢复运行" in msg
 
     # 2) 定时整理 0 移动 0 失败 -> 静默不推 TG；手动触发 0 移动 0 失败 -> 推送简洁反馈
@@ -986,8 +996,9 @@ def test_scrape_noop_and_abort_tg_reports():
 def test_audit_template_injection_and_local_meta_security(tmp_path):
     from fastapi.testclient import TestClient
     from backend import auth
+    from backend.core.media_parser import parse_media_filename
     from backend.main import app
-    from backend.core.media_parser import format_media_target, parse_media_filename, validate_organize_template
+    from backend.core.media_parser import format_media_target, validate_organize_template
 
     for bad_tpl in (
         "{title.__class__.__init__.__globals__}/{title}{ext}",
@@ -1404,6 +1415,159 @@ def test_media_scrape_schedule_and_fifo_queueing():
 
     assert mw._pending_scheduled_scrape is False
     assert executed_order == ["organize", "scrape"]
+
+
+def test_media_retry_task_and_replace_better_rollback():
+    from fastapi.testclient import TestClient
+    from backend import auth
+    from backend.core.media_parser import parse_media_filename
+    from backend.main import app
+
+    token = auth.make_token("admin")
+    client = TestClient(app)
+    h = {"Authorization": f"Bearer {token}"}
+
+    # 1. 失败任务重试接口
+    tid = db.insert(
+        "INSERT INTO media_tasks(task_kind,media_type,source_dir,orig_name,orig_path,status,selected_tmdb_id,selected_kind,selected_title,error,created_at,updated_at) "
+        "VALUES('scrape','movie','/电影','Test.mkv','/电影/Test.mkv','failed',999,'movie','测试电影','网络异常',1,1)"
+    )
+    with patch.object(media_worker, "schedule_commit_runner_if_idle"):
+        r_retry = client.post(f"/api/media/tasks/{tid}/retry", headers=h)
+        assert r_retry.status_code == 200
+        row = db.query("SELECT status, error FROM media_tasks WHERE id=?", (tid,), one=True)
+        assert row["status"] == "queued" and row["error"] == ""
+
+    # 2. replace_if_better 新文件移动失败时必须把旧文件移回 dest_cid
+    moves = []
+    pm = parse_media_filename("Movie.2024.2160p.mkv")
+    item = {
+        "file_id": "new_1", "orig_name": "Movie.2024.2160p.mkv", "orig_path": "/源/Movie.2024.2160p.mkv",
+        "parent_cid": "10", "source_cid": "10", "dest_root": "/目标", "size": 5 * 1024**3, "sha1": "NEWSHA",
+        "is_bdmv": False, "subtitles": [], "parsed": pm,
+    }
+    ecache = {20: [{"id": "old_1", "name": "Movie (2024).mkv", "size": 1 * 1024**3}], 10: [{"id": "new_1", "name": "Movie.2024.2160p.mkv"}]}
+    with patch.object(pan, "mkdirs", return_value=99), \
+         patch.object(pan, "move_entries", side_effect=lambda fids, dst: moves.append((list(fids), dst))), \
+         patch("backend.worker.media_worker.scanner._move_and_rename_single_sync", side_effect=RuntimeError("115 move err")):
+        import pytest
+        with pytest.raises(RuntimeError):
+            media_worker._apply_media_placement_sync(
+                item=item, rel_dir="Movie (2024)", target_name="Movie (2024).mkv",
+                settings={"media_conflict_policy": "replace_if_better", "wash_archive_dir": "/旧版归档"},
+                batch_id="b1", dest_root_cache={"/目标": 20}, subdir_cache={(20, "Movie (2024)"): 20},
+                dir_entries_cache=ecache,
+            )
+    assert moves == [(["old_1"], 99), (["old_1"], 20)]
+
+
+def test_media_bdmv_prefer_best_switch():
+    from backend.core.media_parser import parse_media_filename
+
+    # 1. 开启 media_bdmv_prefer_best：新来的 BDMV 原盘文件夹替换已有单视频文件
+    moves = []
+    pm_bdmv = parse_media_filename("沙丘.2021.BDMV", is_dir=True)
+    item_bdmv = {
+        "file_id": "bdmv_1", "orig_name": "沙丘.2021.BDMV", "orig_path": "/源/沙丘.2021.BDMV",
+        "parent_cid": "10", "source_cid": "10", "dest_root": "/目标", "size": 0, "sha1": "",
+        "is_bdmv": True, "subtitles": [], "parsed": pm_bdmv,
+    }
+    ecache1 = {20: [{"id": "mkv_old", "name": "沙丘 (2021).mkv", "size": 20 * 1024**3, "is_dir": False}], 10: []}
+    with patch.object(pan, "mkdirs", return_value=99), \
+         patch.object(pan, "move_entries", side_effect=lambda fids, dst: moves.append((list(fids), dst))), \
+         patch.object(pan, "rename_entry"):
+        res1 = media_worker._apply_media_placement_sync(
+            item=item_bdmv, rel_dir="沙丘 (2021)", target_name="沙丘 (2021)",
+            settings={"media_conflict_policy": "replace_if_better", "media_bdmv_prefer_best": True, "wash_archive_dir": "/旧版归档"},
+            batch_id="b_bdmv1", dest_root_cache={"/目标": 20}, subdir_cache={(20, "沙丘 (2021)"): 20},
+            dir_entries_cache=ecache1,
+        )
+    assert res1["action"] == "replace_better"
+    assert (["mkv_old"], 99) in moves
+
+    # 2. 开启 media_bdmv_prefer_best：已有 BDMV 原盘文件夹时，新来的单视频文件直接跳过
+    pm_mkv = parse_media_filename("沙丘.2021.2160p.mkv")
+    item_mkv = {
+        "file_id": "mkv_new", "orig_name": "沙丘.2021.2160p.mkv", "orig_path": "/源/沙丘.2021.2160p.mkv",
+        "parent_cid": "10", "source_cid": "10", "dest_root": "/目标", "size": 30 * 1024**3, "sha1": "S2",
+        "is_bdmv": False, "subtitles": [], "parsed": pm_mkv,
+    }
+    ecache2 = {20: [{"id": "bdmv_old", "name": "沙丘 (2021)", "size": 0, "is_dir": True}], 10: []}
+    res2 = media_worker._apply_media_placement_sync(
+        item=item_mkv, rel_dir="沙丘 (2021)", target_name="沙丘 (2021).mkv",
+        settings={"media_conflict_policy": "replace_if_better", "media_bdmv_prefer_best": True},
+        batch_id="b_bdmv2", dest_root_cache={"/目标": 20}, subdir_cache={(20, "沙丘 (2021)"): 20},
+        dir_entries_cache=ecache2,
+    )
+    assert res2["status"] == "skipped" and "BDMV" in res2["reason"]
+
+
+def test_meta_gc_on_replace_and_manual_orphan(tmp_path):
+    from backend.worker.media_worker import meta_gc
+
+    meta_root = tmp_path / "media_meta"
+    db.set_setting("media_local_meta_dir", str(meta_root))
+
+    # 1. 主动洗版淘汰旧元数据与旧任务
+    old_dir = meta_root / "旧片 (2020)"
+    (old_dir / "Season 01").mkdir(parents=True, exist_ok=True)
+    (old_dir / "tvshow.nfo").write_text("<tvshow/>", encoding="utf-8")
+    (old_dir / "Season 01" / "旧片 - S01E01.nfo").write_text("<episodedetails/>", encoding="utf-8")
+
+    new_dir = meta_root / "新片 (2020)"
+    new_dir.mkdir(parents=True, exist_ok=True)
+    (new_dir / "movie.nfo").write_text("<movie/>", encoding="utf-8")
+
+    old_tid = db.insert(
+        "INSERT INTO media_tasks(task_kind,media_type,rule_id,source_dir,file_id,orig_name,orig_path,target_name,status,local_meta_dir,created_at,updated_at) "
+        "VALUES('scrape','tv',1,'/媒体库','fid_old','old.mkv','/媒体库/old.mkv','旧片 - S01E01.mkv','done',?,1,1)",
+        (str(old_dir),),
+    )
+    res_rep = meta_gc.cleanup_replaced_media_task("fid_old", new_meta_dir=str(new_dir))
+    assert res_rep["tasks_marked"] == 1
+    assert res_rep["dirs_removed"] == 1
+    assert not old_dir.exists()
+    assert new_dir.exists()
+    assert db.query("SELECT status FROM media_tasks WHERE id=?", (old_tid,), one=True)["status"] == "replaced"
+
+    # 2. 用户手动删改 115 后，孤儿元数据对账清理
+    orphan_dir = meta_root / "已删电影 (2021)"
+    orphan_dir.mkdir(parents=True, exist_ok=True)
+    (orphan_dir / "movie.nfo").write_text("<movie/>", encoding="utf-8")
+    keep_dir = meta_root / "保留电影 (2022)"
+    keep_dir.mkdir(parents=True, exist_ok=True)
+    (keep_dir / "movie.nfo").write_text("<movie/>", encoding="utf-8")
+
+    orphan_tid = db.insert(
+        "INSERT INTO media_tasks(task_kind,media_type,rule_id,source_dir,file_id,orig_name,orig_path,target_name,status,local_meta_dir,created_at,updated_at) "
+        "VALUES('scrape','movie',77,'/媒体库','fid_gone','g.mkv','/媒体库/g.mkv','g.mkv','done',?,1,1)",
+        (str(orphan_dir),),
+    )
+    keep_tid = db.insert(
+        "INSERT INTO media_tasks(task_kind,media_type,rule_id,source_dir,file_id,orig_name,orig_path,target_name,status,local_meta_dir,created_at,updated_at) "
+        "VALUES('scrape','movie',77,'/媒体库','fid_live','k.mkv','/媒体库/k.mkv','k.mkv','done',?,1,1)",
+        (str(keep_dir),),
+    )
+    gc_res = meta_gc.gc_orphan_local_metadata({"fid_live"}, {77})
+    assert gc_res["tasks_marked"] == 1 and gc_res["dirs_removed"] == 1
+    assert not orphan_dir.exists() and keep_dir.exists()
+    assert db.query("SELECT status FROM media_tasks WHERE id=?", (orphan_tid,), one=True)["status"] == "replaced"
+    assert db.query("SELECT status FROM media_tasks WHERE id=?", (keep_tid,), one=True)["status"] == "done"
+
+    # 3. 同一目录从 tv 改刮 movie 时互斥清理残留 tvshow.nfo / Season 目录
+    switch_dir = meta_root / "同目录改型 (2023)"
+    (switch_dir / "Season 01").mkdir(parents=True, exist_ok=True)
+    (switch_dir / "tvshow.nfo").write_text("<tvshow/>", encoding="utf-8")
+    tmdb_scraper.save_local_metadata(
+        switch_dir, {"id": 999, "title": "同目录改型", "release_date": "2023-01-01"},
+        "movie", write_nfo=True, download_poster=False,
+    )
+    assert (switch_dir / "movie.nfo").is_file()
+    assert not (switch_dir / "tvshow.nfo").exists()
+    assert not (switch_dir / "Season 01").exists()
+
+
+
 
 
 

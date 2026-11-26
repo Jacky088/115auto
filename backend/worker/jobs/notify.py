@@ -7,6 +7,7 @@ import time
 from ... import database as db
 from ...core import classifier, logstream
 from ...pan115 import client as pan
+from .webhook import send_webhook
 
 def _jobs():
     """延迟获取 jobs 包门面，避免循环导入并保证测试 patch 透明生效。"""
@@ -285,6 +286,7 @@ CHANNEL_FNS = {
     "bark": _notify_bark,
     "pushplus": _notify_pushplus,
     "ntfy": _notify_ntfy,
+    "webhook": send_webhook,
 }
 
 # 渠道未配置时的提示文案（前端测试按钮直接展示，帮助用户补配置）
@@ -293,6 +295,7 @@ CHANNEL_EMPTY_HINT = {
     "bark": "未填写 Bark 推送 URL（形如 https://api.day.app/你的key）",
     "pushplus": "未填写 PushPlus Token",
     "ntfy": "未填写 ntfy 主题 URL（形如 https://ntfy.sh/你的主题）",
+    "webhook": "未填写 Webhook 推送地址（支持企业微信/飞书/钉钉/自定义 JSON）",
 }
 
 
@@ -330,7 +333,7 @@ def test_channel(channel: str) -> tuple[bool, str]:
     if fn is None:
         return False, f"未知通知渠道: {channel}"
     try:
-        if fn("🔔 115 自动转存测试通知\n收到这条消息说明该通知渠道配置正确。"):
+        if fn("🔔 115 自动转存助手测试通知\n通知渠道配置正常。"):
             return True, "测试消息已发送，请到对应 App 查看"
         # 失败：区分「未配置」和「配置了但发送失败」
         return False, CHANNEL_EMPTY_HINT.get(channel, "发送失败：请检查该渠道配置（URL/Token 是否完整、服务器网络是否可达）")
@@ -365,7 +368,7 @@ def send_test(token: str, chat_id: str) -> tuple[bool, str]:
         resp = _jobs().httpx.post(
             f"https://api.telegram.org/bot{token}/sendMessage",
             json={"chat_id": chat_id,
-                  "text": "🔔 115 自动转存助手测试通知\n收到这条消息说明该通知渠道配置正确。",
+                  "text": "🔔 115 自动转存助手测试通知\n通知渠道配置正常。",
                   "disable_web_page_preview": True},
             proxy=_jobs()._tg_proxy(), timeout=15,
         )
@@ -455,10 +458,9 @@ def notify_transfer(title: str, category: str, source: str, target: str,
         if target:
             lines.append("📂 目标：" + target)
         if kind == "offline":
-            lines.append("① 任务已提交至 115 云下载")
-            lines.append("⏳ 下载完成后将推送第②条通知")
+            lines.append("① 已提交 115 云下载，完成后将发第②条通知")
         elif kind == "offline_done":
-            lines.append("② 115 已下载完毕，文件已保存至目标目录")
+            lines.append("② 文件已落盘至目标目录")
         if size:
             if big:
                 lines.append("🚨 本次占用：" + _fmt_size(size) + "（≥ 1 TB，请留意 115 空间）")
@@ -504,10 +506,8 @@ def check_space_alert(trigger: str = ""):
                f"📊 已用：{_fmt_size(use)} / {_fmt_size(total)}（{ratio:.1f}%）\n"
                f"📉 剩余：{_fmt_size(remain)}\n"
                + (f"📌 触发：{trigger}\n" if trigger else "") +
-               "\n⚠️ 空间接近上限，后续转存/云下载可能失败。\n"
-               "请到 115 网盘或网页「文件管理」清理无用文件，\n"
-               "也可在「设置 → 每日转存上限」临时调低。\n\n"
-               "空间回落到 90% 以下后，本提醒会重新生效。")
+               "\n⚠️ 空间接近上限，后续转存/云下载可能失败。请到 115 网盘或网页「网盘文件」清理，也可在「系统设置」调低每日上限。\n"
+               "空间降至 90% 以下后自动解除。")
         db.set_setting("space_alert_level", level)
         db.set_setting("space_alert_at", time.time())
         logstream.warn("system",

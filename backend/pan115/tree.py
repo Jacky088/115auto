@@ -48,14 +48,16 @@ def organize_seasons(cid: int, min_files: int = 2) -> int:
             new_id = pan._to_int(data.get("file_id") or data.get("cid") or resp.get("cid"), 0)
             if not new_id:
                 new_id = pan._list_dir(cid).get(sname, 0)
+            if not new_id:
+                raise pan.Pan115Error(f"创建 {sname} 后未能定位 cid")
             target = {"id": str(new_id), "name": sname, "is_dir": True}
             entries.append(target)
-            time.sleep(0.5)
+            time.sleep(0.5 * pan.pace_factor())
         # 用 move_entries（分批 + 校验响应 + 失效缓存）替代裸 fs_move，
         # 避免移动失败被静默忽略或单批数量超限
         pan.move_entries([str(i["id"]) for i in items], int(str(target["id"])))
         moved += len(items)
-        time.sleep(0.5)
+        time.sleep(0.5 * pan.pace_factor())
     return moved
 
 
@@ -71,10 +73,14 @@ def walk_media_tree(root_cid: int, root_path: str, max_depth: int = 4) -> dict:
     bdmv_out: list[dict] = []
     dirs_out: list[dict] = []
 
+    scanned_dirs = 0
     while queue_dirs:
         cur_cid, cur_path, rel_parents, depth = queue_dirs.pop(0)
         if depth > max_depth:
             continue
+        if scanned_dirs > 0:
+            time.sleep(0.25 * pan.pace_factor())
+        scanned_dirs += 1
         entries = pan.list_entries(cur_cid, limit=2000)
         dir_names_lower = {e["name"].lower() for e in entries if e.get("is_dir")}
         # BDMV / VIDEO_TS 原盘保护：父目录视作原子整体，不再深入枚举 Stream/*.m2ts

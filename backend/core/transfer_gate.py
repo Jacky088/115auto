@@ -98,6 +98,14 @@ def clear_cancel() -> None:
     _cancel_requested = False
 
 
+async def is_cancel_requested_async() -> bool:
+    """协程内非阻塞判断：是否已收到中止请求或系统总开关已关闭。"""
+    if _cancel_requested:
+        return True
+    val = await asyncio.to_thread(db.get_setting, "running", False)
+    return str(val).lower() != "true"
+
+
 def is_cancel_requested() -> bool:
     """是否已被手动请求停止或系统总开关已关闭。"""
     if _cancel_requested:
@@ -146,11 +154,12 @@ def _reset_gate_on_drain_abort() -> None:
     intake 在此一并恢复开闸：本函数被调用意味着本次独占任务已彻底放弃，
     若调用方遗漏 finally resume_all，追剧补全等 intake 门闸消费者也不会被永久挂起。"""
     global _state, _active_mode, _cutoff_id
-    _state = "idle"
-    _active_mode = "none"
-    _cutoff_id = 0
-    _media_progress.pop("drain_started_at", None)
-    _get_intake_event().set()
+    with _mode_lock:
+        _state = "idle"
+        _active_mode = "none"
+        _cutoff_id = None
+        _media_progress.pop("drain_started_at", None)
+        _get_intake_event().set()
 
 
 def get_exclusive_status() -> dict:
@@ -206,15 +215,13 @@ def _norm_hhmm(raw: str, fallback: str) -> str:
         return fallback
 
 
-def is_in_schedule_window() -> bool:
-    """115 防风控定时计划判断：
-    未开启时放行全天候运行；开启后判定当前时钟是否处于运行窗口（支持跨零点，如 22:00 ~ 08:00）。
-    若 start == end 则视为全天放行。
-    """
+def is_hm_in_schedule_window(hm: str) -> bool:
+    """判断指定 HH:MM 时钟是否处于允许运行窗口内（未开启定时计划时恒为 True）。"""
     if not db.get_setting("schedule_enabled", False):
         return True
-    from datetime import datetime
-    now = datetime.now().strftime("%H:%M")
+    now = _norm_hhmm(hm, "")
+    if not now:
+        return True
     # 入口统一补零规范化，避免 "9:00" 与 "09:30" 的字符串比较错位（'9' > '0'）
     start = _norm_hhmm(db.get_setting("schedule_start", "22:00") or "22:00", "22:00")
     end = _norm_hhmm(db.get_setting("schedule_end", "08:00") or "08:00", "08:00")
@@ -223,6 +230,15 @@ def is_in_schedule_window() -> bool:
     if start <= end:
         return start <= now <= end
     return now >= start or now <= end  # 跨零点情况
+
+
+def is_in_schedule_window() -> bool:
+    """115 防风控定时计划判断：
+    未开启时放行全天候运行；开启后判定当前时钟是否处于运行窗口（支持跨零点，如 22:00 ~ 08:00）。
+    若 start == end 则视为全天放行。
+    """
+    from datetime import datetime
+    return is_hm_in_schedule_window(datetime.now().strftime("%H:%M"))
 
 
 def mark_transfer_active(active: bool):

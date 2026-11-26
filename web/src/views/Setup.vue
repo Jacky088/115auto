@@ -96,11 +96,10 @@
             <el-radio :value="true">仅订阅</el-radio>
           </el-radio-group>
           <p class="ch-type-tip" style="margin: 8px 0 0">
-            全盘转存 = 所有资源链接都转存；仅订阅 = 只转存命中订阅关键词的内容。
-            之后可在「账号管理」按频道独立调整
+            全盘转存：转存全部资源；仅订阅：仅转存命中订阅关键词的内容（后续可在「账号管理」调整）。
           </p>
           <p v-if="wizardSubOnly === null" class="warn-text" style="font-size: var(--fs-caption); margin: 6px 0 0">
-            ⚠️ 必须选择订阅模式（全盘转存 或 仅订阅），选择后才能进入下一步
+            ⚠️ 请先选择订阅模式
           </p>
         </div>
         <!-- both 模式：逐行指定接入方式（默认网页轮询；私密频道请选 Userbot） -->
@@ -157,7 +156,7 @@
               </div>
               <el-button type="primary" size="large" :loading="starting"
                          :disabled="!ready.data?.ready" @click="startNow">开始运行</el-button>
-              <el-button plain @click="skipFinish">稍后再启动（直接进入系统，顶栏可随时点击「开始运行」）</el-button>
+              <el-button plain @click="skipFinish">稍后启动（进入系统）</el-button>
             </div>
           </template>
         </el-result>
@@ -168,7 +167,7 @@
     <CookieImportDialog v-model="cookieVisible" @success="onCookieImported" />
 
     <!-- Userbot 登录弹窗：选择 Userbot 模式后必须登录 TG 账号，否则校验不通过 -->
-    <el-dialog v-model="ubDialog" title="登录 Telegram Userbot" :width="'min(500px, 94vw)'" align-center
+    <el-dialog v-model="ubDialog" title="登录 Telegram Userbot" :width="'min(500px, calc(100vw - 36px))'" align-center
                :close-on-click-modal="false">
       <UserbotLogin compact @update="onUbUpdate" />
       <template #footer>
@@ -183,6 +182,7 @@ import { computed, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { api, errMsg } from '../api'
+import { confirmAction } from '../composables/confirmDialog'
 import { resetWizardCache } from '../router'
 import CookieImportDialog from '../components/CookieImportDialog.vue'
 import UserbotLogin from '../components/UserbotLogin.vue'
@@ -304,23 +304,14 @@ const skipFinish = async () => {
   await loadReadiness()
   if (ready.data?.ready) return finish()
   const reasons = (ready.data?.reasons || []).map((r) => `· ${r}`).join('\n')
-  try {
-    await ElMessageBox.confirm(
-      `当前还缺：
-${reasons}
-
-进入后可在「账号管理」补全配置，再到顶栏点击「开始运行」。`,
-      '配置尚未完成，仍要进入系统？',
-      {
-        confirmButtonText: '进入系统',
-        cancelButtonText: '留在向导',
-        type: 'warning',
-      },
-    )
-    await finish()
-  } catch {
-    // 用户选择留在向导中补全
-  }
+  const ok = await confirmAction({
+    title: '配置尚未完成，仍要进入系统？',
+    message: `当前还缺：\n${reasons}\n\n进入后可在「账号管理」补全配置，再到顶栏点击「开始运行」。`,
+    confirmText: '进入系统',
+    cancelText: '留在向导',
+    type: 'warning',
+  })
+  if (ok) await finish()
 }
 
 // ---- TG mode ----
@@ -350,16 +341,19 @@ watch(channelLines, (names) => {
 }, { immediate: true })
 const addChannels = async () => {
   if (wizardSubOnly.value === null) { ElMessage.warning('请先选择订阅模式（全盘转存 / 仅订阅）'); return }
+  const rawLines = channelText.value.split('\n').map(l => l.trim()).filter(Boolean)
+  if (!rawLines.length) { ElMessage.warning('请至少输入一个监控频道'); return }
   adding.value = true
   let ok = 0
   const fails = []
   try {
-    for (const line of channelText.value.split('\n')) {
-      const name = line.trim()
-      if (!name) continue
-      // userbot 模式全部走 Userbot；both 模式按逐行选择；polling 模式全部网页轮询
+    for (const line of rawLines) {
+      const m = line.match(/t\.me\/(?:s\/)?@?([0-9A-Za-z_]+)/)
+      const pureName = (m ? m[1] : line.replace(/^@/, '')).trim()
+      const name = pureName || line
+      // userbot 模式全部走 Userbot；both 模式按逐行选择（key 与 channelLines 保持一致）；polling 模式全部网页轮询
       const type = tgMode.value === 'userbot' ? 'userbot'
-        : tgMode.value === 'both' ? (chTypes[name] || 'polling') : 'polling'
+        : tgMode.value === 'both' ? (chTypes[pureName] || 'polling') : 'polling'
       try {
         await api.post('/api/channels', { name, type, sub_only: wizardSubOnly.value })
         ok++
@@ -419,8 +413,8 @@ const finish = async () => {
 
 <style scoped>
 .setup-bg { padding: 40px 0; }
-.setup-card { width: min(640px, calc(100vw - 24px)); border-radius: 16px; border: none;
-              box-shadow: 0 24px 70px rgba(5, 18, 48, .45) !important; }
+.setup-card { width: min(640px, calc(100vw - 24px)); border-radius: var(--saas-radius, 12px); border: 1px solid var(--glass-border);
+              box-shadow: var(--glass-shadow-lg) !important; }
 /* 正文/提示文字统一用主题变量：固定灰值在深色玻璃卡片上会不可读 */
 .step-desc { text-align: center; color: var(--saas-text-sub); margin: 4px 0 18px; }
 /* 步骤条可读性：
@@ -440,7 +434,7 @@ const finish = async () => {
 .setup-card :deep(.el-step__title) { word-break: keep-all; }
 .qr-box { width: 200px; margin: 0 auto; cursor: pointer; background: #fff; padding: 8px; border-radius: 8px; }
 .qr-box :deep(svg), .qr-box img { width: 100%; height: auto; display: block; }
-.qr-err { color: #f56c6c; font-size: var(--fs-body); margin: 4px; }
+.qr-err { color: var(--el-color-danger, #ef4444); font-size: var(--fs-body); margin: 4px; }
 .ub-wizard {
   border: 1px solid var(--el-color-primary-light-7); background: var(--el-color-primary-light-9);
   border-radius: var(--r-md); padding: 14px 16px;
@@ -468,6 +462,6 @@ const finish = async () => {
 }
 .ready-item { display: flex; align-items: center; gap: 8px; font-size: var(--fs-body); color: var(--saas-text-main); }
 .ready-item .el-icon.ok { color: var(--el-color-success); }
-.ready-item .el-icon.bad { color: #f56c6c; }
+.ready-item .el-icon.bad { color: var(--el-color-danger, #ef4444); }
 .ready-item .el-button { margin-left: auto; }
 </style>

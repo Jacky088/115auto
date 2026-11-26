@@ -92,6 +92,21 @@ export const fmtTime = (ts) => {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
 }
 
+/** 仅展示时分秒，适合实时测试/刷新状态的时间戳证明（如 15:27:32） */
+export const fmtClock = (ts) => {
+  if (!ts) return ''
+  let d
+  if (typeof ts === 'number') {
+    d = new Date(ts > 1e11 ? ts : ts * 1000)
+  } else if (typeof ts === 'string') {
+    const num = Number(ts)
+    d = !isNaN(num) && num > 0 ? new Date(num > 1e11 ? num : num * 1000) : new Date(ts)
+  }
+  if (!d || isNaN(d.getTime()) || d.getFullYear() < 2000) return ''
+  const p = (n) => String(n).padStart(2, '0')
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+}
+
 export const statusLabel = {
   queued: '排队中', running: '转存中', submitted: '已提交云下载', success: '成功', failed: '失败',
   blocked: '黑名单', duplicate: '重复', skipped: '已跳过',

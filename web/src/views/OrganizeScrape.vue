@@ -29,36 +29,48 @@
     <!-- 主工作台：三大独立程序与设置标签页 -->
     <el-card shadow="never" class="page-card">
       <el-tabs v-model="activeTab" @tab-change="onTabChange">
-        <el-tab-pane label="📁 目录整理" name="organize">
+        <el-tab-pane name="organize">
+          <template #label>
+            <span class="tab-label"><el-icon><FolderOpened /></el-icon><span>目录整理</span></span>
+          </template>
           <OrganizeTab ref="organizeTabRef" />
         </el-tab-pane>
 
         <el-tab-pane name="scrape">
           <template #label>
-            <span>🎬 媒体刮削</span>
-            <el-badge
-              v-if="(status.counts.need_confirm + status.counts.staged) > 0"
-              :value="status.counts.need_confirm + status.counts.staged"
-              class="tab-badge"
-            />
+            <span class="tab-label">
+              <el-icon><Film /></el-icon>
+              <span>媒体刮削</span>
+              <el-badge
+                v-if="(status.counts.need_confirm + status.counts.staged) > 0"
+                :value="status.counts.need_confirm + status.counts.staged"
+                class="tab-badge"
+              />
+            </span>
           </template>
           <ScrapeTab ref="scrapeTabRef" />
         </el-tab-pane>
 
         <el-tab-pane name="dedupe">
           <template #label>
-            <span>🧹 重复清理</span>
-            <el-badge
-              v-if="(status.counts.dedupe_rules || 0) > 0"
-              :value="status.counts.dedupe_rules"
-              type="info"
-              class="tab-badge"
-            />
+            <span class="tab-label">
+              <el-icon><Brush /></el-icon>
+              <span>重复清理</span>
+              <el-badge
+                v-if="(status.counts.dedupe_rules || 0) > 0"
+                :value="status.counts.dedupe_rules"
+                type="info"
+                class="tab-badge"
+              />
+            </span>
           </template>
           <DedupeTab ref="dedupeTabRef" />
         </el-tab-pane>
 
-        <el-tab-pane label="⚙️ 策略与设置" name="settings">
+        <el-tab-pane name="settings">
+          <template #label>
+            <span class="tab-label"><el-icon><Setting /></el-icon><span>策略与设置</span></span>
+          </template>
           <MediaSettingsTab ref="settingsTabRef" />
         </el-tab-pane>
       </el-tabs>
@@ -70,8 +82,11 @@
 
 <script setup>
 import { computed, onMounted, onUnmounted, provide, ref } from 'vue'
+import { useRoute } from 'vue-router'
 import { api, errMsg, toast } from '../api'
 import { confirmAction } from '../composables/confirmDialog'
+import { usePolling } from '../composables/usePolling'
+import { usePersistedTab } from '../composables/usePersistedTab'
 import '../components/media/media.css'
 import OrganizeTab from '../components/media/OrganizeTab.vue'
 import ScrapeTab from '../components/media/ScrapeTab.vue'
@@ -79,7 +94,8 @@ import DedupeTab from '../components/media/DedupeTab.vue'
 import MediaSettingsTab from '../components/media/MediaSettingsTab.vue'
 import MediaRuleDialog from '../components/media/MediaRuleDialog.vue'
 
-const activeTab = ref('organize')
+const route = useRoute()
+const activeTab = usePersistedTab('media', ['organize', 'scrape', 'dedupe', 'settings'], 'organize', route)
 const pageLoading = ref(true)
 
 const organizeTabRef = ref(null)
@@ -194,7 +210,10 @@ async function stopMedia() {
   finally { stopping.value = false }
 }
 
+const togglingRuleIds = new Set()
 async function toggleRuleEnabled(row, val) {
+  if (togglingRuleIds.has(row.id)) return
+  togglingRuleIds.add(row.id)
   try {
     await api.put(`/api/media/rules/${row.id}`, {
       ...row,
@@ -202,14 +221,21 @@ async function toggleRuleEnabled(row, val) {
       scrape_enabled: !!row.scrape_enabled,
       enabled: !!val,
     })
+    organizeTabRef.value?.clearPreviewCache?.()
     await Promise.all([loadRules(), loadStatus()])
-  } catch (e) { toast.error(errMsg(e)) }
+  } catch (e) {
+    toast.error(errMsg(e))
+    await loadRules()
+  } finally {
+    togglingRuleIds.delete(row.id)
+  }
 }
 
 async function delRule(id) {
   try {
     await api.delete(`/api/media/rules/${id}`)
     toast.success('已删除规则')
+    organizeTabRef.value?.clearPreviewCache?.()
     await Promise.all([loadRules(), loadStatus()])
   } catch (e) { toast.error(errMsg(e)) }
 }
@@ -265,7 +291,28 @@ function onTabChange(tab) {
   }
 }
 
-let pollTimer = null
+let prevPollMode = 'none'
+let prevScrapePending = 0
+const mediaPoll = usePolling(async () => {
+  await loadStatus()
+  const mode = status.value.gate.active_mode
+  const curPending = Number(status.value.counts?.running || 0) + Number(status.value.counts?.queued || 0)
+  const finishedOrganize = prevPollMode === 'organize' && mode !== 'organize'
+  const finishedScrape = (prevPollMode === 'scrape' && mode !== 'scrape') || (prevScrapePending > 0 && curPending === 0)
+  const finishedDedupe = prevPollMode === 'dedupe' && mode !== 'dedupe'
+
+  if (activeTab.value === 'organize' && (mode === 'organize' || finishedOrganize || !organizeTabRef.value?.hasRecords())) {
+    await organizeTabRef.value?.loadRecords()
+  } else if (activeTab.value === 'scrape' && (mode === 'scrape' || curPending > 0 || finishedScrape)) {
+    await scrapeTabRef.value?.loadTasks()
+  } else if (activeTab.value === 'dedupe' && (mode === 'dedupe' || finishedDedupe || !dedupeTabRef.value?.hasRecords())) {
+    await dedupeTabRef.value?.loadDedupeRecords()
+  }
+
+  prevPollMode = mode
+  prevScrapePending = curPending
+}, 2500)
+
 onMounted(async () => {
   onResize()
   if (typeof window !== 'undefined') {
@@ -284,24 +331,13 @@ onMounted(async () => {
   } finally {
     pageLoading.value = false
   }
-  pollTimer = setInterval(async () => {
-    await loadStatus()
-    if (activeTab.value === 'organize' && (status.value.gate.active_mode === 'organize' || !organizeTabRef.value?.hasRecords())) {
-      await organizeTabRef.value?.loadRecords()
-    } else if (activeTab.value === 'scrape') {
-      await scrapeTabRef.value?.loadTasks()
-    } else if (activeTab.value === 'dedupe') {
-      if (status.value.gate.active_mode === 'dedupe' || !dedupeTabRef.value?.hasRecords()) {
-        await dedupeTabRef.value?.loadDedupeRecords()
-      }
-    }
-  }, 2500)
+  mediaPoll.start()
 })
 
 onUnmounted(() => {
   if (typeof window !== 'undefined') {
     window.removeEventListener('resize', onResize)
   }
-  if (pollTimer) clearInterval(pollTimer)
+  mediaPoll.stop()
 })
 </script>

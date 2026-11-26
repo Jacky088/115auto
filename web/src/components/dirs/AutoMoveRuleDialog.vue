@@ -1,8 +1,8 @@
 <template>
   <el-dialog
     v-model="visible"
-    title="添加文件整理规则"
-    :width="'min(540px, 94vw)'"
+    title="添加归档分流规则"
+    :width="'min(540px, calc(100vw - 36px))'"
     align-center
     destroy-on-close
     @open="onOpen"
@@ -10,17 +10,17 @@
     <el-form class="add-rule-form" :model="newRuleForm" label-width="100px" size="small">
       <el-form-item label="整理模式">
         <el-radio-group v-model="newRuleForm.mode">
-          <el-radio label="default">跟随默认 ({{ moveSettings.auto_move_mode === 'library' ? '总库分流' : '一对一精确' }})</el-radio>
-          <el-radio label="library">总库智能分流</el-radio>
-          <el-radio label="exact">一对一精确匹配</el-radio>
+          <el-radio value="default">跟随默认 ({{ moveSettings.auto_move_mode === 'library' ? '总库分流' : '一对一精确' }})</el-radio>
+          <el-radio value="library">总库智能分流</el-radio>
+          <el-radio value="exact">一对一精确匹配</el-radio>
         </el-radio-group>
       </el-form-item>
       <el-form-item label="媒体类型">
         <div style="display: flex; flex-direction: column; gap: 4px; width: 100%">
           <el-radio-group v-model="newRuleForm.media_type">
-            <el-radio label="auto">自动</el-radio>
-            <el-radio label="movie">电影库</el-radio>
-            <el-radio label="tv">剧集库</el-radio>
+            <el-radio value="auto">自动</el-radio>
+            <el-radio value="movie">电影库</el-radio>
+            <el-radio value="tv">剧集库</el-radio>
           </el-radio-group>
           <span style="color: var(--saas-text-sub); font-size: var(--fs-caption); line-height: 1.4">
             电影库跳过带集数标识的文件，避免两库同名错位
@@ -34,15 +34,7 @@
               <span>按父目录名匹配</span>
               <el-tooltip placement="top" effect="dark">
                 <template #content>
-                  适用场景：115 云下载的中文标题只在任务目录名上（如「【广告www..】奥德赛[简繁英字幕].The.Odyssey.2026…」），<br />
-                  目录内文件多为纯英文名（The.Odyssey.2026….mkv）。<br /><br />
-                  开启后的行为变化：<br />
-                  · 匹配对象从文件名换成任务子目录名（自动剥除含网址的广告括号段）；<br />
-                  · 目录内纯英文文件继承目录归属，电影/剧集按集数标识自动判别；<br />
-                  · 广告域名/微小体积（&lt;10MB）文件自动过滤，不入媒体库；<br />
-                  · 源目录根部散落的单文件（如 a.mp4）不参与，留待手动处理；<br />
-                  · 字幕不跟移（留给整理刮削配对）。<br /><br />
-                  仅当源目录 = 分类路由配置的云下载目录时可开启；配置变更后自动失效并告警。
+                  云下载专用：按任务子目录名匹配（保留纯英文正片），自动过滤广告与 &lt;10MB 小文件，散落单文件与字幕不移动；仅限源目录为云下载目录时可用。
                 </template>
                 <el-icon class="info-tip-icon" :size="14" tabindex="0"><InfoFilled /></el-icon>
               </el-tooltip>
@@ -55,10 +47,24 @@
             源目录不是云下载目录 {{ cloudDirs.join('、') || '尚未配置' }}，此模式不可用
           </span>
           <span v-if="newRuleForm.dir_match" class="hint-line" style="color: var(--el-color-warning)">
-            ⚠ 开启后本规则按<b>任务子目录名</b>匹配（子目录内文件可为纯英文名），不再按文件名匹配；
-            源目录根部散落的文件不参与整理；目录内广告/微小体积文件自动过滤。
-            若日后源目录不再是云下载目录，本模式会自动失效并告警
+            ⚠ 已开启按任务子目录名匹配：散落单文件与字幕不移动，广告/小文件自动过滤；若源目录不再是云下载目录将自动失效。
           </span>
+        </div>
+      </el-form-item>
+      <el-form-item label="英文片名">
+        <div style="display: flex; flex-direction: column; gap: 4px; width: 100%">
+          <el-checkbox v-model="newRuleForm.allow_english">
+            <span class="info-tip-label">
+              <span>允许匹配纯英文剧集/电影</span>
+              <el-tooltip placement="top" effect="dark">
+                <template #content>
+                  默认仅移动文件名含汉字的资源以防误动系统或杂项文件。<br />
+                  开启后允许纯英文文件名及英文子库目录（如 Breaking Bad）参与整理，仍受媒体扩展名白名单与预告/花絮过滤保护。
+                </template>
+                <el-icon class="info-tip-icon" :size="14" tabindex="0"><InfoFilled /></el-icon>
+              </el-tooltip>
+            </span>
+          </el-checkbox>
         </div>
       </el-form-item>
       <el-form-item label="源目录" required>
@@ -135,6 +141,7 @@ const newRuleForm = ref({
   mode: 'default',
   media_type: 'auto',
   dir_match: false,
+  allow_english: false,
 })
 
 const pickerVisible = ref(false)
@@ -149,6 +156,7 @@ const onOpen = () => {
     mode: 'default',
     media_type: 'auto',
     dir_match: false,
+    allow_english: false,
   }
 }
 
@@ -204,6 +212,7 @@ const confirmAddMoveRule = async () => {
       mode: newRuleForm.value.mode || 'default',
       media_type: newRuleForm.value.media_type || 'auto',
       dir_match: !!newRuleForm.value.dir_match,
+      allow_english: !!newRuleForm.value.allow_english,
     })
     visible.value = false
     ElMessage.success('整理规则已添加')

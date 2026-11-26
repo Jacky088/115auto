@@ -64,17 +64,17 @@
       </div>
       <div class="step-actions">
         <span class="step-meta">
-          启用规则 {{ organizeRules.length }} 条 · 上次运行：{{ status.last_run.organize ? fmtTime(status.last_run.organize) : '尚未执行' }}
+          启用规则 {{ activeOrganizeRules.length }} 条 · 上次运行：{{ status.last_run.organize ? fmtTime(status.last_run.organize) : '尚未执行' }}
         </span>
-        <el-button size="default" :disabled="isBusy" :loading="previewing" @click="openPreview">
+        <el-button size="default" :disabled="organizeBtnDisabled || startingOrganize" :loading="previewing" @click="openPreview">
           🔍 预览整理效果
         </el-button>
-        <el-tooltip :content="organizeBtnTip" :disabled="!organizeBtnDisabled" placement="top">
+        <el-tooltip :content="organizeBtnTip" :disabled="!organizeBtnDisabled && !previewing" placement="top">
           <span>
             <el-button
               type="primary"
               size="default"
-              :disabled="organizeBtnDisabled"
+              :disabled="organizeBtnDisabled || previewing"
               :loading="startingOrganize || status.gate.organize_running"
               @click="runOrganize"
             >
@@ -177,7 +177,7 @@
   </div>
 
   <!-- 预览抽屉 -->
-  <el-drawer v-model="previewDrawer.open" title="目录整理预览（只读不改盘）" size="72%">
+  <el-drawer v-model="previewDrawer.open" title="目录整理预览（只读不改盘）" :size="isMobile ? '94%' : '72%'">
     <div class="mb12">
       共扫描到 <b>{{ previewDrawer.total }}</b> 个视频/原盘项目，其中
       <el-tag type="warning" size="small">{{ previewDrawer.pending_count }} 项需要调整命名/位置</el-tag>
@@ -235,7 +235,15 @@
   </el-drawer>
 
 
-  <el-dialog v-model="orgPreview.visible" title="目录整理预览 — 确认后执行" :width="'min(920px, 96vw)'" align-center>
+  <el-dialog v-model="orgPreview.visible" title="目录整理预览 — 确认后执行" :width="'min(920px, calc(100vw - 36px))'" align-center>
+    <el-alert
+      v-if="!orgPendingItems.length"
+      type="success"
+      :closable="false"
+      show-icon
+      class="mb12"
+      :title="`当前没有需要整理的文件（已符合规范 ${orgPreview.total || 0} 条）`"
+    />
     <div class="mb12" style="display: flex; flex-wrap: wrap; gap: 8px; align-items: center">
       <el-tag type="warning" effect="dark" size="small">待整理 {{ orgPreview.pending }} 条</el-tag>
       <el-tag type="success" size="small">已符合规范 {{ orgPreview.total - orgPreview.pending }} 条</el-tag>
@@ -398,6 +406,10 @@ const pagedRecords = computed(() => {
 })
 watch(recordFilter, () => { recordPage.value = 1 })
 watch(recordPageSize, () => { recordPage.value = 1 })
+watch(() => records.value.length, (len) => {
+  const maxPage = Math.max(1, Math.ceil(len / recordPageSize.value))
+  if (recordPage.value > maxPage) recordPage.value = maxPage
+})
 
 const organizeBtnDisabled = computed(() => !status.value.running || isBusy.value || activeOrganizeRules.value.length === 0)
 const organizeBtnTip = computed(() => {
@@ -407,11 +419,15 @@ const organizeBtnTip = computed(() => {
   return ''
 })
 
+let recordLoadSeq = 0
 async function loadRecords() {
+  const seq = ++recordLoadSeq
   try {
     const { data } = await api.get('/api/media/records', { params: { limit: 200 } })
-    rawRecords.value = data
-  } catch (e) { toast.error(errMsg(e)) }
+    if (seq === recordLoadSeq) rawRecords.value = data
+  } catch (e) {
+    if (seq === recordLoadSeq) toast.error(errMsg(e))
+  }
 }
 
 // 预览缓存与自动暂存：与转存分流同一套交互——扫描结果缓存 10 分钟，
@@ -489,10 +505,6 @@ async function runOrganize() {
     return
   }
   if (data.truncated) toast.warning(data.msg || '本轮扫描达到预算上限，已返回部分结果')
-  if (!data.pending_count) {
-    toast.info(`当前没有需要整理的文件（已符合规范 ${data.total} 条）`)
-    return
-  }
   orgPreviewCache.value = { ts: Date.now(), data }
   openOrgPreviewDialog(data, false)
 }
@@ -533,7 +545,7 @@ const orgGroups = computed(() => {
 const orgFiltered = computed(() => {
   const kw = orgSearch.value.trim().toLowerCase()
   return orgPendingItems.value.filter((it) => {
-    if (orgGroupFilter.value && (it.target_path || '') !== orgGroupFilter.value) return false
+    if (orgGroupFilter.value && (it.target_path || '(未知目标)') !== orgGroupFilter.value) return false
     if (!kw) return true
     return [it.orig_name, it.orig_path, it.target_name, it.target_path,
             it.parsed_title, it.year].some((s) => String(s || '').toLowerCase().includes(kw))
@@ -669,6 +681,7 @@ async function undoOne(recordId) {
     title: '撤销这条整理？',
     message: '文件将重命名并移回源目录。',
     confirmText: '撤销',
+    danger: true,
   })) return
   try {
     const { data } = await api.post('/api/media/records/undo', { record_id: recordId })
@@ -691,10 +704,16 @@ async function undoBatch(batchId) {
   } catch (e) { toast.error(errMsg(e)) }
 }
 
+function clearPreviewCache() {
+  orgPreviewCache.value = null
+  stopOrgCountdown()
+}
+
 onUnmounted(stopOrgCountdown)
 
 defineExpose({
   loadRecords,
+  clearPreviewCache,
   hasRecords: () => records.value.length > 0,
 })
 </script>

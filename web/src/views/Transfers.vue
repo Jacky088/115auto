@@ -12,13 +12,35 @@
     </template>
 
     <el-tabs v-model="activeTab" @tab-change="onTabChange">
-      <!-- ============ Tab 1：转存记录（原有列表，原样保留） ============ -->
+      <!-- ============ Tab 1：转存记录 ============ -->
       <el-tab-pane label="转存记录" name="records">
+        <div class="status-chips">
+          <span
+            v-for="sc in QUICK_STATUS_CHIPS"
+            :key="sc.value"
+            class="status-chip"
+            :class="{ active: filter.status === sc.value }"
+            @click="filter.status = sc.value; loadFromFirstPage()"
+          >
+            <span>{{ sc.label }}</span>
+            <span class="chip-cnt">{{ statusCounts[sc.key] ?? 0 }}</span>
+          </span>
+        </div>
+
         <div class="toolbar">
-          <el-select v-model="filter.status" placeholder="状态" clearable style="width: 130px" fit-input-width @change="loadFromFirstPage">
+          <el-select v-model="filter.status" placeholder="状态" clearable style="width: 120px" fit-input-width @change="loadFromFirstPage">
             <el-option v-for="(v, k) in statusLabel" :key="k" :label="v" :value="k" />
           </el-select>
-          <el-input v-model="filter.search" placeholder="搜索标题 / 分享码" clearable style="width: 260px"
+          <el-select v-model="filter.category" placeholder="分类" clearable style="width: 115px" fit-input-width @change="loadFromFirstPage">
+            <el-option v-for="r in routeOptions" :key="r.category" :label="r.category" :value="r.category" />
+          </el-select>
+          <el-select v-model="filter.kind" placeholder="类型" clearable style="width: 105px" fit-input-width @change="loadFromFirstPage">
+            <el-option label="分享" value="share" />
+            <el-option label="云下载" value="offline" />
+            <el-option label="追更" value="increment" />
+            <el-option label="补全" value="backfill" />
+          </el-select>
+          <el-input v-model="filter.search" placeholder="搜索标题 / 分享码" clearable style="width: 220px"
                     @keyup.enter="loadFromFirstPage" @clear="loadFromFirstPage">
             <template #prefix><el-icon><Search /></el-icon></template>
           </el-input>
@@ -30,6 +52,7 @@
             批量删除{{ selected.length ? `（${selected.length}）` : '' }}
           </el-button>
           <el-button type="warning" plain :loading="retrying" @click="retryAll">批量重试失败任务</el-button>
+          <el-button type="danger" text @click="clearStale">清理无效记录</el-button>
         </div>
 
         <el-alert v-if="loadError" type="error" :title="loadError" :closable="false" show-icon
@@ -44,9 +67,10 @@
           <el-table-column prop="created_at" label="时间" width="150">
             <template #default="{ row }">{{ fmtTime(row.created_at) }}</template>
           </el-table-column>
-          <el-table-column prop="title" label="标题" min-width="240" show-overflow-tooltip>
+          <el-table-column prop="title" label="标题" min-width="240">
             <template #default="{ row }">
-              <span>{{ row.title || row.share_code }}</span>
+              <div class="row-title" :title="row.title || row.share_code">{{ row.title || row.share_code }}</div>
+              <div v-if="row.error" class="row-error" :title="row.error">{{ row.error }}</div>
             </template>
           </el-table-column>
           <el-table-column prop="channel" label="来源" width="120" />
@@ -91,7 +115,7 @@
         <BackfillDialog ref="backfillDialogRef" />
 
         <!-- 手动转存 / Web Share Target 接收弹窗 -->
-        <el-dialog v-model="manualDialog.open" title="手动添加转存" width="min(540px, 94vw)" align-center class="pc-dialog">
+        <el-dialog v-model="manualDialog.open" title="手动添加转存" width="min(540px, calc(100vw - 36px))" align-center class="pc-dialog">
           <el-form :model="manualDialog" label-width="84px" @submit.prevent>
             <el-form-item label="转存内容" required>
               <el-input v-model="manualDialog.text" type="textarea" :rows="4"
@@ -180,7 +204,7 @@
 
         <el-table :data="ledgerItems" size="small" v-loading="ledgerLoading">
           <template #empty>
-            <el-empty :image-size="60" description="暂无整理记录（自该功能上线起开始记录）" />
+            <el-empty :image-size="60" description="暂无整理记录" />
           </template>
           <el-table-column prop="created_at" label="时间" width="150">
             <template #default="{ row }">{{ fmtTime(row.created_at) }}</template>
@@ -211,7 +235,7 @@
                        @current-change="loadLedger" @size-change="onLedgerSizeChange" />
 
         <!-- 撤销确认弹窗：说明「再移走」后果，可选停用涉及规则 -->
-        <el-dialog v-model="undoDialog.visible" title="撤销整理" width="min(480px, 94vw)" align-center>
+        <el-dialog v-model="undoDialog.visible" title="撤销整理" width="min(480px, calc(100vw - 36px))" align-center>
           <p style="margin: 0 0 8px">
             将撤销 <b>{{ undoDialog.label }}</b>，文件会被移回整理前的源目录。
           </p>
@@ -233,10 +257,11 @@
 <script setup>
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import { Search } from '@element-plus/icons-vue'
-import { api, errMsg, fmtSize, fmtTime, saveOk, statusLabel } from '../api'
+import { api, errMsg, fmtSize, fmtTime, saveOk, statusLabel, statusTagType } from '../api'
 import { confirmAction } from '../composables/confirmDialog'
+import { usePersistedTab } from '../composables/usePersistedTab'
 import BackfillDialog from '../components/BackfillDialog.vue'
 import DirPicker from '../components/DirPicker.vue'
 
@@ -321,7 +346,7 @@ const onRz = () => { isMobile.value = window.innerWidth <= 768 }
 onMounted(() => window.addEventListener('resize', onRz))
 onUnmounted(() => window.removeEventListener('resize', onRz))
 
-const activeTab = ref('records')
+const activeTab = usePersistedTab('transfers', ['records', 'ledger'], 'records', route)
 const onTabChange = (tab) => {
   // 整理记录懒加载：首次切到该 Tab 时才请求账本与规则列表
   if (tab === 'ledger' && !ledgerLoaded.value) {
@@ -337,13 +362,21 @@ const page = ref(1)
 const size = ref(50)  // 每页条数：默认 50，可在分页器里切换（20/50/100）
 const loading = ref(false)
 const retrying = ref(false)
-const filter = reactive({ status: '', search: '' })
+const filter = reactive({ status: '', category: '', kind: '', search: '' })
+const statusCounts = ref({ all: 0 })
+const QUICK_STATUS_CHIPS = [
+  { key: 'all', value: '', label: '全部' },
+  { key: 'queued', value: 'queued', label: '排队中' },
+  { key: 'failed', value: 'failed', label: '失败' },
+  { key: 'skipped', value: 'skipped', label: '已跳过' },
+  { key: 'duplicate', value: 'duplicate', label: '重复' },
+  { key: 'success', value: 'success', label: '成功' },
+]
 const tableRef = ref(null)
 const selected = ref([])
 const canDelete = (row) => !['running', 'success'].includes(row.status)
 
-const statusTag = (s) => ({ success: 'success', failed: 'danger', blocked: 'warning',
-                            queued: 'info', running: 'primary', duplicate: 'info', skipped: 'info' }[s] || 'info')
+const statusTag = statusTagType
 
 const loadError = ref('')
 let loadSeq = 0
@@ -353,11 +386,19 @@ const load = async () => {
   loadError.value = ''
   try {
     const { data } = await api.get('/api/transfers', {
-      params: { status: filter.status, search: filter.search, page: page.value, size: size.value },
+      params: {
+        status: filter.status,
+        category: filter.category,
+        kind: filter.kind,
+        search: filter.search,
+        page: page.value,
+        size: size.value,
+      },
     })
     if (seq !== loadSeq) return  // 已有更新的请求：丢弃过期响应，防止快速筛选时旧页覆盖新页
     items.value = data.items
     total.value = data.total
+    if (data.status_counts) statusCounts.value = data.status_counts
   } catch (e) {
     if (seq === loadSeq) loadError.value = errMsg(e)
   } finally {
@@ -387,16 +428,31 @@ const retryAll = async () => {
     load()
   } catch (e) { ElMessage.error(errMsg(e)) } finally { retrying.value = false }
 }
+const clearStale = async () => {
+  if (!await confirmAction({
+    title: '清理已跳过与重复记录？',
+    message: '将清空所有状态为「已跳过」和「重复」的记录（不影响排队、转存中、云下载中与已成功记录，115 网盘文件不受影响）。',
+    confirmText: '确认清理',
+    danger: true,
+  })) return
+  try {
+    const { data } = await api.post('/api/transfers/clear-stale', { statuses: ['skipped', 'duplicate'] })
+    ElMessage.success(`已清理 ${data.deleted || 0} 条无效记录`)
+    loadFromFirstPage()
+  } catch (e) { ElMessage.error(errMsg(e)) }
+}
+
 const onSelect = (rows) => { selected.value = rows }
 const delSelected = async () => {
   const n = selected.value.length
   if (!n) return
-  try {
-    await ElMessageBox.confirm(
-      '仅删除这里的转存记录，115 网盘中的文件不受影响；仪表盘的最近转存记录也会同步移除。',
-      `删除选中的 ${n} 条转存记录？`,
-      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消', confirmButtonClass: 'danger-confirm-btn' })
-  } catch { return }  // 用户取消
+  const ok = await confirmAction({
+    title: `删除选中的 ${n} 条转存记录？`,
+    message: '仅删除这里的转存记录，115 网盘中的文件不受影响；仪表盘的最近转存记录也会同步移除。',
+    confirmText: '删除',
+    danger: true,
+  })
+  if (!ok) return
   try {
     const { data } = await api.post('/api/transfers/batch-delete',
       { ids: selected.value.map(r => r.id) })
@@ -552,10 +608,16 @@ const currentStopRuleIds = () => {
 
 onMounted(() => {
   load()
+  loadRoutes()
+  if (activeTab.value === 'ledger') {
+    onTabChange('ledger')
+  }
   const q = route.query
-  const sharedText = q.share_text || q.share_url || q.text || q.url || ''
+  const st = String(q.share_text || q.text || '').trim()
+  const su = String(q.share_url || q.url || '').trim()
+  const sharedText = st && su && !st.includes(su) ? `${st}\n${su}` : (st || su)
   if (sharedText) {
-    manualDialog.text = String(sharedText).trim()
+    manualDialog.text = sharedText
     manualDialog.open = true
     loadRoutes()
     router.replace({ path: '/transfers', query: {} })
@@ -574,4 +636,21 @@ onMounted(() => {
 .manual-dir-btn { flex: 1; min-width: 0; justify-content: flex-start; }
 .manual-dir-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .manual-dir-text.empty { color: var(--text-muted); }
+.status-chips { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+.status-chip {
+  display: inline-flex; align-items: center; gap: 6px; padding: 4px 12px; border-radius: 6px;
+  font-size: var(--fs-caption); cursor: pointer; user-select: none;
+  background: var(--glass-bg-strong); color: var(--saas-text-sub);
+  border: 1px solid var(--saas-line); transition: all .15s ease;
+}
+.status-chip:hover { border-color: var(--el-color-primary); color: var(--el-color-primary); }
+.status-chip.active {
+  background: var(--el-color-primary); border-color: transparent; color: #fff; font-weight: 600;
+}
+.chip-cnt { font-variant-numeric: tabular-nums; opacity: .85; }
+.row-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row-error {
+  font-size: var(--fs-caption); color: var(--el-color-danger); margin-top: 2px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 </style>

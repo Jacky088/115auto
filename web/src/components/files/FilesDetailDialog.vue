@@ -2,7 +2,7 @@
   <el-dialog
     :model-value="modelValue"
     title="文件详情"
-    :width="'min(560px, 94vw)'"
+    :width="'min(560px, calc(100vw - 36px))'"
     align-center
     @update:model-value="$emit('update:modelValue', $event)"
   >
@@ -91,10 +91,6 @@
           <span class="mono break-all">{{ detailRow.sha1 }}</span>
         </el-descriptions-item>
       </el-descriptions>
-    </template>
-
-    <template #footer>
-      <el-button @click="$emit('update:modelValue', false)">关闭</el-button>
     </template>
   </el-dialog>
 </template>

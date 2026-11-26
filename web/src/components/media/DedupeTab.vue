@@ -36,7 +36,7 @@
         </el-table-column>
         <el-table-column label="操作" width="155" align="center">
           <template #default="{ row }">
-            <el-button link type="primary" size="small" :disabled="!row.enabled" @click="previewDedupeRule(row)">扫描预览</el-button>
+            <el-button link type="primary" size="small" :disabled="!row.enabled || !status.running || isBusy || dedupePreviewing" @click="previewDedupeRule(row)">扫描预览</el-button>
             <el-button link type="primary" size="small" @click="openDedupeRuleDialog(row)">编辑</el-button>
             <el-button link type="danger" size="small" @click="delDedupeRule(row.id)">删除</el-button>
           </template>
@@ -146,7 +146,7 @@
     </div>
 
     <div v-if="dedupeRecords.length">
-      <el-table :data="dedupeRecords" size="small" stripe max-height="460">
+      <el-table :data="pagedDedupeRecords" size="small" stripe max-height="460">
         <el-table-column prop="id" label="#" width="60" />
         <el-table-column label="清理时间" width="165">
           <template #default="{ row }">{{ fmtTime(row.created_at) }}</template>
@@ -168,6 +168,16 @@
           </template>
         </el-table-column>
       </el-table>
+      <div v-if="dedupeRecords.length > dedupeRecordPageSize" class="pagination-bar">
+        <el-pagination
+          v-model:current-page="dedupeRecordPage"
+          :page-size="dedupeRecordPageSize"
+          :total="dedupeRecords.length"
+          :layout="paginationLayout"
+          background
+          small
+        />
+      </div>
     </div>
     <div v-else class="empty-box">暂无清理记录。完成一次重复清理后，删除明细会记录在这里。</div>
   </div>
@@ -176,7 +186,7 @@
   <el-dialog
     v-model="dedupeRuleDialog.open"
     :title="dedupeRuleDialog.id ? '编辑重复清理规则' : '新增重复清理规则'"
-    width="min(560px, 94vw)"
+    width="min(560px, calc(100vw - 36px))"
     align-center
   >
     <el-form
@@ -241,7 +251,15 @@
   </el-dialog>
 
   <!-- 重复文件预览与保留项选择弹窗 -->
-  <el-dialog v-model="dedupePreview.visible" title="重复文件预览 — 确认后移入 115 回收站" width="min(980px, 96vw)" align-center>
+  <el-dialog v-model="dedupePreview.visible" title="重复文件预览 — 确认后移入 115 回收站" width="min(980px, calc(100vw - 36px))" align-center>
+    <el-alert
+      v-if="!dedupePreview.groups.length"
+      type="success"
+      :closable="false"
+      show-icon
+      class="mb12"
+      :title="`未发现 sha1 完全相同的重复文件（已扫描 ${dedupePreview.stats.scanned || 0} 个文件）`"
+    />
     <div class="mb12" style="display: flex; flex-wrap: wrap; gap: 8px; align-items: center">
       <el-tag type="warning" effect="dark" size="small">重复组 {{ dedupePreview.stats.duplicate_groups || 0 }} 个</el-tag>
       <el-tag type="danger" size="small">可释放 {{ fmtSizeMb(dedupePreview.stats.freeable_bytes) || '0 MB' }}</el-tag>
@@ -323,7 +341,7 @@
 </template>
 
 <script setup>
-import { computed, inject, ref } from 'vue'
+import { computed, inject, ref, watch } from 'vue'
 import { api, errMsg, fmtTime, toast } from '../../api'
 import { runPreviewJob } from '../../composables/previewJob'
 import { confirmAction } from '../../composables/confirmDialog'
@@ -333,6 +351,7 @@ const {
   status,
   isBusy,
   isMobile,
+  paginationLayout,
   phaseLabel,
   activeProgressLabel,
   progressPercent,
@@ -452,7 +471,10 @@ async function toggleDedupeRule(row, val) {
       enabled: !!val,
     })
     await Promise.all([loadDedupeRules(), loadStatus()])
-  } catch (e) { toast.error(errMsg(e)) }
+  } catch (e) {
+    toast.error(errMsg(e))
+    await loadDedupeRules()
+  }
 }
 
 async function delDedupeRule(id) {
@@ -487,6 +509,21 @@ const dedupeFilteredGroups = computed(() => {
 })
 const dedupeGroupPageCount = computed(() =>
   Math.max(1, Math.ceil(dedupeFilteredGroups.value.length / dedupeGroupPageSize)))
+watch(() => dedupeFilteredGroups.value.length, (len) => {
+  const maxPage = Math.max(1, Math.ceil(len / dedupeGroupPageSize))
+  if (dedupeGroupPage.value > maxPage) dedupeGroupPage.value = maxPage
+})
+const dedupeRecordPage = ref(1)
+const dedupeRecordPageSize = 20
+const pagedDedupeRecords = computed(() =>
+  dedupeRecords.value.slice(
+    (dedupeRecordPage.value - 1) * dedupeRecordPageSize,
+    dedupeRecordPage.value * dedupeRecordPageSize,
+  ))
+watch(() => dedupeRecords.value.length, (len) => {
+  const maxPage = Math.max(1, Math.ceil(len / dedupeRecordPageSize))
+  if (dedupeRecordPage.value > maxPage) dedupeRecordPage.value = maxPage
+})
 const pagedDedupeGroups = computed(() =>
   dedupeFilteredGroups.value.slice(
     (dedupeGroupPage.value - 1) * dedupeGroupPageSize,
@@ -569,10 +606,6 @@ async function openDedupePreview(targetRuleIds = null) {
       toast.warning(blocked[0].msg || '源目录设置不合法，已跳过扫描')
       return
     }
-    if (!(data.groups || []).length) {
-      toast.info(`未发现 sha1 完全相同的重复文件（已扫描 ${data.stats?.scanned || 0} 个文件）`)
-      return
-    }
     applyDedupePreview(data, ruleIds)
   } catch (e) {
     if (e?.silent) return  // 等待超时：已由预览任务给出提示，扫描仍在后台继续
@@ -589,6 +622,10 @@ async function rescanDedupe() {
 }
 
 async function confirmDedupe() {
+  if (!status.value.running || isBusy.value) {
+    toast.warning(!status.value.running ? '顶栏系统处于停止状态，请先启动系统' : '已有独占任务正在运行，请等待结束')
+    return
+  }
   if (!dedupeDeleteCount.value) {
     toast.info('每个重复组至少保留一个文件，当前没有可删除项')
     return

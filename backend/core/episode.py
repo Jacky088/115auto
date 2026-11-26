@@ -75,8 +75,12 @@ def cn_to_int(raw: str) -> int | None:
         return hundreds * 100 + tail if tail is not None else None
     if "十" in s:
         head, _, rest = s.partition("十")
-        tens = 1 if head == "" else _CN_DIGIT.get(head, 0)
-        ones = 0 if rest == "" else _CN_DIGIT.get(rest, 0)
+        if head != "" and head not in _CN_DIGIT:
+            return None
+        if rest != "" and rest not in _CN_DIGIT:
+            return None
+        tens = 1 if head == "" else _CN_DIGIT[head]
+        ones = 0 if rest == "" else _CN_DIGIT[rest]
         return tens * 10 + ones
     return None
 

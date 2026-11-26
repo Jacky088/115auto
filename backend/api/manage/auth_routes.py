@@ -16,6 +16,8 @@ from ._common import (
 )
 
 router = APIRouter()
+# 模块加载时预生成一次等价强度的伪造哈希，消除错误用户名时的双倍 PBKDF2 耗时与时序侧信道
+_DUMMY_HASH = auth.hash_password("timing-equalizer-sentinel")
 
 
 @router.post("/auth/login")
@@ -32,8 +34,8 @@ def login(body: dict, request: Request, response: Response):
     stored = db.get_setting("web_password_hash", "")
     username_ok = username == _web_username()
     if not username_ok:
-        # 用户名不匹配时也执行一次等价 PBKDF2 验证拉平响应耗时（防用户名枚举时序侧信道）
-        auth.verify_password(password, auth.hash_password("timing-equalizer"))
+        # 用户名不匹配时比对预计算的伪哈希以拉平耗时，避免错误用户名反而跑双倍迭代
+        auth.verify_password(password, _DUMMY_HASH)
     if not username_ok or not auth.verify_password(password, stored):
         auth.record_login_fail(ip)
         logstream.warn("system", f"网页登录失败（来源 {ip}）")
@@ -56,9 +58,10 @@ def logout(request: Request, response: Response, _=Depends(require_user)):
     需登录态：吊销全端会话是敏感操作，不校验会被未认证请求反复调用（登出 DoS）。
     """
     auth.revoke_all_tokens()
-    response.delete_cookie(AUTH_COOKIE, path="/", secure=_is_https(request))
+    secure_flag = _is_https(request)
+    response.delete_cookie(AUTH_COOKIE, path="/", secure=secure_flag, httponly=True)
     for p in ("/api/tmdb/poster", "/api/media/poster"):
-        response.delete_cookie(POSTER_COOKIE, path=p)
+        response.delete_cookie(POSTER_COOKIE, path=p, secure=secure_flag, httponly=True)
     return {"ok": True}
 
 
@@ -66,10 +69,11 @@ def logout(request: Request, response: Response, _=Depends(require_user)):
 def me(request: Request, response: Response, authorization: str = Header(default="")):
     require_user(request, response, authorization)
     if authorization.startswith("Bearer "):
-        # 旧会话迁移：token 经 Bearer 头到达时补发 HttpOnly Cookie，后续请求不再依赖前端保存
+        # 仅当该 Bearer Token 本身经验证有效时才下发 Cookie（防同时带无效 Bearer + 有效 Cookie 时覆写会话）
         token = authorization[7:]
-        _set_poster_cookie(response, request, token)
-        _set_auth_cookie(response, request, token)
+        if auth.check_token(token):
+            _set_poster_cookie(response, request, token)
+            _set_auth_cookie(response, request, token)
     return {"username": _web_username()}
 
 
@@ -81,7 +85,7 @@ _USERNAME_RE = re.compile(r"^[A-Za-z0-9_@\.\-\u4e00-\u9fa5]{2,32}$")
 def change_pwd(body: dict, request: Request, response: Response, _=Depends(require_user)):
     """修改用户名和/或密码（都需验证旧密码）。body: {old, new?, username?}"""
     ip = _client_ip(request)
-    old = body.get("old", "")
+    old = str(body.get("old") or "")
     # 限速检查必须在 PBKDF2 验证之前：否则第 5 次失败后每个请求仍会完整跑一次哈希，
     # 持有效会话的攻击者可高并发调用本端点打满单进程 CPU
     if auth.login_throttled(ip):

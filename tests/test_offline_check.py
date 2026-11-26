@@ -113,7 +113,7 @@ def test_offline_task_completion_detection():
     assert len(notified_messages) == 1
     msg = notified_messages[0]
     assert "✅ 云下载任务完成" in msg
-    assert "② 115 已下载完毕，文件已保存至目标目录" in msg
+    assert "② 文件已落盘至目标目录" in msg
     assert "奥德赛 (2026)" in msg
     assert "78.83 GB" in msg or "GB" in msg
     print("test_offline_task_completion_detection passed.")

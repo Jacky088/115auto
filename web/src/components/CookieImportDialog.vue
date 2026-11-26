@@ -1,5 +1,5 @@
 <template>
-  <el-dialog :model-value="modelValue" title="手动导入 115 Cookie" :width="'min(600px, 94vw)'" align-center
+  <el-dialog :model-value="modelValue" title="手动导入 115 Cookie" :width="'min(600px, calc(100vw - 36px))'" align-center
              :close-on-click-modal="false" @update:model-value="emitVisible" @open="cookie = ''">
     <el-alert type="info" :closable="false" show-icon class="ci-scene">
       <template #title>适用场景：服务器在海外/机房，扫码确认后被 115 风控拦截</template>
@@ -28,7 +28,7 @@ import { ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { api, errMsg } from '../api'
 
-const props = defineProps({ modelValue: Boolean })
+defineProps({ modelValue: Boolean })
 const emit = defineEmits(['update:modelValue', 'success'])
 
 const cookie = ref('')

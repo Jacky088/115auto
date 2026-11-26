@@ -48,6 +48,7 @@
      - **视觉结构**：统一使用全局 `.tip-box` / `.tip-block`（或通过设置表单项子元素 `.tip` 自然继承），具备 `padding: 6px 10px; border-radius: var(--r-sm); border: 1px dashed ...; background: rgba(...); line-height: 1.55;`；
      - **色彩语义自适应**：普通功能解释与指引采用浅蓝紫微透底与主色虚线；警告与重启注意事项（含 `⚠️`、`.warn-text`、`.is-warn`）采用暖橙黄微透底与橙黄虚线；成功与安全保证（`.is-success`）采用柔绿微透底与绿虚线，全站日间与暗黑模式全覆盖；
      - **行内伴随文字隔离**：开关（`el-switch`）右侧的单行伴随说明、步进器右侧单位等行内跟随文字维持自然文本流排版，严禁误加外框与底色。
+   - **筛选胶囊与分段控件激活态规范**：全站所有横向筛选胶囊（`.cat-chip`、`.m-chip`、`.status-chip`、`.capsule-chip`）与分段切换控件（`.seg-group` / `.seg-btn`、`el-radio-group` + `el-radio-button`，样式均由 `web/src/style.css` 全局统一定义）的选中激活态必须采用**实心主色蓝底白字**（`background: var(--el-color-primary, #256bf5); color: #ffffff; font-weight: 600;`），严禁使用白底蓝字作为激活态，确保日/夜间模式与多级筛选视觉一致。
 
 ---
 

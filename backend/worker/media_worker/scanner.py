@@ -278,13 +278,27 @@ def _move_and_rename_single_sync(
         _mw().client.rename_entry(file_id, target_name)
         src_sibling_names.discard(orig_name)
         src_sibling_names.add(target_name)
-        _mw().client.move_entries([file_id], int(dest_cid))
+        try:
+            _mw().client.move_entries([file_id], int(dest_cid))
+        except Exception:
+            try:
+                _mw().client.rename_entry(file_id, orig_name)
+            except Exception:
+                pass
+            raise
         dest_existing_names.add(target_name)
         return "move_rename"
 
     _mw().client.move_entries([file_id], int(dest_cid))
     if need_rename:
-        _mw().client.rename_entry(file_id, target_name)
+        try:
+            _mw().client.rename_entry(file_id, target_name)
+        except Exception:
+            try:
+                _mw().client.move_entries([file_id], int(parent_cid))
+            except Exception:
+                pass
+            raise
         dest_existing_names.add(target_name)
         return "move_rename"
     dest_existing_names.add(orig_name)
@@ -342,28 +356,67 @@ def _apply_media_placement_sync(
 
     is_bdmv = bool(item.get("is_bdmv"))
     conflict_policy = str(settings.get("media_conflict_policy") or "skip")
+    bdmv_prefer_best = bool(settings.get("media_bdmv_prefer_best", False))
     action_note = ""
 
-    if final_name in dest_by_name:
-        existing = dest_by_name[final_name]
+    stem = final_name if is_bdmv else os.path.splitext(final_name)[0]
+    existing = dest_by_name.get(final_name)
+    # 开启「BDMV 蓝光原盘优先」时，跨扩展名匹配同片名目录与单视频文件
+    if not existing and bdmv_prefer_best and conflict_policy == "replace_if_better":
+        if not is_bdmv:
+            dir_match = dest_by_name.get(stem)
+            if dir_match and dir_match.get("is_dir") and str(dir_match.get("id")) != str(item.get("file_id")):
+                return {
+                    "status": "skipped", "in_place": False,
+                    "reason": "目标已有 BDMV 蓝光原盘（已开启原盘优先，跳过）",
+                    "dest_path": full_dest_dir, "dest_name": final_name,
+                }
+        else:
+            for de in dest_entries:
+                if not de.get("is_dir") and os.path.splitext(de["name"])[1].lower() in VIDEO_EXTENSIONS:
+                    if os.path.splitext(de["name"])[0] == stem:
+                        existing = de
+                        break
+
+    replaced_old: dict | None = None
+    if existing:
         if str(existing["id"]) == str(item["file_id"]):
             return {"status": "skipped", "in_place": True, "reason": "目标文件已是当前项", "dest_path": full_dest_dir, "dest_name": final_name}
 
         if conflict_policy == "keep_both":
             final_name = _pick_unique_name(final_name, dest_names, is_dir=is_bdmv)
         elif conflict_policy == "replace_if_better":
-            old_pm = parse_media_filename(existing["name"], is_dir=is_bdmv)
-            new_pm: ParsedMedia = item["parsed"]
-            old_rank = resolution_rank(old_pm.resolution)
-            new_rank = resolution_rank(new_pm.resolution)
-            old_sz = int(existing.get("size") or 0)
-            new_sz = int(item.get("size") or 0)
-            better = (new_rank > old_rank) or (new_rank == old_rank and new_sz > int(old_sz * 1.15) and new_sz > 0)
+            existing_is_dir = bool(existing.get("is_dir"))
+            if bdmv_prefer_best and is_bdmv != existing_is_dir:
+                if existing_is_dir and not is_bdmv:
+                    return {
+                        "status": "skipped", "in_place": False,
+                        "reason": "目标已有 BDMV 蓝光原盘（已开启原盘优先，跳过）",
+                        "dest_path": full_dest_dir, "dest_name": final_name,
+                    }
+                better = True
+            else:
+                old_pm = parse_media_filename(existing["name"], is_dir=existing_is_dir)
+                new_pm: ParsedMedia = item["parsed"]
+                old_rank = resolution_rank(old_pm.resolution)
+                new_rank = resolution_rank(new_pm.resolution)
+                old_sz = int(existing.get("size") or 0)
+                new_sz = int(item.get("size") or 0)
+                better = (new_rank > old_rank) or (new_rank == old_rank and new_sz > int(old_sz * 1.15) and new_sz > 0)
             if not better:
-                return {"status": "skipped", "in_place": False, "reason": f"目标已有同名且新版本画质未更优({new_pm.resolution or '未知'})",
+                return {"status": "skipped", "in_place": False, "reason": f"目标已有同名且新版本画质未更优({item['parsed'].resolution or '未知'})",
                         "dest_path": full_dest_dir, "dest_name": final_name}
-            trash_cid = int(_mw().client.ensure_subdir(dest_cid, "_待清理旧版"))
-            _mw().client.move_entries([str(existing["id"])], trash_cid)
+            archive_dir = str(settings.get("wash_archive_dir") or db.get_setting("wash_archive_dir", "") or "").strip()
+            if not archive_dir:
+                return {"status": "skipped", "in_place": False, "reason": "目标已有同名且未配置旧版归档目录，已跳过替换",
+                        "dest_path": full_dest_dir, "dest_name": final_name}
+            arch_cid = int(_mw().client.mkdirs(archive_dir) or 0)
+            if not arch_cid:
+                return {"status": "skipped", "in_place": False, "reason": f"无法创建旧版归档目录 {archive_dir}，已跳过替换",
+                        "dest_path": full_dest_dir, "dest_name": final_name}
+            _mw().client.move_entries([str(existing["id"])], arch_cid)
+            ecache.pop(arch_cid, None)
+            replaced_old = existing
             dest_names.discard(existing["name"])
             dest_by_name.pop(existing["name"], None)
             action_note = "replace_better"
@@ -371,15 +424,24 @@ def _apply_media_placement_sync(
             return {"status": "skipped", "in_place": False, "reason": "目标已存在同名文件（按策略跳过）",
                     "dest_path": full_dest_dir, "dest_name": final_name}
 
-    action = _move_and_rename_single_sync(
-        file_id=str(item["file_id"]),
-        orig_name=item["orig_name"],
-        parent_cid=str(item["parent_cid"]),
-        dest_cid=dest_cid,
-        target_name=final_name,
-        src_sibling_names=src_names,
-        dest_existing_names=dest_names,
-    )
+    try:
+        action = _move_and_rename_single_sync(
+            file_id=str(item["file_id"]),
+            orig_name=item["orig_name"],
+            parent_cid=str(item["parent_cid"]),
+            dest_cid=dest_cid,
+            target_name=final_name,
+            src_sibling_names=src_names,
+            dest_existing_names=dest_names,
+        )
+    except Exception:
+        if replaced_old is not None:
+            try:
+                _mw().client.move_entries([str(replaced_old["id"])], dest_cid)
+                dest_names.add(replaced_old["name"])
+            except Exception:
+                pass
+        raise
     if action_note:
         action = action_note
 
@@ -421,9 +483,7 @@ def _apply_media_placement_sync(
             if not sub_target:
                 continue
             try:
-                cur_dest_entries = _mw().client.list_entries(dest_cid, limit=2000)
-                cur_dest_names = {e["name"] for e in cur_dest_entries}
-                if sub_target in cur_dest_names:
+                if sub_target in dest_names:
                     continue
                 sub_action = _move_and_rename_single_sync(
                     file_id=str(sub["id"]),
@@ -432,7 +492,7 @@ def _apply_media_placement_sync(
                     dest_cid=dest_cid,
                     target_name=sub_target,
                     src_sibling_names=src_names,
-                    dest_existing_names=cur_dest_names,
+                    dest_existing_names=dest_names,
                 )
                 sub_moved += 1
                 db.insert(
@@ -458,7 +518,14 @@ def _apply_media_placement_sync(
             except Exception as se:
                 logstream.warn("organize", f"配套字幕 {sub['name']} 随动失败（主视频已就位）: {se}")
 
-    return {"status": "done", "action": action, "dest_path": full_dest_dir, "dest_name": final_name, "subtitles_moved": sub_moved}
+    return {
+        "status": "done",
+        "action": action,
+        "dest_path": full_dest_dir,
+        "dest_name": final_name,
+        "subtitles_moved": sub_moved,
+        "replaced_file_id": str(replaced_old["id"]) if replaced_old else "",
+    }
 
 
 def _clean_empty_dirs_sync(candidate_cids: list[str], protect_cids: set[str]) -> int:

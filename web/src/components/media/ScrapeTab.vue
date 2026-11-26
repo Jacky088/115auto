@@ -113,6 +113,8 @@
           <el-radio-button value="need_confirm">待确认 ({{ status.counts.need_confirm || 0 }})</el-radio-button>
           <el-radio-button value="staged">已选待提交 ({{ status.counts.staged || 0 }})</el-radio-button>
           <el-radio-button value="done">已完成 ({{ status.counts.done || 0 }})</el-radio-button>
+          <el-radio-button value="failed">失败 ({{ status.counts.failed || 0 }})</el-radio-button>
+          <el-radio-button value="skipped">已跳过 ({{ status.counts.skipped || 0 }})</el-radio-button>
           <el-radio-button value="all">全部记录</el-radio-button>
         </el-radio-group>
       </div>
@@ -121,11 +123,12 @@
           v-if="(status.counts.need_confirm || 0) > 0"
           size="small"
           plain
+          :loading="batchStaging"
           @click="batchStageTop1"
         >
           ✨ 批量暂存首选项 (≥50分)
         </el-button>
-        <el-button size="small" @click="clearFinishedTasks">清理已完结</el-button>
+        <el-button size="small" :loading="clearingTasks" @click="clearFinishedTasks">清理已完结</el-button>
         <el-tooltip
           :content="!status.running ? '顶栏系统开关已停止，暂不允许提交执行' : ((status.counts.staged||0)===0 ? '请先在下方至少点选一部影视（状态变为「已选待提交」），再点击此按钮统一入队执行' : '当前有互斥任务正在执行，请稍候')"
           :disabled="!commitDisabled"
@@ -196,6 +199,13 @@
               @click="ignoreTask(t)"
             >忽略</el-button>
             <el-button
+              v-if="t.status === 'failed'"
+              size="small"
+              type="primary"
+              plain
+              @click="retryTask(t)"
+            >🔄 重试</el-button>
+            <el-button
               v-if="t.local_meta_dir"
               size="small"
               type="primary"
@@ -258,6 +268,17 @@
             >tmdb={{ t.selected_tmdb_id }} ↗</a>]
           </span>
           — 等待点击右上角「🚀 提交队列」生效（点击其他候选可直接改选）
+          <el-button
+            v-if="t.parsed && t.parsed.title && t.selected_tmdb_id"
+            size="small"
+            type="primary"
+            plain
+            style="margin-left: 8px"
+            :loading="batchApplyingId === t.id"
+            @click="batchApplySameTitle(t)"
+          >
+            同剧一键套用此 TMDB
+          </el-button>
         </div>
 
         <!-- 候选卡片点选区（need_confirm 或 staged 时展示；其余状态只读折叠） -->
@@ -332,7 +353,7 @@
   </div>
 
   <!-- 手动搜索 TMDB 弹窗 -->
-  <el-dialog v-model="manualDialog.open" title="手动搜索 TMDB 并暂存绑定" width="min(640px, 94vw)" align-center>
+  <el-dialog v-model="manualDialog.open" title="手动搜索 TMDB 并暂存绑定" width="min(640px, calc(100vw - 36px))" align-center>
     <div class="mb12 meta-hint">
       待绑定文件：<b>{{ manualDialog.task?.orig_name }}</b>（选定后置为「已选待提交」，需点「提交队列」才执行）
     </div>
@@ -380,7 +401,7 @@
   </el-dialog>
 
   <!-- 本地元数据 NFO / 海报预览弹窗 -->
-  <el-dialog v-model="metaDialog.open" title="本地持久化 NFO 与海报详情（零 115 上传）" width="min(760px, 94vw)" align-center>
+  <el-dialog v-model="metaDialog.open" title="本地持久化 NFO 与海报详情（零 115 上传）" width="min(760px, calc(100vw - 36px))" align-center>
     <div v-if="metaDialog.data" class="meta-view">
       <div class="mb12" style="font-size:12px;color:var(--text-muted)">
         存储位置：<code>{{ metaDialog.data.meta_dir }}</code>
@@ -490,11 +511,20 @@ function toggleGroupExpand(taskId) {
   expandedGroups.value[taskId] = !expandedGroups.value[taskId]
 }
 
+let taskLoadSeq = 0
 async function loadTasks() {
+  const seq = ++taskLoadSeq
   try {
-    const { data } = await api.get('/api/media/tasks', { params: { status: taskFilter.value, limit: 150 } })
+    const { data } = await api.get('/api/media/tasks', {
+      params: { status: taskFilter.value, task_kind: 'scrape', limit: 150 },
+    })
+    if (seq !== taskLoadSeq) return
     tasks.value = data
-  } catch (e) { toast.error(errMsg(e)) }
+    const maxPage = Math.max(1, Math.ceil((data?.length || 0) / taskPageSize.value))
+    if (taskPage.value > maxPage) taskPage.value = maxPage
+  } catch (e) {
+    if (seq === taskLoadSeq) toast.error(errMsg(e))
+  }
 }
 
 async function onTaskFilterChange() {
@@ -517,7 +547,31 @@ async function runScrape() {
   finally { startingScrape.value = false }
 }
 
+const batchApplyingId = ref(null)
+async function batchApplySameTitle(task) {
+  const parsedTitle = task?.parsed?.title
+  const tmdbId = task?.selected_tmdb_id
+  if (!parsedTitle || !tmdbId) return
+  batchApplyingId.value = task.id
+  try {
+    const { data } = await api.post('/api/media/tasks/batch-apply-tmdb', {
+      parsed_title: parsedTitle,
+      tmdb_id: tmdbId,
+      kind: task.selected_kind || 'tv',
+    })
+    toast.success(data.msg || `已批量套用 ${data.count || 0} 条`)
+    await Promise.all([loadStatus(), loadTasks()])
+  } catch (e) {
+    toast.error(errMsg(e))
+  } finally {
+    batchApplyingId.value = null
+  }
+}
+
+const selectingTaskId = ref(null)
 async function selectCandidate(task, idx) {
+  if (selectingTaskId.value === task.id) return
+  selectingTaskId.value = task.id
   try {
     const { data } = await api.post(`/api/media/tasks/${task.id}/select`, { cand_idx: idx })
     toast.success(data.msg)
@@ -525,6 +579,8 @@ async function selectCandidate(task, idx) {
   } catch (e) {
     toast.error(errMsg(e))
     await loadTasks()
+  } finally {
+    selectingTaskId.value = null
   }
 }
 
@@ -560,16 +616,28 @@ async function ignoreTask(task) {
   } catch (e) { toast.error(errMsg(e)) }
 }
 
+const batchStaging = ref(false)
 async function batchStageTop1() {
+  if (batchStaging.value) return
   if (!await confirmAction({
     title: '确认批量暂存首选项？',
     message: '将为所有待确认且首选项得分 ≥ 50 的条目自动选定首位候选并移入「已选待提交」（暂不改盘，提交队列前仍可逐条调整）。',
     confirmText: '确认暂存',
     type: 'info',
   })) return
+  batchStaging.value = true
   try {
     const { data } = await api.post('/api/media/tasks/batch-stage', { mode: 'auto_top1', min_score: 50 })
     toast.success(data.msg)
+    await Promise.all([loadStatus(), loadTasks()])
+  } catch (e) { toast.error(errMsg(e)) }
+  finally { batchStaging.value = false }
+}
+
+async function retryTask(task) {
+  try {
+    const { data } = await api.post(`/api/media/tasks/${task.id}/retry`)
+    toast.success(data.msg || '已重试')
     await Promise.all([loadStatus(), loadTasks()])
   } catch (e) { toast.error(errMsg(e)) }
 }
@@ -590,18 +658,23 @@ async function commitStaged() {
   finally { committing.value = false }
 }
 
+const clearingTasks = ref(false)
 async function clearFinishedTasks() {
+  if (clearingTasks.value) return
+  const isAllHistory = taskFilter.value === 'failed'
   if (!await confirmAction({
-    title: '清理已完结和已忽略的刮削记录？',
+    title: isAllHistory ? '清理所有已完结和失败的刮削记录？' : '清理已完结和已忽略的刮削记录？',
     message: '未处理任务将保留。',
     confirmText: '清理',
     danger: true,
   })) return
+  clearingTasks.value = true
   try {
-    await api.delete('/api/media/tasks/clear')
+    await api.delete('/api/media/tasks/clear', { params: { scope: isAllHistory ? 'all_history' : 'finished' } })
     toast.success('已清理历史完结记录')
     await Promise.all([loadStatus(), loadTasks()])
   } catch (e) { toast.error(errMsg(e)) }
+  finally { clearingTasks.value = false }
 }
 
 // ---------- 手动搜索 TMDB ----------
@@ -620,16 +693,21 @@ function openManualSearch(task) {
   searchManualTmdb()
 }
 
+let manualSearchSeq = 0
 async function searchManualTmdb() {
   if (!manualDialog.value.q.trim()) return
+  const seq = ++manualSearchSeq
   manualDialog.value.loading = true
   try {
     const { data } = await api.get('/api/media/tmdb/search', {
       params: { q: manualDialog.value.q, kind: manualDialog.value.kind, year: manualDialog.value.year },
     })
-    manualDialog.value.results = data
-  } catch (e) { toast.error(errMsg(e)) }
-  finally { manualDialog.value.loading = false }
+    if (seq === manualSearchSeq) manualDialog.value.results = data
+  } catch (e) {
+    if (seq === manualSearchSeq) toast.error(errMsg(e))
+  } finally {
+    if (seq === manualSearchSeq) manualDialog.value.loading = false
+  }
 }
 
 async function pickManualResult(r) {

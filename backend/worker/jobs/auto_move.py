@@ -131,11 +131,11 @@ async def execute_auto_move(trigger: str = "scheduled", include_ids: list[str] |
         logstream.warn("auto_move", msg)
         return {"ok": False, "msg": msg}
     if not am_enabled:
-        msg = "定时文件整理功能未开启，请先打开功能总开关后再执行！"
+        msg = "定时自动归档分流功能未开启，请先打开功能总开关后再执行！"
         logstream.warn("auto_move", msg)
         return {"ok": False, "msg": msg}
     if trigger == "scheduled" and not await asyncio.to_thread(transfer_gate.is_in_schedule_window):
-        msg = "当前处于防风控静默时段外，定时文件整理暂停执行"
+        msg = "当前处于防风控静默时段外，定时自动归档分流暂停执行"
         logstream.warn("auto_move", msg)
         return {"ok": False, "msg": msg}
 
@@ -247,6 +247,7 @@ async def execute_auto_move(trigger: str = "scheduled", include_ids: list[str] |
                         rule_media_type=str(r.get("media_type") or "auto"),
                         ambiguous_kws=ambiguous_kws,
                         match_by_dir=bool(r.get("dir_match")),
+                        allow_english=bool(r.get("allow_english")),
                         skip_stats_out=moved_skip,
                         include_ids=wanted_ids,
                     )
@@ -293,7 +294,7 @@ async def execute_auto_move(trigger: str = "scheduled", include_ids: list[str] |
                     logstream.warn("auto_move", f"规则 #{r['id']} [{s_dir} ➔ {t_dir}] 执行异常: {err_str}")
                     details.append({"id": r["id"], "source_dir": s_dir, "target_dir": t_dir,
                                     "keyword": kw, "moved": 0, "error": err_str})
-                    if any(k in err_str.lower() for k in pan._RISK_KEYWORDS):
+                    if pan._hits_risk_keyword(err_str.lower()):
                         risk_aborted = True
                         logstream.error("auto_move", f"⚠️ 检测到 115 风控限制信号，自动熔断停止后续移动操作: {err_str}")
                         await pan.run_pan_thread(
@@ -317,7 +318,7 @@ async def execute_auto_move(trigger: str = "scheduled", include_ids: list[str] |
                 trig_desc = "手动排队执行" if trigger == "manual" else "定时计划执行"
                 now_str = time.strftime("%Y-%m-%d %H:%M:%S")
                 lines = [
-                    "📁 115 文件整理任务完成",
+                    "📁 115 自动归档分流完成",
                     f"• 触发方式：{trig_desc}",
                     f"• 完成时间：{now_str}",
                     f"• 规则统计：共处理 {len(rules)} 条规则，成功移动 {total_moved} 个文件",
@@ -358,10 +359,9 @@ async def execute_auto_move(trigger: str = "scheduled", include_ids: list[str] |
                 lines.append("")
                 # 提示行按规则形态区分：云下载模式按任务目录名匹配，与普通规则口径不同
                 if any(r.get("dir_match") for r in rules):
-                    lines.append("💡 提示：文件夹均保持原地；普通规则按文件名匹配，"
-                                 "云下载模式规则按任务目录名匹配（英文名文件认领后保持原名）。")
+                    lines.append("💡 文件夹均保持原地，仅移动匹配的正片文件（云下载模式按任务目录名匹配）")
                 else:
-                    lines.append("💡 提示：文件夹均保持原地，仅移动含中文且含目标名称的正片文件。")
+                    lines.append("💡 文件夹均保持原地，仅移动匹配的正片文件")
                 full_msg = chr(10).join(lines)
                 await pan.run_pan_thread(_jobs().notify, full_msg)
 
@@ -405,9 +405,9 @@ async def preview_auto_move(rule_ids: list[int] | None = None, ctx=None) -> dict
 
     is_running, am_enabled = await asyncio.to_thread(_preflight)
     if not is_running:
-        return {"ok": False, "msg": "系统处于停止状态，请先在顶栏点击「运行」后再预览"}
+        return {"ok": False, "msg": "系统处于停止状态，请先在顶栏点击「开始运行」后再预览"}
     if not am_enabled:
-        return {"ok": False, "msg": "定时文件整理功能未开启，请先打开功能总开关"}
+        return {"ok": False, "msg": "定时自动归档分流功能未开启，请先打开功能总开关"}
     if transfer_gate.is_exclusive_busy():
         return {"ok": False, "msg": f"当前有互斥任务（{transfer_gate.get_active_mode()}）执行中，请待结束后再预览"}
 
@@ -502,6 +502,7 @@ async def preview_auto_move(rule_ids: list[int] | None = None, ctx=None) -> dict
                     rule_media_type=str(r.get("media_type") or "auto"),
                     ambiguous_kws=ambiguous_kws,
                     match_by_dir=bool(r.get("dir_match")),
+                    allow_english=bool(r.get("allow_english")),
                 )
                 if isinstance(plan, dict):
                     entry["planned"] = plan.get("items", [])
@@ -529,7 +530,7 @@ async def preview_auto_move(rule_ids: list[int] | None = None, ctx=None) -> dict
             except Exception as e:
                 entry["error"] = str(e)[:200]
                 logstream.warn("auto_move", f"预览规则 #{r['id']} [{s_dir} ➔ {t_dir}] 异常: {e}")
-                if any(k in str(e).lower() for k in pan._RISK_KEYWORDS):
+                if pan._hits_risk_keyword(str(e).lower()):
                     risk_aborted = True
                     out_rules.append(entry)
                     break
@@ -640,39 +641,50 @@ async def undo_auto_move_records(record_id: int = 0, batch_id: str = "",
     if not record_id and not batch_id:
         return {"ok": False, "msg": "请指定要撤销的记录或批次"}
 
-    if record_id:
-        rows = [dict(r) for r in await asyncio.to_thread(
-            db.query, "SELECT * FROM organized_records WHERE id=? AND action='auto_move' AND undone=0",
-            (int(record_id),))]
-    else:
-        rows = [dict(r) for r in await asyncio.to_thread(
-            db.query, "SELECT * FROM organized_records WHERE batch_id=? AND action='auto_move' AND undone=0"
-                      " ORDER BY id DESC", (batch_id,))]
-    if not rows:
-        return {"ok": False, "msg": "没有可撤销的记录（可能已撤销或不存在）"}
+    lock = _get_auto_move_lock()
+    if lock.locked():
+        return {"ok": False, "msg": "定时整理或撤销操作正在执行中，请稍后再试"}
 
-    involved = {int(r["task_id"] or 0) for r in rows if r["task_id"]}
-    stop_ids = [int(x) for x in (stop_rule_ids or []) if str(x).isdigit() and int(x) in involved]
+    async with lock:
+        if transfer_gate.is_exclusive_busy():
+            return {"ok": False, "msg": f"当前有互斥任务（{transfer_gate.get_active_mode()}）执行中，请待结束后再撤销"}
+        if record_id:
+            rows = [dict(r) for r in await asyncio.to_thread(
+                db.query, "SELECT * FROM organized_records WHERE id=? AND action='auto_move' AND undone=0",
+                (int(record_id),))]
+        else:
+            rows = [dict(r) for r in await asyncio.to_thread(
+                db.query, "SELECT * FROM organized_records WHERE batch_id=? AND action='auto_move' AND undone=0"
+                          " ORDER BY id DESC", (batch_id,))]
+        if not rows:
+            return {"ok": False, "msg": "没有可撤销的记录（可能已撤销或不存在）"}
 
-    res = await pan.run_pan_thread(_undo_auto_move_sync, rows)
+        involved = {int(r["task_id"] or 0) for r in rows if r["task_id"]}
+        stop_ids = [int(x) for x in (stop_rule_ids or []) if str(x).isdigit() and int(x) in involved]
 
-    disabled_rules: list[int] = []
-    if res["undone"] > 0 and stop_ids:
-        for rid in stop_ids:
-            db.execute("UPDATE auto_move_rules SET enabled=0 WHERE id=?", (rid,))
-            disabled_rules.append(rid)
-        rem = db.query("SELECT count(*) c FROM auto_move_rules WHERE enabled=1", one=True)
-        if not rem or int(rem["c"]) == 0:
-            if bool(db.get_setting("auto_move_enabled", False)):
-                db.set_setting("auto_move_enabled", False)
-                logstream.warn("auto_move", "所有启用的整理规则已停用，定时文件整理总开关已自动关闭")
+        res = await pan.run_pan_thread(_undo_auto_move_sync, rows)
 
-    logstream.info("auto_move",
-                   f"撤销整理：恢复 {res['undone']} 条（失败 {res['failed']}，"
-                   f"跳过 {len(res['skipped'])}），停用规则 {disabled_rules or '无'}")
-    return {"ok": res["undone"] > 0 or bool(disabled_rules), "undone": res["undone"],
-            "failed": res["failed"], "skipped": res["skipped"],
-            "disabled_rules": disabled_rules}
+        def _disable_rules_sync() -> list[int]:
+            out: list[int] = []
+            if res["undone"] > 0 and stop_ids:
+                for rid in stop_ids:
+                    db.execute("UPDATE auto_move_rules SET enabled=0 WHERE id=?", (rid,))
+                    out.append(rid)
+                rem = db.query("SELECT count(*) c FROM auto_move_rules WHERE enabled=1", one=True)
+                if not rem or int(rem["c"]) == 0:
+                    if bool(db.get_setting("auto_move_enabled", False)):
+                        db.set_setting("auto_move_enabled", False)
+                        logstream.warn("auto_move", "所有启用的整理规则已停用，定时文件整理总开关已自动关闭")
+            return out
+
+        disabled_rules = await asyncio.to_thread(_disable_rules_sync)
+
+        logstream.info("auto_move",
+                       f"撤销整理：恢复 {res['undone']} 条（失败 {res['failed']}，"
+                       f"跳过 {len(res['skipped'])}），停用规则 {disabled_rules or '无'}")
+        return {"ok": res["undone"] > 0 or bool(disabled_rules), "undone": res["undone"],
+                "failed": res["failed"], "skipped": res["skipped"],
+                "disabled_rules": disabled_rules}
 
 
 async def auto_move_loop():

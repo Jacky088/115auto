@@ -292,8 +292,10 @@ async def _run_dedupe(rule_ids: int | list[int], delete_items: list[dict], batch
                 now = time.time()
                 processed = 0
                 per_rule_deleted: dict[int, int] = {rid: 0 for rid in rids}
+                consec_fail = 0
                 for start in range(0, total_valid, DELETE_BATCH_SIZE):
-                    _check_not_cancelled()
+                    if await transfer_gate.is_cancel_requested_async():
+                        raise DedupeCancelled("系统已停止运行，重复清理安全中断")
                     chunk = valid[start:start + DELETE_BATCH_SIZE]
                     processed += len(chunk)
                     transfer_gate.set_media_progress({
@@ -301,14 +303,18 @@ async def _run_dedupe(rule_ids: int | list[int], delete_items: list[dict], batch
                         "current": processed, "total": total_valid,
                         "label": f"正在移入回收站（第 {start // DELETE_BATCH_SIZE + 1} 批，共 {len(chunk)} 项）",
                     })
+                    risk_hit = False
                     try:
                         await client.run_pan_thread(
                             client.delete_entries, [x["file_id"] for x in chunk])
                         deleted += len(chunk)
+                        consec_fail = 0
                         status, note = "deleted", ""
                     except Exception as e:
                         failed += len(chunk)
+                        consec_fail += 1
                         status, note = "failed", str(e)[:300]
+                        risk_hit = client._hits_risk_keyword(str(e).lower())
                         logstream.warn("dedupe", f"批量移入回收站失败（{len(chunk)} 项）: {e}")
                     for rec in chunk:
                         rec_rid = int(rec.get("rule_id") or rids[0])
@@ -321,6 +327,11 @@ async def _run_dedupe(rule_ids: int | list[int], delete_items: list[dict], batch
                             (batch_id, rec_rid, rec["file_id"], rec["file_name"],
                              rec["file_path"], rec["sha1"], int(rec["size"]), status, note, now),
                         )
+                    if risk_hit or consec_fail >= 3:
+                        ok_flag = False
+                        outcome_msg = "触发 115 风控或连续失败，已熔断中止剩余批次"
+                        logstream.error("dedupe", f"⚠️ 重复清理{outcome_msg}")
+                        break
                     if processed < total_valid:
                         await asyncio.sleep(0.8 * max(1.0, client.pace_factor()))
 

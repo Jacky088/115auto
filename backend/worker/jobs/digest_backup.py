@@ -149,6 +149,8 @@ async def auto_backup_loop():
                         should_send = True
 
                 if should_send:
+                    any_succeeded = False
+                    any_failed = False
                     # 1. Telegram Bot 途径
                     if "tgbot" in channels:
                         if token and chat_id:
@@ -167,8 +169,10 @@ async def auto_backup_loop():
 
                             ok = _jobs().enqueue_tg_document(fname, content, mime, caption)
                             if ok:
+                                any_succeeded = True
                                 logstream.info("system", f"定时自动备份已加入 TG 发送队列（{fname}，{len(content) // 1024}KB）")
                             else:
+                                any_failed = True
                                 logstream.warn("system", "定时自动备份入队 TG 失败（队列已满）")
                         else:
                             logstream.warn("system", "定时自动备份已跳过 TG Bot 推送：未配置 Bot Token 或 Chat ID")
@@ -200,14 +204,16 @@ async def auto_backup_loop():
 
                                 try:
                                     fname, size_b, pruned = await asyncio.to_thread(_run_dav_backup)
-                                    db.set_setting("webdav_last_backup_date", today_str)
-                                    db.set_setting("webdav_last_backup_at", time.time())
-                                    db.set_setting("webdav_last_backup_status", f"成功 ({fname})")
+                                    await asyncio.to_thread(db.set_setting, "webdav_last_backup_date", today_str)
+                                    await asyncio.to_thread(db.set_setting, "webdav_last_backup_at", time.time())
+                                    await asyncio.to_thread(db.set_setting, "webdav_last_backup_status", f"成功 ({fname})")
+                                    any_succeeded = True
                                     prune_msg = f"，已自动轮转清理 {pruned} 份旧备份" if pruned > 0 else ""
                                     logstream.info("system", f"定时整机迁移包已成功上传至 WebDAV（{fname}，{size_b // 1024} KB{prune_msg}）")
                                 except Exception as e:
+                                    any_failed = True
                                     logstream.error("system", f"定时整机备份上传 WebDAV 失败: {logstream.exc(e)}")
-                                    db.set_setting("webdav_last_backup_status", f"失败: {str(e)[:100]}")
+                                    await asyncio.to_thread(db.set_setting, "webdav_last_backup_status", f"失败: {str(e)[:100]}")
                         else:
                             logstream.warn("system", "定时自动备份已跳过 WebDAV：未配置或未通过测试连接")
 
@@ -234,16 +240,20 @@ async def auto_backup_loop():
 
                         try:
                             loc_name, loc_size = await asyncio.to_thread(_run_local_backup)
+                            any_succeeded = True
                             logstream.info("system", f"定时自动备份已写入本地目录（{loc_name}，{loc_size // 1024} KB）")
                         except Exception as e:
+                            any_failed = True
                             logstream.error("system", f"定时自动备份写入本地失败: {logstream.exc(e)}")
 
-                    # 标记当轮备份已完成
-                    def _mark_backup_sent():
-                        db.set_setting("backup_last_sent", time.time())
-                        db.set_setting("backup_last_sent_date", today_str)
+                    # 仅当至少一个渠道成功（或配置缺失跳过、无实际执行失败）时标记当轮已完成；
+                    # 若全部执行均失败，留待后续轮次自动重试（WebDAV 失败状态可被自动修复）
+                    if any_succeeded or not any_failed:
+                        def _mark_backup_sent():
+                            db.set_setting("backup_last_sent", time.time())
+                            db.set_setting("backup_last_sent_date", today_str)
 
-                    await asyncio.to_thread(_mark_backup_sent)
+                        await asyncio.to_thread(_mark_backup_sent)
         except Exception as e:
             logstream.error("system", f"自动备份异常: {logstream.exc(e)}")
         await asyncio.sleep(60)

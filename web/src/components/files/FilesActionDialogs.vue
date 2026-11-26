@@ -1,7 +1,7 @@
 <template>
   <div>
     <!-- 新建文件夹 -->
-    <el-dialog v-model="mkdirVisible" title="新建文件夹" :width="'min(420px, 94vw)'" align-center>
+    <el-dialog v-model="mkdirVisible" title="新建文件夹" :width="'min(420px, calc(100vw - 36px))'" align-center>
       <el-form label-position="top" @submit.prevent="saveMkdir">
         <el-form-item label="文件夹名称">
           <el-input v-model="mkdirName" placeholder="输入文件夹名称" autofocus @keyup.enter="saveMkdir" />
@@ -14,7 +14,7 @@
     </el-dialog>
 
     <!-- 重命名 -->
-    <el-dialog v-model="renameVisible" title="重命名" :width="'min(420px, 94vw)'" align-center>
+    <el-dialog v-model="renameVisible" title="重命名" :width="'min(420px, calc(100vw - 36px))'" align-center>
       <el-form label-position="top" @submit.prevent="saveRename">
         <el-form-item label="新名称">
           <el-input v-model="renameForm.name" placeholder="输入新名称" autofocus @keyup.enter="saveRename" />

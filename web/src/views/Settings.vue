@@ -48,7 +48,8 @@
           <input type="password" name="fake_password_remember" tabindex="-1" autocomplete="current-password" />
         </div>
         <el-tabs v-model="activeTab" class="settings-tabs" @tab-change="onTabChange">
-          <el-tab-pane label="🔄 转存控制" name="transfer">
+          <el-tab-pane name="transfer">
+            <template #label><span class="tab-label"><el-icon><Refresh /></el-icon><span>转存控制</span></span></template>
             <TransferSettings
               ref="transferRef"
               :f="f"
@@ -58,23 +59,28 @@
             />
           </el-tab-pane>
 
-          <el-tab-pane label="🔔 消息通知" name="notify">
+          <el-tab-pane name="notify">
+            <template #label><span class="tab-label"><el-icon><Bell /></el-icon><span>消息通知</span></span></template>
             <NotifySettings :f="f" @sync-f="syncF" />
           </el-tab-pane>
 
-          <el-tab-pane label="⏰ 定时维护" name="schedule">
+          <el-tab-pane name="schedule">
+            <template #label><span class="tab-label"><el-icon><Timer /></el-icon><span>风控管理</span></span></template>
             <ScheduleSettings :f="f" @dirty="onChildDirty" />
           </el-tab-pane>
 
-          <el-tab-pane label="🧼 洗版升级" name="wash">
+          <el-tab-pane name="wash">
+            <template #label><span class="tab-label"><el-icon><MagicStick /></el-icon><span>洗版升级</span></span></template>
             <WashSettings :f="f" @dirty="onChildDirty" />
           </el-tab-pane>
 
-          <el-tab-pane label="💾 备份恢复" name="backup">
+          <el-tab-pane name="backup">
+            <template #label><span class="tab-label"><el-icon><FolderChecked /></el-icon><span>备份恢复</span></span></template>
             <BackupSettings ref="backupRef" :f="f" @dirty="onChildDirty" />
           </el-tab-pane>
 
-          <el-tab-pane label="🔑 开放接口" name="api">
+          <el-tab-pane name="api">
+            <template #label><span class="tab-label"><el-icon><Key /></el-icon><span>开放接口</span></span></template>
             <ApiSettings :f="f" />
           </el-tab-pane>
         </el-tabs>
@@ -93,7 +99,7 @@
     </div>
 
     <!-- 系统自检弹窗 -->
-    <el-dialog v-model="doctorOpen" title="系统自检" width="min(760px, 94vw)" align-center>
+    <el-dialog v-model="doctorOpen" title="系统自检" width="min(760px, calc(100vw - 36px))" align-center>
       <div v-if="doctor" class="toolbar" style="margin-bottom: 10px">
         <el-tag :type="doctorTagType(doctor.overall)" effect="dark">
           {{ doctorTagText(doctor.overall) }}
@@ -127,6 +133,7 @@ import { ElMessage } from 'element-plus'
 import { api, errMsg, saveOk } from '../api'
 import { confirmAction } from '../composables/confirmDialog'
 import { useUnsavedGuard } from '../composables/unsavedGuard'
+import { usePersistedTab } from '../composables/usePersistedTab'
 import TransferSettings from '../components/settings/TransferSettings.vue'
 import ScheduleSettings from '../components/settings/ScheduleSettings.vue'
 import NotifySettings from '../components/settings/NotifySettings.vue'
@@ -142,7 +149,17 @@ const f = ref({})
 const loaded = ref(false)
 const loadError = ref('')
 
-const activeTab = ref('transfer')
+const TAB_LABELS = {
+  transfer: '转存控制',
+  notify: '消息通知',
+  schedule: '风控管理',
+  wash: '洗版升级',
+  backup: '备份恢复',
+  api: '开放接口',
+}
+const tabLabel = (tab) => TAB_LABELS[tab] || tab
+
+const activeTab = usePersistedTab('settings', Object.keys(TAB_LABELS), 'transfer', route)
 const searchQuery = ref('')
 
 const retryPreset = ref('标准（1分/5分/30分）')
@@ -151,17 +168,6 @@ const transferPreset = ref('标准（1~3分）')
 const dirty = ref(false)
 
 let suppressWatch = false
-
-// ---- Tab 标签与快速检索索引 ----
-const TAB_LABELS = {
-  transfer: '🔄 转存控制',
-  notify: '🔔 消息通知',
-  schedule: '⏰ 定时维护',
-  wash: '🧼 洗版升级',
-  backup: '💾 备份恢复',
-  api: '🔑 开放接口',
-}
-const tabLabel = (tab) => TAB_LABELS[tab] || tab
 
 const SEARCH_INDEX = [
   // 转存控制 (transfer)
@@ -179,18 +185,16 @@ const SEARCH_INDEX = [
   // 消息通知 (notify)
   { value: 'Telegram Bot 推送与测试', tab: 'notify', keywords: ['tg', 'telegram', 'bot', 'token', 'chat_id', '通知', '推送', '测试'] },
   { value: 'Bark (iOS) 苹果设备通知', tab: 'notify', keywords: ['bark', 'ios', '苹果', 'iphone', '推送', 'key', '设备'] },
-  { value: 'Server酱 (Turbo) 微信推送', tab: 'notify', keywords: ['server酱', '方糖', '微信', 'sct', 'sendkey', '消息'] },
-  { value: 'PushDeer 微信/客户端推送', tab: 'notify', keywords: ['pushdeer', '快鹿', '推送', 'key'] },
   { value: 'PushPlus (推送加) 微信通知', tab: 'notify', keywords: ['pushplus', '推送加', '微信', 'token'] },
   { value: 'ntfy 自建/公共主题推送', tab: 'notify', keywords: ['ntfy', 'topic', '自建', '主题', '推送'] },
-  { value: '自定义 Webhook (企业微信/飞书/钉钉)', tab: 'notify', keywords: ['webhook', '企微', '企业微信', '飞书', '钉钉', '机器人', 'http', 'post'] },
+  { value: '通用 Webhook 推送 (企业微信 / 钉钉 / 飞书)', tab: 'notify', keywords: ['webhook', '企业微信', '钉钉', '飞书', '推送', '模板'] },
   { value: '每日转存摘要报告 (日报推送时间)', tab: 'notify', keywords: ['每日', '摘要', '日报', '统计', '定时', '推送时间'] },
 
-  // 定时维护 (schedule)
+  // 风控管理 (schedule)
   { value: '定时计划与避让时间段 (静默防风控)', tab: 'schedule', keywords: ['定时', '计划', '避让', '深夜', '时间段', '起止', '跨零点'] },
   { value: '开工随机扰动 (Jitter 随机微差)', tab: 'schedule', keywords: ['扰动', '随机', 'jitter', '微差', '防封'] },
   { value: '运行健康巡检间隔（云下载任务检查）', tab: 'schedule', keywords: ['健康', '巡检', '离线', '检查', '间隔', '云下载'] },
-  { value: '日志保留天数与 SQLite 自动压缩', tab: 'schedule', keywords: ['日志', '清理', '保留', '天数', 'vacuum', '压缩', '瘦身'] },
+  { value: '同名去重缓存时间 (秒)', tab: 'schedule', keywords: ['去重', '缓存', 'ttl', '秒'] },
 
   // 追更洗版 (wash)
   { value: '分享追更模式 (同一链接增量转存)', tab: 'wash', keywords: ['追更', '增量', '分享', '同链接', '集数', '加更'] },
@@ -199,7 +203,8 @@ const SEARCH_INDEX = [
   { value: '旧版文件归档目录（移入 115 回收站，可手动还原）', tab: 'wash', keywords: ['旧版', '归档', '回收站', '删除', '目录', '还原'] },
 
   // 备份恢复 (backup)
-  { value: '定时自动备份至 Telegram Bot', tab: 'backup', keywords: ['自动备份', '定时', '计划', '天数', '时间', 'bot'] },
+  { value: '定时自动备份至 Telegram Bot / WebDAV', tab: 'backup', keywords: ['自动备份', '定时', '计划', '天数', '时间', 'bot'] },
+  { value: 'WebDAV 云端备份与恢复', tab: 'backup', keywords: ['webdav', '云端', '坚果云', 'alist', '备份', '恢复'] },
   { value: '导出轻量配置备份 (.json)', tab: 'backup', keywords: ['导出', '配置', '备份', 'json', '下载'] },
   { value: '导出全量迁移包 (含媒体刮削与台账)', tab: 'backup', keywords: ['全量', '迁移包', '导出', '换机', '换服务器', 'bundle'] },
   { value: '恢复历史备份或全量迁移包', tab: 'backup', keywords: ['恢复', '还原', '导入', '上传', '覆盖'] },
@@ -278,7 +283,7 @@ const executeDoctor = async () => {
 const onDoctorClick = async () => {
   const ok = await confirmAction({
     title: '是否执行系统自检？',
-    message: '系统自检将对数据库完整性、数据目录读写、磁盘与网盘容量、115 登录状态、频道监听及转存队列健康进行全面只读巡检，并生成脱敏诊断报告（安全只读，不修改任何业务数据与凭据）。',
+    message: '将对数据库、磁盘与 115 容量、账号登录及队列状态进行只读检查，并生成脱敏诊断报告（不修改任何数据）。',
     confirmText: '开始自检',
     cancelText: '取消',
     type: 'info',
@@ -383,12 +388,6 @@ const load = async () => {
     transferPreset.value = hit(TRANSFER_PRESETS, [f.value.transfer_interval_min, f.value.transfer_interval_max],
                                (p) => [p.min, p.max])
 
-    // 查询参数直达指定 Tab（如 ?tab=notify）
-    const tabQuery = String(route?.query?.tab || '').toLowerCase()
-    if (tabQuery && TAB_LABELS[tabQuery]) {
-      activeTab.value = tabQuery
-    }
-
     loaded.value = true
     await nextTick()
     // 挂载稳定后锁定基准快照
@@ -407,6 +406,7 @@ const validateForm = () => {
   const dl = Number(f.value.daily_limit)
   if (!Number.isInteger(dl) || dl < 1 || dl > 50) {
     ElMessage.warning('每日转存上限必须是 1 ~ 50 之间的整数')
+    activeTab.value = 'transfer'
     return false
   }
 
@@ -414,6 +414,7 @@ const validateForm = () => {
   const ms = Number(f.value.min_size_gb)
   if (isNaN(ms) || ms < 0 || ms > 1000) {
     ElMessage.warning('分享体积下限需为 ≥0 的数字')
+    activeTab.value = 'transfer'
     return false
   }
 
@@ -423,15 +424,18 @@ const validateForm = () => {
     const sEnd = String(f.value.schedule_end || '').trim()
     if (!sStart || !sEnd) {
       ElMessage.warning('定时计划的开始时间与结束时间不能为空')
+      activeTab.value = 'schedule'
       return false
     }
     if (sStart === sEnd) {
       ElMessage.warning('计划起止时间不能相同')
+      activeTab.value = 'schedule'
       return false
     }
     const jm = Number(f.value.schedule_jitter_min)
     if (!Number.isInteger(jm) || jm < 0 || jm > 30) {
       ElMessage.warning('随机扰动需为 0~30 的整数')
+      activeTab.value = 'schedule'
       return false
     }
   }
@@ -441,20 +445,24 @@ const validateForm = () => {
     const rc = Number(f.value.batch_rest_count)
     if (!Number.isInteger(rc) || rc < 2 || rc > 20) {
       ElMessage.warning('连存小憩笔数必须是 2 ~ 20 之间的整数')
+      activeTab.value = 'schedule'
       return false
     }
     const rmin = Number(f.value.batch_rest_min_min)
     const rmax = Number(f.value.batch_rest_max_min)
     if (!Number.isInteger(rmin) || rmin < 1 || rmin > 60) {
       ElMessage.warning('最短小憩时间必须是 1 ~ 60 之间的整数（分钟）')
+      activeTab.value = 'schedule'
       return false
     }
     if (!Number.isInteger(rmax) || rmax < 1 || rmax > 60) {
       ElMessage.warning('最长小憩时间必须是 1 ~ 60 之间的整数（分钟）')
+      activeTab.value = 'schedule'
       return false
     }
     if (rmin > rmax) {
       ElMessage.warning(`小憩时间区间有误：最短小憩时间（${rmin} 分钟）不能大于最长小憩时间（${rmax} 分钟）`)
+      activeTab.value = 'schedule'
       return false
     }
   }
@@ -498,6 +506,7 @@ const validateForm = () => {
     const dir = String(f.value.wash_archive_dir || '').trim()
     if (!dir.startsWith('/') || dir.split('/').includes('..')) {
       ElMessage.warning('开启「洗版升级」需填写以 / 开头的旧版归档目录，如 /媒体库/洗版归档')
+      activeTab.value = 'wash'
       return false
     }
   }

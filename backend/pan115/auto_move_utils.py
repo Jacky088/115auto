@@ -187,7 +187,9 @@ def collect_library_keyword_conflicts(targets: list[str], fuzzy_t2s: bool = True
             continue
         try:
             cid = _pan().mkdirs(t)
-        except Exception:
+        except Exception as e:
+            if _pan()._hits_risk_keyword(str(e).lower()):
+                raise
             cid = 0
         if not cid:
             per_rule.append(set())
@@ -197,7 +199,9 @@ def collect_library_keyword_conflicts(targets: list[str], fuzzy_t2s: bool = True
         else:
             try:
                 entries = _pan().list_entries(cid, limit=2000)
-            except Exception:
+            except Exception as e:
+                if _pan()._hits_risk_keyword(str(e).lower()):
+                    raise
                 entries = []
             if scan_cache is not None:
                 entries_cache[cid] = entries

@@ -1,6 +1,6 @@
 <template>
 <!-- 整理预览弹窗（两段式执行第一步）：确认后才真正排队执行 -->
-<el-dialog v-model="previewVisible" title="整理预览 — 将移动以下文件" :width="'min(860px, 96vw)'" align-center>
+<el-dialog v-model="previewVisible" title="整理预览 — 将移动以下文件" :width="'min(860px, calc(100vw - 36px))'" align-center>
   <el-alert v-if="previewFromCache" type="warning" :closable="false" show-icon style="margin-bottom: 10px"
             title="暂存的预览缓存，确认后重新扫描执行" />
   <el-alert v-else type="info" :closable="false" show-icon style="margin-bottom: 10px"
@@ -77,10 +77,8 @@
       <span v-if="r.error" style="color: var(--el-color-danger)">「{{ r.target_dir }}」{{ r.error }}；</span>
     </div>
   </div>
-  <template #footer>
-    <el-button @click="previewVisible = false">关闭</el-button>
+  <template v-if="previewRows.length" #footer>
     <el-button
-      v-if="previewRows.length"
       type="primary"
       :loading="previewConfirming"
       :disabled="!previewSelectedCount"
@@ -145,16 +143,17 @@ const stopPreviewCountdown = () => {
   if (previewTimer) { clearInterval(previewTimer); previewTimer = null }
 }
 
-const runPreview = async () => {
+const runPreview = async (ruleIds = null) => {
   if (runningMove.value) return
-  if (previewCache.value && Date.now() - previewCache.value.ts < PREVIEW_CACHE_TTL) {
+  const hasFilter = Array.isArray(ruleIds) && ruleIds.length > 0
+  if (!hasFilter && previewCache.value && Date.now() - previewCache.value.ts < PREVIEW_CACHE_TTL) {
     openPreviewDialog(previewCache.value.data, true)
     return
   }
   runningMove.value = true
   let pv
   try {
-    pv = await runPreviewJob('/api/auto-move/preview', null,
+    pv = await runPreviewJob('/api/auto-move/preview', hasFilter ? { rule_ids: ruleIds } : null,
       { text: '正在扫描待整理文件，请勿进行其他操作……（按 Esc 可取消扫描）' })
   } catch (e) {
     if (e?.silent) return  // 等待超时：已由预览任务给出提示，扫描仍在后台继续
@@ -170,17 +169,6 @@ const runPreview = async () => {
   }
   if (pv.truncated) ElMessage.warning(pv.msg || '本轮扫描达到预算上限，已返回部分结果')
   previewCache.value = { ts: Date.now(), data: pv }
-  if (!pv.total_planned) {
-    // 0 计划但存在拦截/跳过时仍然弹窗展示统计——帮助定位“为什么没分流”
-    const hasSkips = (pv.rules || []).some((r) =>
-      r.skip_ep > 0 || r.skip_movie > 0 || r.skip_ambiguous > 0 || r.skip_junk > 0 || r.skip_dedup > 0 || r.error)
-    if (hasSkips) {
-      openPreviewDialog(pv, false)
-    } else {
-      ElMessage.info('当前没有需要移动的文件')
-    }
-    return
-  }
   openPreviewDialog(pv, false)
 }
 

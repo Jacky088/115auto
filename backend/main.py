@@ -54,10 +54,10 @@ async def lifespan(app: FastAPI):
     # 启动阶段同样不阻塞事件循环：磁盘清理与大表 UPDATE 在宿主机负载高时可能耗时较久
     await asyncio.to_thread(migration_bundle.cleanup_stale_tmp_dirs)
     logstream.info("system", "115 自动转存助手启动")
-    # 进程重启恢复：上一轮被中断的 running 任务重新排队，否则会永久卡在「转存中」
+    # 进程重启恢复：上一轮被中断的 running 任务重新排队并计入 attempts，触发重启后重试防重预检
     recovered = await asyncio.to_thread(
-        db.execute, "UPDATE transfers SET status='queued' WHERE status='running'")
-    await asyncio.to_thread(
+        db.execute, "UPDATE transfers SET status='queued', attempts=attempts+1 WHERE status='running'")
+    recovered_scrape = await asyncio.to_thread(
         db.execute, "UPDATE media_tasks SET status='queued' WHERE task_kind='scrape'"
                     " AND status='running' AND selected_tmdb_id IS NOT NULL")
     await asyncio.to_thread(
@@ -89,6 +89,8 @@ async def lifespan(app: FastAPI):
     _background.append(asyncio.create_task(jobs.auto_move_loop()))
     from .worker import media_worker
     _background.append(asyncio.create_task(media_worker.media_organize_loop()))
+    if recovered_scrape:
+        media_worker.schedule_commit_runner_if_idle()
     yield
     # 优雅停机：先取消后台任务并等待退出，再断开 Userbot —— 保证 Telethon session
     # 与 SQLite（WAL）完整落盘，避免强杀后 session 文件损坏需要重新登录
@@ -100,11 +102,7 @@ async def lifespan(app: FastAPI):
     if _background:
         await asyncio.gather(*_background, return_exceptions=True)
         _background.clear()
-    try:
-        if userbot.client is not None:
-            await userbot.client.disconnect()
-    except Exception:
-        pass
+    await userbot.disconnect_for_restore()
 
 
 app = FastAPI(title="115 自动转存助手", lifespan=lifespan,
@@ -217,8 +215,6 @@ def health():
 if config.STATIC_DIR.exists():
     app.mount("/", StaticFiles(directory=config.STATIC_DIR, html=True), name="static")
 else:
-    from fastapi.responses import JSONResponse
-
     @app.get("/")
     async def _no_frontend():
         return JSONResponse({"msg": "前端未构建：请运行 npm run build，或使用 Docker 镜像"})

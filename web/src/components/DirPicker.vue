@@ -1,5 +1,5 @@
 <template>
-  <el-dialog :model-value="modelValue" :title="title" :width="'min(600px, 94vw)'" align-center
+  <el-dialog :model-value="modelValue" :title="title" :width="'min(600px, calc(100vw - 36px))'" align-center
              :close-on-click-modal="false" @update:model-value="emitVisible" @open="onOpen">
     <!-- 未登录 115 时只提示，不展示目录 -->
     <el-alert v-if="loginErr" type="warning" show-icon :closable="false">
@@ -61,7 +61,7 @@ import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { api, errMsg } from '../api'
 
-const props = defineProps({
+defineProps({
   modelValue: Boolean,
   title: { type: String, default: '选择 115 目录' },
   allowSkip: Boolean,   // 是否提供「跳过（不转存）」选项
@@ -196,7 +196,7 @@ const needLogin = computed(() => !!loginErr.value && !dirs.value.length)
   padding: 2px 4px; font-size: var(--fs-body); max-width: 180px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border-radius: 4px;
 }
-.dp-crumb:hover { background: rgba(79, 107, 255, .14); color: var(--el-color-primary); }
+.dp-crumb:hover { background: var(--saas-hover); color: var(--el-color-primary); }
 .dp-crumb.current { color: var(--saas-text-main); font-weight: 600; cursor: default; }
 .dp-sep { color: var(--saas-text-sub); }
 .dp-list {
@@ -210,8 +210,8 @@ const needLogin = computed(() => !!loginErr.value && !dirs.value.length)
   color: var(--saas-text-main); transition: all .15s ease;
 }
 .dp-row:last-child { border-bottom: none; }
-.dp-row:hover { background: rgba(79, 107, 255, .12); color: var(--el-color-primary); }
-.dp-row.active { background: rgba(79, 107, 255, .15); }
+.dp-row:hover { background: var(--saas-hover); color: var(--el-color-primary); }
+.dp-row.active { background: rgba(37, 107, 245, .14); }
 .dp-radio { width: 14px; height: 14px; border: 1px solid var(--saas-line); border-radius: 50%; flex: none; position: relative; }
 .dp-row.active .dp-radio { border-color: var(--el-color-primary); }
 .dp-row.active .dp-radio::after {

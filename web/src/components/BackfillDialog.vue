@@ -2,7 +2,7 @@
   <el-dialog
     v-model="visible"
     title="向前补全早期分集"
-    :width="'min(480px, 94vw)'"
+    :width="'min(480px, calc(100vw - 36px))'"
     align-center
     destroy-on-close
   >
@@ -31,9 +31,7 @@
     </el-form>
 
     <div class="bf-tip">
-      将向前翻找频道历史里同一剧集的早期分集（最多 50 页）并加入转存队列；
-      补全任务优先消耗每日额度，已存过的集数不会重复。
-      早期链接已失效的集数会失败并注明原因，之后补发的新链接会照常转存。
+      向前翻找频道历史中的早期分集（最多 50 页）并优先入队，已存集数自动跳过；若早期链接失效将标记失败，后续补发新链接仍会正常转存。
     </div>
 
     <template #footer>
@@ -136,9 +134,9 @@ defineExpose({
 .bf-tip {
   font-size: var(--fs-caption);
   line-height: 1.55;
-  color: var(--saas-primary, #4f6bff);
-  background: rgba(79, 107, 255, 0.08);
-  border: 1px dashed rgba(79, 107, 255, 0.25);
+  color: var(--saas-text-sub);
+  background: var(--subcard-bg);
+  border: 1px dashed rgba(37, 107, 245, 0.30);
   border-radius: var(--r-sm);
   padding: 8px 12px;
   margin-top: 10px;

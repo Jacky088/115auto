@@ -1,5 +1,6 @@
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import { api } from '../api'
+import { confirmAction } from './confirmDialog'
 import { showScanLoading, closeScanLoading } from './scanLoading'
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -28,14 +29,14 @@ export async function runPreviewJob(base, body = {}, opts = {}) {
   const { text = '正在扫描文件，请勿进行其他操作……（按 Esc 可取消扫描）', timeout = 900000 } = opts
   let started = await startJob(base, body)
   if (started.need_confirm) {
-    try {
-      await ElMessageBox.confirm(started.msg, '扫描范围较大', {
-        confirmButtonText: '分批继续扫描',
-        cancelButtonText: '缩小目录范围',
-        type: 'warning',
-        distinguishCancelAndClose: true,
-      })
-    } catch (e) {
+    const ok = await confirmAction({
+      title: '扫描范围较大',
+      message: started.msg,
+      confirmText: '分批继续扫描',
+      cancelText: '缩小目录范围',
+      type: 'warning',
+    })
+    if (!ok) {
       const err = new Error('已取消扫描，请缩小目录范围后再试')
       err.cancelled = true
       throw err

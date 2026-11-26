@@ -12,32 +12,32 @@
     </div>
 
     <!-- 登录流程：api_id/api_hash → 验证码 →（可选）两步验证密码 -->
-    <el-form v-if="!st.connected || flowStep > 0" label-width="96px" size="default" class="ub-form"
+    <el-form v-if="!st.connected || flowStep > 0" label-width="96px" size="default" class="ub-form" autocomplete="off"
              @submit.prevent>
       <template v-if="flowStep === 0">
         <el-form-item label="API ID">
-          <el-input v-model="form.api_id" placeholder="my.telegram.org 获取（纯数字）" />
+          <el-input v-model="form.api_id" autocomplete="off" placeholder="my.telegram.org 获取（纯数字）" />
         </el-form-item>
         <el-form-item label="API Hash">
-          <el-input v-model="form.api_hash" type="password" show-password
+          <el-input v-model="form.api_hash" type="password" autocomplete="new-password" show-password
                     placeholder="my.telegram.org 获取" />
         </el-form-item>
         <el-form-item label="手机号">
-          <el-input v-model="form.phone" placeholder="+8613800138000（建议小号）" />
+          <el-input v-model="form.phone" autocomplete="off" :placeholder="phonePlaceholder" />
         </el-form-item>
         <el-button type="primary" :loading="busy" @click="startLogin">发送验证码并校验</el-button>
         <span class="ub-hint">发送验证码本身就会校验 api_id/api_hash 是否正确</span>
       </template>
       <template v-else-if="flowStep === 1">
         <el-form-item label="验证码">
-          <el-input v-model="form.code" placeholder="TG 官方发来的验证码" />
+          <el-input v-model="form.code" autocomplete="off" placeholder="TG 官方发来的验证码" />
         </el-form-item>
         <el-button type="primary" :loading="busy" @click="submitCode">提交验证码</el-button>
         <el-button @click="resetFlow">重填凭证</el-button>
       </template>
       <template v-else>
         <el-form-item label="两步密码">
-          <el-input v-model="form.password" type="password" show-password
+          <el-input v-model="form.password" type="password" autocomplete="new-password" show-password
                     placeholder="该账号开启了两步验证" />
         </el-form-item>
         <el-button type="primary" :loading="busy" @click="submitPwd">完成登录</el-button>
@@ -77,9 +77,9 @@
 <script setup>
 import { onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { api, errMsg } from '../api'
+import { api, errMsg, SECRET_MASK } from '../api'
 
-const props = defineProps({ compact: Boolean })  // compact: 用于弹窗内（缩小留白）
+defineProps({ compact: Boolean })  // compact: 用于弹窗内（缩小留白）
 const emit = defineEmits(['update'])
 
 const st = reactive({ configured: false, connected: false, me: '' })
@@ -102,20 +102,32 @@ const loadStatus = async () => {
 
 const resetFlow = () => { flowStep.value = 0; flowErr.value = ''; form.code = ''; form.password = '' }
 
+const phonePlaceholder = ref('+8613800138000（建议小号）')
+
 // 更换凭证：展开凭证表单（独立流程，不联动页面其他保存按钮），
-// 预填 API ID 与手机号（已保存的非敏感信息），API Hash 需重新填写
+// 预填 API ID 与真实手机号（若后端返回脱敏掩码则留空避免提交掩码串），API Hash 需重新填写
 const openEdit = async () => {
   resetFlow()
+  phonePlaceholder.value = '+8613800138000（建议小号）'
   try {
     const s = (await api.get('/api/settings')).data
     if (s.tg_api_id) form.api_id = String(s.tg_api_id)
-    if (s.tg_phone) form.phone = s.tg_phone
+    if (s.tg_phone && s.tg_phone !== SECRET_MASK) {
+      form.phone = s.tg_phone
+    } else if (s.tg_phone === SECRET_MASK) {
+      form.phone = ''
+      phonePlaceholder.value = '已保存原手机号，请重新输入完整手机号'
+    }
   } catch { /* 预填失败不阻塞 */ }
 }
 
 const startLogin = async () => {
   if (!form.api_id.trim() || !form.api_hash.trim() || !form.phone.trim()) {
     flowErr.value = '请完整填写 API ID / API Hash / 手机号'
+    return
+  }
+  if (!/^\d+$/.test(form.api_id.trim()) || Number(form.api_id.trim()) <= 0) {
+    flowErr.value = 'API ID 必须为正整数（可从 my.telegram.org 获取）'
     return
   }
   busy.value = true
@@ -180,8 +192,8 @@ defineExpose({ loadStatus, runTest })
 .ub-result { display: flex; flex-direction: column; gap: 6px; }
 .ub-ch { display: flex; align-items: center; gap: 6px; font-size: var(--fs-body); padding-left: 4px; }
 .ub-ch .ok { color: var(--el-color-success); }
-.ub-ch .bad { color: #f56c6c; }
+.ub-ch .bad { color: var(--el-color-danger, #ef4444); }
 .ub-ch-name { font-weight: 600; }
 .ub-ch-title { color: var(--el-text-color-secondary); }
-.ub-ch-err { color: #f56c6c; font-size: var(--fs-caption); }
+.ub-ch-err { color: var(--el-color-danger, #ef4444); font-size: var(--fs-caption); }
 </style>

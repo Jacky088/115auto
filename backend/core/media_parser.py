@@ -308,6 +308,10 @@ def parse_media_filename(filename: str, is_dir: bool = False) -> ParsedMedia:
         pm.is_special = True
     m_part = _PART_RE.search(work)
     if m_part:
+        ep_range_hit = _CN_EP_RANGE_RE.search(work)
+        if ep_range_hit and not (m_part.end() <= ep_range_hit.start() or m_part.start() >= ep_range_hit.end()):
+            m_part = None
+    if m_part:
         pt_num = m_part.group(2)
         if pt_num:
             pm.part = f"part{int(pt_num)}"
@@ -367,17 +371,24 @@ def parse_media_filename(filename: str, is_dir: bool = False) -> ParsedMedia:
                     continue
                 pm.episode = ep_val
                 if pat is _CN_EP_RANGE_RE:
-                    pm.episode_end = int(m.group(2))
+                    end_val = cn_to_int(m.group(2))
+                    if end_val is not None and ep_val <= end_val <= ep_val + 30:
+                        pm.episode_end = end_val
                 ep_cut_idx = m.start()
                 break
 
     if pm.episode is None:
         m = _EP_PREFIX_RE.search(work)
         if m:
-            pm.episode = int(m.group(1))
-            if m.group(2) and not pm.part:
+            ep_val = int(m.group(1))
+            pm.episode = ep_val
+            if m.group(2):
+                end_val = int(m.group(2))
+                if ep_val <= end_val <= ep_val + 30:
+                    pm.episode_end = end_val
+            if m.group(3) and not pm.part:
                 # E1P2 / E01P2：P 段号按分集分段处理
-                pm.part = f"part{int(m.group(2))}"
+                pm.part = f"part{int(m.group(3))}"
             ep_cut_idx = m.start()
 
     if pm.episode is None:
@@ -386,6 +397,10 @@ def parse_media_filename(filename: str, is_dir: bool = False) -> ParsedMedia:
             num = int(m.group(1))
             if not (1900 <= num <= datetime.date.today().year + 2):
                 pm.episode = num
+                if m.group(2):
+                    end_val = int(m.group(2))
+                    if num <= end_val <= num + 30:
+                        pm.episode_end = end_val
                 ep_cut_idx = m.start()
 
     if pm.episode is None:
@@ -420,8 +435,12 @@ def parse_media_filename(filename: str, is_dir: bool = False) -> ParsedMedia:
     if pm.is_special and pm.season is None:
         pm.season = 0
 
-    # 如果从标题后半段抽出了集数标记，优先保留集数标记之前的主体
+    # 如果从标题后半段抽出了集数标记，先从后半段补采年份（如 Show.S01E01.2023.1080p），再截断主体
     if ep_cut_idx is not None and ep_cut_idx > 1:
+        if not pm.year:
+            _, tail_yr = _strip_year_safely(work[ep_cut_idx:])
+            if tail_yr:
+                pm.year = tail_yr
         work = work[:ep_cut_idx]
     else:
         for p in (_RANGE_SE_EP_RE, _SINGLE_SE_EP_RE, _X_SE_EP_RE, _CN_EP_RANGE_RE, _CN_EP_RE, _EP_PREFIX_RE, _ANIME_DASH_EP_RE, _ANIME_BRACKET_EP_RE):
@@ -437,7 +456,8 @@ def parse_media_filename(filename: str, is_dir: bool = False) -> ParsedMedia:
     title_cand = re.sub(r"[\._]+", " ", work)
     title_cand = re.sub(r"\s{2,}", " ", title_cand).strip(" -·|")
     title_cand, yr = _strip_year_safely(title_cand)
-    pm.year = yr
+    if yr:
+        pm.year = yr
 
     # 6. 最终标题润色与中英双语分离
     title_cand = re.sub(r"[\(\[（【\)\]）】]+$", "", title_cand).strip(" .-·|")
@@ -581,16 +601,23 @@ def match_subtitle_for_video(video_name: str, sub_names: list[str]) -> list[tupl
                 s_parsed = parse_media_filename(s_clean)
                 if (
                     s_parsed.episode == v_parsed.episode
-                    and (s_parsed.season or 1) == (v_parsed.season or 1)
+                    and (s_parsed.season if s_parsed.season is not None else 1)
+                    == (v_parsed.season if v_parsed.season is not None else 1)
                 ):
                     vn_t = normalize_title(v_parsed.title, fuzzy_t2s=True)
                     sn_t = normalize_title(s_parsed.title, fuzzy_t2s=True)
                     if not sn_t or not vn_t or sn_t == vn_t or sn_t in vn_t or vn_t in sn_t:
                         is_hit = True
             if is_hit and "." in s_root:
-                tail = s_root.rsplit(".", 1)[-1].strip()
-                if tail.lower() in _SUB_LANG_TOKENS:
-                    lang_tag = f".{tail}"
+                parts = [x.strip() for x in s_root.split(".") if x.strip()]
+                lang_parts: list[str] = []
+                for tok in reversed(parts[1:]):
+                    if tok.lower() in _SUB_LANG_TOKENS:
+                        lang_parts.insert(0, tok)
+                    else:
+                        break
+                if lang_parts:
+                    lang_tag = "." + ".".join(lang_parts)
         if is_hit:
             matched.append((sn, lang_tag))
     return matched

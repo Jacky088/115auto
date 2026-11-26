@@ -366,7 +366,7 @@
             <el-progress :percentage="bundleProgress" :stroke-width="14" />
           </div>
           <div class="tip">
-            支持最大 <b>2 GB</b> 整机迁移包流式上传（导入前请先在顶栏点「停止运行」）；恢复后本机任务回到停止状态，若还原了密钥将自动刷新当前登录令牌。
+            支持最大 <b>2 GB</b> 迁移包（导入前请先在顶栏点「停止运行」）；恢复后系统保持停止，若还原了密钥将自动刷新登录态。
           </div>
         </div>
       </el-form-item>
@@ -375,6 +375,8 @@
     <!-- WebDAV 云端备份存储 -->
     <WebDAVSettings
       ref="webdavRef"
+      :restore-credentials="!!f.bundle_restore_credentials"
+      :restore-meta="f.bundle_restore_meta !== false"
       @status-changed="onDavStatusChanged"
       @backup-done="loadBundleEstimate"
     />
@@ -765,7 +767,7 @@ defineExpose({
 .channel-status-item {
   padding: 10px 14px;
   background: var(--subcard-bg, #fbfdff);
-  border: 1px solid var(--saas-line, rgba(126, 146, 196, 0.26));
+  border: 1px solid var(--saas-line, rgba(0, 0, 0, 0.08));
   border-radius: var(--r-sm, 10px);
   font-size: 13px;
   transition: all var(--t-fast, 0.2s) ease;

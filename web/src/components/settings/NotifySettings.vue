@@ -22,12 +22,13 @@
             <el-input
               v-model="nf.token"
               type="password"
+              autocomplete="new-password"
               show-password
               placeholder="TG Bot Token（@BotFather 获取）"
             />
           </div>
           <div class="range-row" style="width: 100%">
-            <el-input v-model="nf.chat_id" placeholder="Chat ID（你的用户 ID）" style="width: 260px" />
+            <el-input v-model="nf.chat_id" autocomplete="off" placeholder="Chat ID（你的用户 ID）" style="width: 260px" />
           </div>
           <div class="range-row" style="width: 100%">
             <el-button
@@ -35,9 +36,10 @@
               plain
               size="small"
               :loading="testing"
+              :disabled="tgNotifyCooldown > 0"
               @click="testNotify(nf.token, nf.chat_id)"
             >
-              发送测试消息
+              {{ tgNotifyCooldown > 0 ? `已发送 (${tgNotifyCooldown}s)` : '发送测试消息' }}
             </el-button>
             <el-button type="primary" size="small" :loading="saving" @click="save">保存</el-button>
             <el-button v-if="isConfigured" size="small" @click="cancel">取消</el-button>
@@ -50,12 +52,9 @@
       </el-form-item>
       <el-form-item label="直发链接格式">
         <div class="tip" style="width: 100%">
-          直接发给 Bot 的链接需以指令头开头，程序据此判断进哪个队列（不带会回复格式说明）：<br />
+          直发 Bot 需带指令头（分类可省略，省略时自动匹配或走「未分类动作」；分类名须与「转存整理」页一致）：<br />
           <code>转存 [分类] &lt;115 分享链接&gt;</code> → 进入分享转存队列<br />
-          <code>云下载 [分类] &lt;磁力/电驴链接&gt;</code> → 进入云下载队列<br />
-          空格不影响识别，链接可紧贴指令头；分类可省略（如 <code>云下载 动漫 magnet:?xt=…</code>），
-          写了分类就用该分类目录，省略时按标题规则识别、识别不出用「未分类动作」；<br />
-          分类名须与「转存目录」页的「分类 → 目录映射」完全一致，写错会拒绝入队并回复全部可选分类
+          <code>云下载 [分类] &lt;磁力/电驴链接&gt;</code> → 进入云下载队列
         </div>
       </el-form-item>
     </div>
@@ -68,7 +67,13 @@
           <el-switch v-model="f.digest_enabled" />
           <el-tooltip :disabled="!!f.digest_enabled" content="请先开启「每日摘要」总开关" placement="top">
             <span>
-              <el-button :loading="digestTesting" :disabled="!f.digest_enabled" @click="testDigest">立即推送一次</el-button>
+              <el-button
+                :loading="digestTesting"
+                :disabled="!f.digest_enabled || digestCooldown > 0"
+                @click="testDigest"
+              >
+                {{ digestCooldown > 0 ? `已推送 (${digestCooldown}s)` : '立即推送一次' }}
+              </el-button>
             </span>
           </el-tooltip>
         </div>
@@ -105,12 +110,20 @@
             <el-input
               v-model="bf.url"
               type="password"
+              autocomplete="new-password"
               show-password
               placeholder="https://api.day.app/你的key"
             />
           </div>
           <div class="range-row" style="width: 100%">
-            <el-button size="small" :loading="chTesting === 'bark'" @click="testChannel('bark')">发送测试</el-button>
+            <el-button
+              size="small"
+              :loading="chTesting === 'bark'"
+              :disabled="chCooldown.bark > 0"
+              @click="testChannel('bark')"
+            >
+              {{ chCooldown.bark > 0 ? `已测试 (${chCooldown.bark}s)` : '发送测试' }}
+            </el-button>
             <el-button type="primary" size="small" :loading="saving" @click="save">保存</el-button>
             <el-button v-if="isConfigured" size="small" @click="cancel">取消</el-button>
           </div>
@@ -133,15 +146,23 @@
             <el-input
               v-model="pf.token"
               type="password"
+              autocomplete="new-password"
               show-password
               placeholder="pushplus.plus 的 Token"
             />
           </div>
           <div class="range-row" style="width: 100%">
-            <el-input v-model="pf.topic" placeholder="群组编码（可选，留空发本人）" />
+            <el-input v-model="pf.topic" autocomplete="off" placeholder="群组编码（可选，留空发本人）" />
           </div>
           <div class="range-row" style="width: 100%">
-            <el-button size="small" :loading="chTesting === 'pushplus'" @click="testChannel('pushplus')">发送测试</el-button>
+            <el-button
+              size="small"
+              :loading="chTesting === 'pushplus'"
+              :disabled="chCooldown.pushplus > 0"
+              @click="testChannel('pushplus')"
+            >
+              {{ chCooldown.pushplus > 0 ? `已测试 (${chCooldown.pushplus}s)` : '发送测试' }}
+            </el-button>
             <el-button type="primary" size="small" :loading="saving" @click="save">保存</el-button>
             <el-button v-if="isConfigured" size="small" @click="cancel">取消</el-button>
           </div>
@@ -161,18 +182,26 @@
           @cancel="resetNtfy"
         >
           <div class="range-row" style="width: 100%">
-            <el-input v-model="tf.url" placeholder="https://ntfy.sh/你的主题" />
+            <el-input v-model="tf.url" autocomplete="off" placeholder="https://ntfy.sh/你的主题" />
           </div>
           <div class="range-row" style="width: 100%">
             <el-input
               v-model="tf.token"
               type="password"
+              autocomplete="new-password"
               show-password
               placeholder="访问令牌（可选，自建 ntfy 开启鉴权时填）"
             />
           </div>
           <div class="range-row" style="width: 100%">
-            <el-button size="small" :loading="chTesting === 'ntfy'" @click="testChannel('ntfy')">发送测试</el-button>
+            <el-button
+              size="small"
+              :loading="chTesting === 'ntfy'"
+              :disabled="chCooldown.ntfy > 0"
+              @click="testChannel('ntfy')"
+            >
+              {{ chCooldown.ntfy > 0 ? `已测试 (${chCooldown.ntfy}s)` : '发送测试' }}
+            </el-button>
             <el-button type="primary" size="small" :loading="saving" @click="save">保存</el-button>
             <el-button v-if="isConfigured" size="small" @click="cancel">取消</el-button>
           </div>
@@ -183,14 +212,60 @@
           </div>
         </SecretConfig>
       </el-form-item>
+
+      <el-form-item label="Webhook 通用推送（企业微信 / 飞书 / 钉钉 / 自定义）">
+        <SecretConfig
+          :configured="!!f.webhook_url"
+          :save="saveWebhook"
+          inline-actions
+          @open="openWebhook"
+          @cancel="resetWebhook"
+        >
+          <template #default="{ save, cancel, saving, configured: isConfigured }">
+            <div style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center; width: 100%">
+              <el-select v-model="wf.preset" style="width: 148px">
+                <el-option label="企业微信机器人" value="wecom" />
+                <el-option label="飞书机器人" value="feishu" />
+                <el-option label="钉钉机器人" value="dingtalk" />
+                <el-option label="自定义 JSON" value="custom" />
+              </el-select>
+              <el-input v-model="wf.url" placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=..." style="flex: 1; min-width: 240px" />
+            </div>
+            <el-input
+              v-if="wf.preset === 'custom'"
+              v-model="wf.template"
+              type="textarea"
+              :rows="2"
+              placeholder='可选自定义 JSON 模板，如 {"title": {{title}}, "text": {{message}}}'
+              style="width: 100%; margin-top: 8px"
+            />
+            <div class="range-row" style="width: 100%; margin-top: 8px">
+              <el-button
+                size="small"
+                :loading="chTesting === 'webhook'"
+                :disabled="chCooldown.webhook > 0"
+                @click="testChannel('webhook')"
+              >
+                {{ chCooldown.webhook > 0 ? `已测试 (${chCooldown.webhook}s)` : '发送测试' }}
+              </el-button>
+              <el-button type="primary" size="small" :loading="saving" @click="save">保存</el-button>
+              <el-button v-if="isConfigured" size="small" @click="cancel">取消</el-button>
+            </div>
+            <div class="tip" style="width: 100%">
+              支持企业微信、飞书、钉钉群机器人 Webhook，或自定义 JSON 请求体（可用 <code v-pre>{{title}}</code>、<code v-pre>{{message}}</code> 占位符）。
+            </div>
+          </template>
+        </SecretConfig>
+      </el-form-item>
     </div>
   </div>
 </template>
 
 <script setup>
-import { reactive, ref } from 'vue'
+import { onBeforeUnmount, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { api, errMsg, saveOk, SECRET_MASK } from '../../api'
+import { useCooldown } from '../../composables/useCooldown'
 import SecretConfig from '../SecretConfig.vue'
 
 const props = defineProps({
@@ -206,10 +281,32 @@ const nf = reactive({ token: '', chat_id: '' })   // TG 通知
 const bf = reactive({ url: '' })                  // Bark
 const pf = reactive({ token: '', topic: '' })     // PushPlus
 const tf = reactive({ url: '', token: '' })       // ntfy
+const wf = reactive({ url: '', preset: 'wecom', template: '' }) // Webhook
 
 const testing = ref(false)
 const chTesting = ref('')
 const digestTesting = ref(false)
+
+const { cooldown: tgNotifyCooldown, startCooldown: startTgNotifyCooldown } = useCooldown(5)
+const { cooldown: digestCooldown, startCooldown: startDigestCooldown } = useCooldown(5)
+
+const chCooldown = reactive({ bark: 0, pushplus: 0, ntfy: 0, webhook: 0 })
+const chTimers = {}
+const startChCooldown = (ch, sec = 5) => {
+  if (chTimers[ch]) clearInterval(chTimers[ch])
+  chCooldown[ch] = sec
+  chTimers[ch] = setInterval(() => {
+    chCooldown[ch]--
+    if (chCooldown[ch] <= 0) {
+      clearInterval(chTimers[ch])
+      delete chTimers[ch]
+    }
+  }, 1000)
+}
+
+onBeforeUnmount(() => {
+  Object.values(chTimers).forEach((t) => clearInterval(t))
+})
 
 const openNotify = () => { nf.token = ''; nf.chat_id = props.f.notify_chat_id || '' }
 const resetNotify = () => { nf.token = ''; nf.chat_id = props.f.notify_chat_id || '' }
@@ -271,7 +368,7 @@ const saveNtfy = async () => {
   }
   try {
     await api.put('/api/settings', { ntfy_url: tf.url.trim(), ntfy_token: tf.token.trim() })
-    emit('sync-f', { ntfy_url: tf.url.trim(), ntfy_token: SECRET_MASK })
+    emit('sync-f', { ntfy_url: tf.url.trim(), ntfy_token: tf.token.trim() ? SECRET_MASK : '' })
     saveOk('ntfy 配置已保存', '已即时生效')
   } catch (e) {
     ElMessage.error(errMsg(e))
@@ -279,14 +376,46 @@ const saveNtfy = async () => {
   }
 }
 
+const openWebhook = () => {
+  wf.url = ''
+  wf.preset = props.f.webhook_preset || 'wecom'
+  wf.template = props.f.webhook_template || ''
+}
+const resetWebhook = openWebhook
+const saveWebhook = async () => {
+  if (!wf.url.trim()) {
+    ElMessage.error('请填写 Webhook 地址')
+    throw new Error('invalid')
+  }
+  try {
+    await api.put('/api/settings', {
+      webhook_url: wf.url.trim(),
+      webhook_preset: wf.preset || 'wecom',
+      webhook_template: wf.template.trim(),
+    })
+    emit('sync-f', {
+      webhook_url: SECRET_MASK,
+      webhook_preset: wf.preset || 'wecom',
+      webhook_template: wf.template.trim(),
+    })
+    saveOk('Webhook 配置已保存', '已即时生效')
+  } catch (e) {
+    ElMessage.error(errMsg(e))
+    throw e
+  }
+}
+
 const testNotify = async (token, chatId) => {
+  if (testing.value || tgNotifyCooldown.value > 0) return
   testing.value = true
   try {
-    await api.post('/api/settings/notify/test', {
+    const { data } = await api.post('/api/settings/notify/test', {
       token: (token && token !== SECRET_MASK) ? token : '',
       chat_id: chatId ?? props.f.notify_chat_id,
     })
-    saveOk('测试消息已发送', '请到 Telegram 查看')
+    startTgNotifyCooldown(5)
+    const lat = data?.latency_ms !== undefined && data?.latency_ms !== null ? `（耗时 ${data.latency_ms}ms）` : ''
+    saveOk(`测试消息已发送${lat}`, '请到 Telegram 查看')
   } catch (e) {
     ElMessage.error(errMsg(e))
   } finally {
@@ -295,10 +424,13 @@ const testNotify = async (token, chatId) => {
 }
 
 const testChannel = async (ch) => {
+  if (chTesting.value || (chCooldown[ch] && chCooldown[ch] > 0)) return
   chTesting.value = ch
   try {
     const { data } = await api.post(`/api/settings/notify/test/${ch}`)
-    saveOk(`${data.detail || '测试消息已发送'}`, '请打开对应 App 确认收到')
+    startChCooldown(ch, 5)
+    const lat = data?.latency_ms !== undefined && data?.latency_ms !== null ? `（耗时 ${data.latency_ms}ms）` : ''
+    saveOk(`${data.detail || '测试消息已发送'}${lat}`, '请打开对应 App 确认收到')
   } catch (e) {
     ElMessage.error(errMsg(e))
   } finally {
@@ -307,13 +439,15 @@ const testChannel = async (ch) => {
 }
 
 const testDigest = async () => {
+  if (digestTesting.value || digestCooldown.value > 0) return
   digestTesting.value = true
   try {
     const { data } = await api.post('/api/settings/digest/test')
+    startDigestCooldown(5)
     if (data.ok) {
       saveOk('摘要已推送', '请到已配置的通知渠道查看')
     } else {
-      const CH_LABEL = { tg: 'Telegram', bark: 'Bark', pushplus: 'PushPlus', ntfy: 'ntfy' }
+      const CH_LABEL = { tg: 'Telegram', bark: 'Bark', pushplus: 'PushPlus', ntfy: 'ntfy', webhook: 'Webhook' }
       const fail = Object.entries(data.detail || {}).filter(([, v]) => !v).map(([k]) => CH_LABEL[k] || k).join('、')
       ElMessage.error(`推送失败：${fail} 未成功（未配置或发送失败，请检查通知配置）`)
     }

@@ -188,6 +188,9 @@ async def execute_organize_queue(rule_ids: list[int] | None = None, trigger: str
                             })
                         else:
                             skip_cnt += 1
+                        if res.get("replaced_file_id"):
+                            from . import meta_gc
+                            await asyncio.to_thread(meta_gc.cleanup_replaced_media_task, res["replaced_file_id"])
                         await asyncio.to_thread(
                             db.execute,
                             "UPDATE media_tasks SET status=?, target_path=?, target_name=?, error=?, updated_at=?, finished_at=? WHERE id=?",
@@ -222,10 +225,13 @@ async def execute_organize_queue(rule_ids: list[int] | None = None, trigger: str
 
                 now = time.time()
                 for r in rules:
+                    rid_i = int(r["id"])
+                    if include_ids and rid_i not in rule_counts:
+                        continue
                     await asyncio.to_thread(
                         db.execute,
                         "UPDATE media_rules SET last_run_at=?, last_count=? WHERE id=?",
-                        (now, rule_counts.get(int(r["id"]), 0), r["id"]),
+                        (now, rule_counts.get(rid_i, 0), r["id"]),
                     )
                 await asyncio.to_thread(db.set_setting, "media_organize_last_run", now)
 
@@ -317,15 +323,23 @@ def _undo_records_sync(records: list[dict]) -> tuple[int, int]:
             if dest_cid != orig_cid:
                 try:
                     _mw().client.move_entries([fid], orig_cid)
+                    if dest_name != orig_name:
+                        _mw().client.rename_entry(fid, orig_name)
                 except Exception as move_err:
-                    # 批末空目录清理可能已删除原目录 cid，按 orig_path 逐级重建后再重试移动
+                    # 1) 若原目录已被清理，按 orig_path 逐级重建后再重试移动
                     recreated = _ensure_orig_cid()
                     if recreated and recreated != orig_cid:
                         orig_cid = recreated
                         _mw().client.move_entries([fid], orig_cid)
+                        if dest_name != orig_name:
+                            _mw().client.rename_entry(fid, orig_name)
+                    elif dest_name != orig_name:
+                        # 2) 原目录仍存在但存在同名 dest_name 冲突时，尝试先在原位改回 orig_name 再移动
+                        _mw().client.rename_entry(fid, orig_name)
+                        _mw().client.move_entries([fid], orig_cid)
                     else:
                         raise move_err
-            if dest_name != orig_name:
+            elif dest_name != orig_name:
                 _mw().client.rename_entry(fid, orig_name)
             db.execute("UPDATE organized_records SET undone=1 WHERE id=?", (rec["id"],))
             undone += 1
@@ -343,16 +357,23 @@ async def undo_organized(batch_id: str = "", record_id: int = 0) -> dict:
     if not record_id and not batch_id:
         return {"ok": False, "msg": "请指定需要撤销的记录 ID 或批次 ID"}
 
-    if record_id:
-        rows = [dict(r) for r in await asyncio.to_thread(
-            db.query, "SELECT * FROM organized_records WHERE id=? AND undone=0", (int(record_id),)
-        )]
-    else:
-        rows = [dict(r) for r in await asyncio.to_thread(
-            db.query, "SELECT * FROM organized_records WHERE batch_id=? AND undone=0 ORDER BY id DESC", (batch_id,)
-        )]
-    if not rows:
-        return {"ok": False, "msg": "没有找到可撤销的未回退记录"}
+    lock = _get_lock("organize")
+    if lock.locked():
+        return {"ok": False, "msg": "目录整理或撤销任务已在执行中，请稍后再试"}
 
-    undone, failed = await _mw().client.run_pan_thread(_undo_records_sync, rows)
-    return {"ok": undone > 0, "undone": undone, "failed": failed, "msg": f"已撤销 {undone} 条，失败 {failed} 条"}
+    async with lock:
+        if transfer_gate.is_exclusive_busy():
+            return {"ok": False, "msg": "当前正在执行整理或刮削，请待结束后再执行撤销"}
+        if record_id:
+            rows = [dict(r) for r in await asyncio.to_thread(
+                db.query, "SELECT * FROM organized_records WHERE id=? AND undone=0", (int(record_id),)
+            )]
+        else:
+            rows = [dict(r) for r in await asyncio.to_thread(
+                db.query, "SELECT * FROM organized_records WHERE batch_id=? AND undone=0 ORDER BY id DESC", (batch_id,)
+            )]
+        if not rows:
+            return {"ok": False, "msg": "没有找到可撤销的未回退记录"}
+
+        undone, failed = await _mw().client.run_pan_thread(_undo_records_sync, rows)
+        return {"ok": undone > 0, "undone": undone, "failed": failed, "msg": f"已撤销 {undone} 条，失败 {failed} 条"}

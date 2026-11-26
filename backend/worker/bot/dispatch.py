@@ -79,12 +79,12 @@ async def register_bot_menu(client: httpx.AsyncClient, token: str) -> None:
 
 
 def _archive_status() -> str:
-    """/archive：归档（定时文件整理）状态一览。"""
+    """/archive：定时自动归档分流状态一览。"""
     from ...core import transfer_gate
     on = bool(db.get_setting("auto_move_enabled", False))
     gate = transfer_gate.get_exclusive_status()
     gate_line = "空闲" if not gate.get("busy") else f"{gate.get('mode_label', '任务')}执行中"
-    lines = ["📦 归档（定时文件整理）", "",
+    lines = ["📦 定时自动归档分流", "",
              f"• 功能：{'已开启' if on else '未开启'}｜门闸：{gate_line}"]
     if on:
         lr = db.query("SELECT source_dir, last_run_at, last_moved_count FROM auto_move_rules"
@@ -166,7 +166,7 @@ def _handle_command(text: str, chat_id: str) -> str:
                 pass
         running = db.get_setting("running", False)
         state_line = ("▶ 运行中" if running and not paused
-                      else "⏸ 已暂停" if paused else "⏹ 未启动（点击网页顶栏「开始运行」启动）")
+                      else "⏸ 已暂停" if paused else "⏹ 未启动（发送 /start 或到网页顶栏「开始运行」启动）")
         return (f"📊 运行状态\n\n{state_line}\n"
                 f"📥 队列：{queued} 个待转存\n"
                 f"✅ 近 24 小时成功：{today_s}｜❌ 失败/拦截：{today_f}\n"
@@ -194,14 +194,10 @@ def _handle_command(text: str, chat_id: str) -> str:
         return _handle_sub(args)
     if cmd == "/archive":
         return _archive_status()
-    if cmd == "/archive run":
-        return "将立即排队执行归档（等待转存/云下载队列排空后自动移动）。确认请点按钮"
     if cmd == "/start":
         return _system_start()
     if cmd == "/stop":
         return "⚠️ 将停止系统运行：暂停监听与转存，归档功能联动关闭。确认请点按钮，或直接忽略"
-    if cmd == "/stop confirm":
-        return _system_stop()
     if cmd == "/retry":
         n = db.execute(
             "UPDATE transfers SET status='queued', attempts=0, error='', next_retry_at=NULL"
@@ -320,7 +316,8 @@ async def bot_command_loop():
                         if cq:
                             if str(cq.get("message", {}).get("chat", {}).get("id", "")) != chat_id:
                                 continue
-                            sender_ok, sender_hint = _check_sender(
+                            sender_ok, sender_hint = await asyncio.to_thread(
+                                _check_sender,
                                 {"chat": cq.get("message", {}).get("chat", {}),
                                  "from": cq.get("from") or {}})
                             if not sender_ok:
@@ -366,7 +363,10 @@ async def bot_command_loop():
                                     pass
                                 continue
                             if (cq.get("data") or "") == "c:backup":
-                                await send_backup_flow(client, token, chat_id)
+                                try:
+                                    await send_backup_flow(client, token, chat_id)
+                                except Exception as e:
+                                    logstream.error("system", f"Bot 发送备份流程异常: {logstream.exc(e)}")
                                 continue
                             if (cq.get("data") or "").startswith("bfgo:"):
                                 parts = (cq.get("data") or "").split(":")
@@ -403,15 +403,28 @@ async def bot_command_loop():
                                     pass
                                 continue
                             if (cq.get("data") or "") == "a:run":
-                                res = await jobs.execute_auto_move(trigger="manual")
-                                reply = ("✅ 已发起排队归档：等待转存/云下载队列排空后自动移动，"
-                                         "完成后推送明细") if res.get("ok") else (res.get("msg") or "归档发起失败")
+                                async def _bg_auto_move(msg_id):
+                                    try:
+                                        res = await jobs.execute_auto_move(trigger="manual")
+                                        reply = "✅ 归档执行完成（详情见推送通知）" if res.get("ok") else (res.get("msg") or "归档发起失败")
+                                    except Exception as e:
+                                        reply = f"❌ 归档执行失败: {str(e)[:150]}"
+                                        logstream.error("auto_move", f"Bot 触发归档失败: {logstream.exc(e)}")
+                                    try:
+                                        async with httpx.AsyncClient(proxy=_tg_proxy(), timeout=15.0) as c2:
+                                            await c2.post(
+                                                f"https://api.telegram.org/bot{token}/editMessageText",
+                                                json={"chat_id": chat_id, "message_id": msg_id, "text": reply})
+                                    except Exception:
+                                        pass
+
+                                asyncio.create_task(_bg_auto_move(cq.get("message", {}).get("message_id")))
                                 try:
                                     await client.post(
                                         f"https://api.telegram.org/bot{token}/editMessageText",
                                         json={"chat_id": chat_id,
                                               "message_id": cq.get("message", {}).get("message_id"),
-                                              "text": reply})
+                                              "text": "⏳ 已接收归档指令，正在后台排空队列并执行移动，完成后将更新结果…"})
                                 except Exception:
                                     pass
                                 continue
@@ -450,18 +463,18 @@ async def bot_command_loop():
                             # notify 配置为群聊时，允许来自任意私聊的首次指令完成管理员绑定（TOFU）；
                             # 绑定完成后指令仍仅在授权对话内执行
                             if (str(msg.get("chat", {}).get("type") or "") == "private"
-                                    and not str(db.get_setting("tg_admin_id", "") or "").strip()):
-                                ok, _ = _check_sender(msg)
+                                    and not str(await asyncio.to_thread(db.get_setting, "tg_admin_id", "") or "").strip()):
+                                ok, _ = await asyncio.to_thread(_check_sender, msg)
                                 if ok:
                                     try:
                                         await client.post(
                                             f"https://api.telegram.org/bot{token}/sendMessage",
                                             json={"chat_id": msg_chat_id,
-                                                  "text": "✅ 管理员绑定成功。现在可以在 notify 对话中使用 Bot 指令了。"})
+                                                  "text": "✅ 管理员绑定成功，现在可在已配置的通知群聊/对话中使用 Bot 指令。"})
                                     except Exception:
                                         pass
                             continue  # 非授权对话
-                        sender_ok, sender_hint = _check_sender(msg)
+                        sender_ok, sender_hint = await asyncio.to_thread(_check_sender, msg)
                         if not sender_ok:
                             try:
                                 await client.post(

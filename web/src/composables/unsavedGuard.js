@@ -10,7 +10,7 @@
  */
 import { nextTick, onBeforeUnmount, onMounted } from 'vue'
 import { onBeforeRouteLeave } from 'vue-router'
-import { ElMessageBox } from 'element-plus'
+import { confirmAction } from './confirmDialog'
 
 export function useUnsavedGuard(dirty, onDiscard = null) {
   const isDirty = () => (typeof dirty === 'function' ? dirty() : !!dirty.value)
@@ -19,11 +19,15 @@ export function useUnsavedGuard(dirty, onDiscard = null) {
   onBeforeRouteLeave(async (_to, _from) => {
     if (confirmed || !isDirty()) return true
     try {
-      await ElMessageBox.confirm(
-        '未保存的修改将丢失。',
-        '离开当前页面？',
-        { confirmButtonText: '离开并丢弃', cancelButtonText: '留在本页', type: 'warning', confirmButtonClass: 'danger-confirm-btn' },
-      )
+      const ok = await confirmAction({
+        title: '离开当前页面？',
+        message: '未保存的修改将丢失。',
+        confirmText: '离开并丢弃',
+        cancelText: '留在本页',
+        type: 'warning',
+        danger: true,
+      })
+      if (!ok) return false
       confirmed = true   // 用户确认：放行导航（更改即被丢弃）
       if (typeof dirty === 'object' && dirty !== null && 'value' in dirty) {
         dirty.value = false
@@ -32,8 +36,6 @@ export function useUnsavedGuard(dirty, onDiscard = null) {
         try { onDiscard() } catch { /* ignore */ }
       }
       return true
-    } catch {
-      return false       // 用户取消：留在本页
     } finally {
       // 放行标记一次性消费：若全局守卫随后取消了本次导航（如向导重查重定向 /setup），
       // 组件仍挂载且 dirty 未变，此时必须重新询问，避免此后所有离开被静默放行

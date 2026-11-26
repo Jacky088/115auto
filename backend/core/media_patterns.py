@@ -105,15 +105,19 @@ _X_SE_EP_RE = re.compile(
     r"(?:^|[^A-Za-z0-9])0*(\d{1,2})x0*(\d{1,4})(?=$|[^A-Za-z0-9])",
     re.IGNORECASE,
 )
-_CN_EP_RANGE_RE = re.compile(r"第\s*0*(\d{1,4})\s*[-~～]\s*0*(\d{1,4})\s*[集话話]")
+_CN_EP_RANGE_RE = re.compile(
+    r"第\s*(\d{1,4}|[零一二三四五六七八九十百两]{1,6})\s*[-~～]\s*(\d{1,4}|[零一二三四五六七八九十百两]{1,6})\s*[集话話期]"
+)
 # 中文数字集数（第十二集 / 一百零三话）与阿拉伯数字统一解析
 _CN_EP_RE = re.compile(r"第\s*(\d{1,4}|[零一二三四五六七八九十百两]{1,6})\s*[集话話期]")
-# E1P2 / E01P2（分 P 双集文件）：集号后允许跟 P 段号
+# E01-E02 / EP01-EP02 / E1P2（多集范围或分 P 双集文件）
 _EP_PREFIX_RE = re.compile(
-    r"(?:^|[^A-Za-z0-9])(?:EP?|SP)0*(\d{1,4})(?:v\d)?(?:P0*(\d{1,2}))?(?=$|[^A-Za-z0-9])",
+    r"(?:^|[^A-Za-z0-9])(?:EP?|SP)0*(\d{1,4})(?:v\d)?(?:(?:\s*[-~～]\s*(?:EP?)?0*(\d{1,4}))|(?:P0*(\d{1,2})))?(?=$|[^A-Za-z0-9])",
     re.IGNORECASE,
 )
-_ANIME_DASH_EP_RE = re.compile(r"[\s_\.\]][\-–—]\s*0*(\d{1,4})(?:v\d)?(?=$|[\s\.\[_（(])")
+_ANIME_DASH_EP_RE = re.compile(
+    r"[\s_\.\]][\-–—]\s*0*(\d{1,4})(?:v\d)?(?:\s*[-~～]\s*0*(\d{1,4}))?(?=$|[\s\.\[_（(])"
+)
 _ANIME_BRACKET_EP_RE = re.compile(r"[\[【]\s*0*(\d{1,4})(?:v\d)?\s*[\]】]")
 _BARE_NUM_RE = re.compile(r"^0*(\d{1,4})(?:v\d)?$")
 _SEASON_INLINE_RE = re.compile(

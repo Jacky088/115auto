@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import json
+import random
 import re
 import time
 
@@ -92,13 +93,15 @@ def compute_media_organize_next_runs() -> list[str]:
             prefix = "后天"
         else:
             prefix = time.strftime("%m月%d日", time.localtime(ts))
-        results.append(f"{prefix} {hm_part}")
+        suffix = "" if transfer_gate.is_hm_in_schedule_window(hm_part) else "（时段外顺延）"
+        results.append(f"{prefix} {hm_part}{suffix}")
     return results
 
 
 _last_media_fixed_trigger_minute = ""
 _pending_scheduled_organize = False
 _pending_scheduled_scrape = False
+_scheduled_ready_at = 0.0
 
 async def media_organize_loop():
     """后台定时自动整理与刮削调度循环：
@@ -107,7 +110,7 @@ async def media_organize_loop():
     3. 严格按顺序排队：整理优先执行，刮削在整理完全结束且四方门禁空闲后才执行；
     4. 若遇到转存队列或其它独占任务在运行，持续等待其到达终点，绝不并发、绝不丢弃计划。
     """
-    global _last_media_fixed_trigger_minute, _pending_scheduled_organize, _pending_scheduled_scrape
+    global _last_media_fixed_trigger_minute, _pending_scheduled_organize, _pending_scheduled_scrape, _scheduled_ready_at
     logstream.info("organize", "定时整理与刮削调度协程已启动")
     while True:
         try:
@@ -120,13 +123,12 @@ async def media_organize_loop():
             if not org_enabled and not scr_enabled:
                 _pending_scheduled_organize = False
                 _pending_scheduled_scrape = False
-                continue
-
-            if not transfer_gate.is_in_schedule_window():
+                _scheduled_ready_at = 0.0
                 continue
 
             sched_type = str(db.get_setting("media_organize_schedule_type", "interval") or "interval")
             now = time.time()
+            newly_triggered = False
 
             if sched_type == "fixed_times":
                 fixed_times_raw = db.get_setting("media_organize_fixed_times", '["06:00", "12:00", "18:00"]')
@@ -146,16 +148,28 @@ async def media_organize_loop():
                     _last_media_fixed_trigger_minute = cur_min_key
                     if org_enabled:
                         _pending_scheduled_organize = True
+                        newly_triggered = True
                     if scr_enabled:
                         _pending_scheduled_scrape = True
+                        newly_triggered = True
             else:
                 hours = max(1, min(168, int(db.get_setting("media_organize_schedule_hours", 12) or 12)))
                 last_org = float(db.get_setting("media_organize_last_run", 0) or 0)
-                if org_enabled and (now - last_org >= hours * 3600):
+                if org_enabled and not _pending_scheduled_organize and (now - last_org >= hours * 3600):
                     _pending_scheduled_organize = True
+                    newly_triggered = True
                 last_scr = float(db.get_setting("media_scrape_last_run", 0) or 0)
-                if scr_enabled and (now - last_scr >= hours * 3600):
+                if scr_enabled and not _pending_scheduled_scrape and (now - last_scr >= hours * 3600):
                     _pending_scheduled_scrape = True
+                    newly_triggered = True
+
+            if newly_triggered:
+                jitter_min = max(0, min(30, int(db.get_setting("schedule_jitter_min", 0) or 0))) if db.get_setting("schedule_enabled", False) else 0
+                _scheduled_ready_at = now + (random.uniform(0, jitter_min * 60) if jitter_min > 0 else 0.0)
+
+            # 仅在派发前检查允许时段与开工扰动：时段外触发会保留排队意图，开窗后自动顺延执行
+            if not transfer_gate.is_in_schedule_window() or time.time() < _scheduled_ready_at:
+                continue
 
             # 严格排队与互斥执行：
             # 1. 优先执行「定时整理」

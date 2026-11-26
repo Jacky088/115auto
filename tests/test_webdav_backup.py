@@ -314,3 +314,45 @@ def test_corrupted_1970_timestamp_auto_healing():
     persisted = float(db.get_setting("webdav_last_backup_at") or 0)
     assert persisted == cfg["last_backup_at"]
 
+
+def test_webdav_export_credentials_requires_password_and_restore_rotates_token():
+    """含凭据的 WebDAV 导出必须校验登录密码；恢复凭据后必须下发新会话凭证。"""
+    db.set_setting("web_username", "admin")
+    db.set_setting("web_password_hash", auth.hash_password("WebPass123!"))
+    save_webdav_config(
+        url="https://dav.example.com/dav",
+        username="user1",
+        password="SecretPassword123",
+        root_dir="/Backups",
+        keep_count=5,
+        auto_backup_enabled=False,
+    )
+    db.set_setting("webdav_last_test_ok", True)
+    db.set_setting("running", False)
+    tc = _authed_client()
+
+    # 未提供密码 / 错误密码均返回 400
+    r_miss = tc.post("/api/backup/webdav/export_now", json={"include_credentials": True, "meta_mode": "nfo", "slim_db": True})
+    assert r_miss.status_code == 400
+    r_bad = tc.post("/api/backup/webdav/export_now", json={"include_credentials": True, "password": "Wrong", "meta_mode": "nfo", "slim_db": True})
+    assert r_bad.status_code == 400
+
+    with patch("backend.core.migration_bundle.build_migration_bundle", return_value=(tempfile.mkdtemp(), tempfile.NamedTemporaryFile().name, "autosave_migration_test.zip", {})), \
+            patch("backend.core.webdav.WebDAVClient.upload_file", return_value={"ok": True, "bytes": 1024, "elapsed_sec": 0.5}), \
+            patch("backend.core.webdav.WebDAVClient.prune_backups", return_value=0):
+        r_ok = tc.post(
+            "/api/backup/webdav/export_now",
+            json={"include_credentials": True, "password": "WebPass123!", "meta_mode": "nfo", "slim_db": True},
+        )
+        assert r_ok.status_code == 200
+
+    # 恢复含凭据的远端迁移包时签发新 Token
+    with patch("backend.core.webdav.WebDAVClient.download_file", return_value=1024), \
+            patch("backend.core.migration_bundle.apply_migration_bundle", return_value={"restored_credentials": True, "summary": {}, "warnings": []}):
+        r_apply = tc.post("/api/backup/webdav/restore_apply", params={"filename": "autosave_migration_20261125_010000.zip"})
+        assert r_apply.status_code == 200
+        body = r_apply.json()
+        assert body["ok"] is True
+        assert body.get("token")
+
+

@@ -38,13 +38,11 @@ def _proxy() -> str | None:
 
 
 def tmdb_get(path: str, params: dict, timeout: float = 12.0) -> httpx.Response:
-    """请求 TMDB API：优先使用系统 TG 代理，若代理连接异常则降级直连保底。"""
+    """请求 TMDB API：优先使用系统 TG 代理，仅当代理传输异常时降级直连保底。"""
     proxy = _proxy()
     url = f"{_TMDB_API_BASE}{path}"
     try:
-        resp = httpx.get(url, params=params, proxy=proxy, timeout=timeout)
-        if resp.status_code == 200 or not proxy:
-            return resp
+        return httpx.get(url, params=params, proxy=proxy, timeout=timeout)
     except Exception:
         if not proxy:
             raise
@@ -121,13 +119,13 @@ def _search_tmdb(kind: str, query: str, year: str, api_key: str) -> list[dict]:
         resp = tmdb_get(f"/search/{kind}", params)
         if resp.status_code != 200:
             logstream.warn("scrape", f"TMDB /search/{kind}({q}) 返回 {resp.status_code}")
-            # 空结果写短 TTL 负缓存：TMDB 故障/无结果时避免每轮扫描重复打 API
-            _cache_set(ck, [], _CACHE_NEGATIVE_TTL)
+            # 429/5xx 属于瞬时限流或上游抖动，不写入 6 小时负缓存，以免封死后续刮削
+            if resp.status_code == 404:
+                _cache_set(ck, [], _CACHE_NEGATIVE_TTL)
             return []
         results = resp.json().get("results") or []
     except Exception as e:
         logstream.warn("scrape", f"TMDB /search/{kind}({q}) 请求异常: {e}")
-        _cache_set(ck, [], _CACHE_NEGATIVE_TTL)
         return []
 
     if results:
@@ -518,14 +516,17 @@ def recall_and_score(
     if not pool:
         return []
 
-    # 先粗排再对前 5 个拉完整详情精排（剧集季数/别名翻译验证）
+    # 先粗排（结合标题相似度、年份与类型匹配度）再对前 5 个拉完整详情精排
     rough_list = []
     for (k, _), item in pool.items():
         nm = str(item.get("name") or item.get("title") or "")
         orig = str(item.get("original_name") or item.get("original_title") or "")
         sim, _ = _title_similarity(parsed.title or parsed.alt_title, [nm, orig])
         pop = float(item.get("popularity") or 0)
-        rough_list.append((sim * 100 + min(pop, 50) * 0.1, k, item))
+        dt = str(item.get("first_air_date") or item.get("release_date") or "")
+        yr_bonus = 15.0 if (parsed.year and dt.startswith(str(parsed.year))) else 0.0
+        type_bonus = 10.0 if (parsed.media_type in ("movie", "tv") and k == parsed.media_type) else 0.0
+        rough_list.append((sim * 100 + yr_bonus + type_bonus + min(pop, 50) * 0.1, k, item))
     rough_list.sort(key=lambda x: -x[0])
 
     scored: list[dict] = []
@@ -707,10 +708,20 @@ def save_local_metadata(
 
     if write_nfo:
         if kind == "movie":
+            import shutil
+            stale_tv = meta_root_dir / "tvshow.nfo"
+            if stale_tv.is_file():
+                stale_tv.unlink(missing_ok=True)
+            for sdir in meta_root_dir.glob("Season *"):
+                if sdir.is_dir():
+                    shutil.rmtree(sdir, ignore_errors=True)
             nfo_path = meta_root_dir / "movie.nfo"
             nfo_path.write_text(build_movie_nfo(detail), encoding="utf-8")
             saved_files.append(str(nfo_path))
         else:
+            stale_mv = meta_root_dir / "movie.nfo"
+            if stale_mv.is_file():
+                stale_mv.unlink(missing_ok=True)
             tv_nfo = meta_root_dir / "tvshow.nfo"
             tv_nfo.write_text(build_tvshow_nfo(detail), encoding="utf-8")
             saved_files.append(str(tv_nfo))
@@ -742,19 +753,17 @@ def save_local_metadata(
         bp = str(detail.get("backdrop_path") or "").strip()
         if pp:
             p_file = meta_root_dir / "poster.jpg"
-            if not p_file.exists() or p_file.stat().st_size == 0:
-                img_bytes = tmdb_download_image(pp, size="w500")
-                if img_bytes:
-                    p_file.write_bytes(img_bytes)
+            img_bytes = tmdb_download_image(pp, size="w500")
+            if img_bytes:
+                p_file.write_bytes(img_bytes)
             if p_file.exists() and p_file.stat().st_size > 0:
                 saved_files.append(str(p_file))
                 poster_rel = str(p_file)
         if bp:
             b_file = meta_root_dir / "fanart.jpg"
-            if not b_file.exists() or b_file.stat().st_size == 0:
-                bg_bytes = tmdb_download_image(bp, size="w780")
-                if bg_bytes:
-                    b_file.write_bytes(bg_bytes)
+            bg_bytes = tmdb_download_image(bp, size="w780")
+            if bg_bytes:
+                b_file.write_bytes(bg_bytes)
             if b_file.exists() and b_file.stat().st_size > 0:
                 saved_files.append(str(b_file))
 

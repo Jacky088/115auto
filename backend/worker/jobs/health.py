@@ -26,7 +26,7 @@ def stop_system(reason: str):
     try:
         _jobs().notify("⛔ 115 自动转存助手已自动停止\n\n"
                f"❓ 原因：{reason}\n\n"
-               "🔧 请按上方原因中的指引修正后，点击网页顶栏「开始运行」恢复。")
+               "🔧 请排查处理后，点击网页顶栏「开始运行」或发送 /start 恢复。")
     except Exception:
         pass  # 通知失败不影响停止动作本身
 
@@ -138,11 +138,22 @@ async def health_check_loop():
             elif st.get("ok"):
                 if fail_streak["115"]:
                     logstream.info("115", "115 Cookie 已恢复有效")
+                    await asyncio.to_thread(db.set_setting, "cookie_prewarn_at", 0)
                 fail_streak["115"] = 0
             else:
                 fail_streak["115"] += 1
                 logstream.warn("115", f"115 Cookie 检查失败（连续 {fail_streak['115']} 次）: "
                                       f"{st.get('err', '')[:200]}")
+                if fail_streak["115"] == 1:
+                    last_pw = float(await asyncio.to_thread(db.get_setting, "cookie_prewarn_at", 0) or 0)
+                    if time.time() - last_pw >= 21600:
+                        await asyncio.to_thread(db.set_setting, "cookie_prewarn_at", time.time())
+                        await pan.run_pan_thread(
+                            _jobs().notify,
+                            "⚠️ 115 Cookie 异常预警（首次检测失败）\n\n"
+                            f"详情：{st.get('err', '')[:120]}\n"
+                            "当前暂未触发自动停机；若下次巡检仍失败将自动停机保护，建议提前检查或更新 Cookie。",
+                        )
                 if fail_streak["115"] >= 2:
                     # stop_system 内含同步 TG 通知（httpx 最长 15s）：放线程池，避免阻塞事件循环
                     await pan.run_pan_thread(

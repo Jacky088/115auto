@@ -14,7 +14,7 @@
 
       <el-table :data="backups" size="small" stripe max-height="360" style="margin-top: 12px">
         <template #empty>
-          <el-empty :image-size="60" description="暂无本地定时备份文件（需先在定时备份中勾选「本地存储」并在触发后自动生成）" />
+          <el-empty :image-size="60" description="暂无本地定时备份（勾选「本地存储」并在定时触发后生成）" />
         </template>
         <el-table-column prop="name" label="备份文件名" min-width="260" show-overflow-tooltip />
         <el-table-column label="大小" width="100">
@@ -61,10 +61,6 @@
         提示：恢复将覆盖当前全部业务数据（登录密码与通知密钥保留不变；恢复后系统将回到停止状态，需在顶栏手动点开始运行）。
       </div>
     </div>
-
-    <template #footer>
-      <el-button @click="$emit('update:modelValue', false)">关闭</el-button>
-    </template>
   </el-dialog>
 </template>
 

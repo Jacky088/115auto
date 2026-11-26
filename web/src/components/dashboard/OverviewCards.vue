@@ -60,12 +60,12 @@
               <el-icon class="info-tip-icon" :size="14" tabindex="0"><InfoFilled /></el-icon>
             </el-tooltip>
           </div>
-          <div class="range-switch" role="group" aria-label="统计时间范围">
+          <div class="seg-group" role="group" aria-label="统计时间范围">
             <button
               v-for="opt in RANGE_OPTIONS"
               :key="opt.key"
               type="button"
-              class="range-btn"
+              class="seg-btn"
               :class="{ active: range === opt.key }"
               :aria-pressed="range === opt.key"
               @click="range = opt.key"
@@ -92,23 +92,22 @@
               <div class="cat-row-top">
                 <span class="cat-name-wrap">
                   <span class="cat-dot" :style="{ background: item.color }"></span>
-                  <span class="cat-name" :title="item.category">{{ item.category }}</span>
+                  <span class="cat-name">{{ item.category }}</span>
                 </span>
-                <span class="cat-meta">
-                  <strong class="cat-count">{{ item.count }} 条</strong>
-                  <span class="cat-sep">·</span>
-                  <span class="cat-pct">{{ item.pctText }}%</span>
-                  <template v-if="item.size > 0">
-                    <span class="cat-sep">·</span>
-                    <span class="cat-size">{{ fmtSize(item.size) }}</span>
-                  </template>
-                </span>
+                <span class="cat-pct-badge">{{ item.pctText }}%</span>
               </div>
               <div class="cat-bar-track">
                 <div
                   class="cat-bar-fill"
                   :style="{ width: `${item.barWidth}%`, background: item.gradient }"
                 ></div>
+              </div>
+              <div class="cat-row-sub">
+                <strong class="cat-count">{{ item.count }} 条</strong>
+                <template v-if="item.size > 0">
+                  <span class="cat-sep">·</span>
+                  <span class="cat-size">{{ fmtSize(item.size) }}</span>
+                </template>
               </div>
             </div>
           </div>
@@ -155,7 +154,7 @@ const props = defineProps({
 })
 
 const PALETTE = [
-  { color: '#4f6bff', gradient: 'linear-gradient(90deg, #4f6bff 0%, #6f87ff 100%)' },
+  { color: '#256bf5', gradient: 'linear-gradient(90deg, #256bf5 0%, #4382f7 100%)' },
   { color: '#8b5cf6', gradient: 'linear-gradient(90deg, #8b5cf6 0%, #a78bfa 100%)' },
   { color: '#06b6d4', gradient: 'linear-gradient(90deg, #06b6d4 0%, #22d3ee 100%)' },
   { color: '#10b981', gradient: 'linear-gradient(90deg, #10b981 0%, #34d399 100%)' },
@@ -192,7 +191,7 @@ const spaceFree = computed(() => {
   return Math.max(0, Number(props.space?.total || 0) - Number(props.space?.use || 0))
 })
 const spaceLevel = computed(() => (spaceRatio.value >= 90 ? 'danger' : spaceRatio.value >= 70 ? 'warn' : 'ok'))
-const spaceColor = computed(() => (spaceRatio.value >= 90 ? '#ef4444' : spaceRatio.value >= 70 ? '#f59e0b' : '#4f6bff'))
+const spaceColor = computed(() => (spaceRatio.value >= 90 ? '#ef4444' : spaceRatio.value >= 70 ? '#f59e0b' : '#256bf5'))
 const spaceRatioLabel = computed(() => (
   spaceRatio.value >= 90 ? '空间不足' : spaceRatio.value >= 70 ? '空间偏满' : '空间充足'
 ))
@@ -227,9 +226,9 @@ const emptyText = computed(() => (
 // ---- ECharts 紧凑圆环渲染 ----
 const chartSizeOk = (el) => !!(el && el.clientWidth > 0 && el.clientHeight > 0)
 const chartIsDark = () => document.documentElement.classList.contains('dark')
-const chartMainColor = () => (chartIsDark() ? '#e6eefc' : '#1e2a44')
-const chartSubColor = () => (chartIsDark() ? '#8a97b3' : '#6b7a99')
-const chartBorderColor = () => (chartIsDark() ? '#1b2438' : '#ffffff')
+const chartMainColor = () => (chartIsDark() ? '#f1f3f7' : '#0f172a')
+const chartSubColor = () => (chartIsDark() ? '#9da4b3' : '#64748b')
+const chartBorderColor = () => (chartIsDark() ? '#12141c' : '#ffffff')
 
 const renderPie = () => {
   const el = pieRef.value
@@ -363,11 +362,11 @@ onUnmounted(() => {
 <style scoped>
 .overview-grid {
   display: grid;
-  grid-template-columns: 1fr 1.45fr;
+  grid-template-columns: minmax(260px, 0.78fr) 1.85fr;
   gap: 16px;
   align-items: stretch;
 }
-@media (max-width: 960px) {
+@media (max-width: 1024px) {
   .overview-grid { grid-template-columns: 1fr; }
 }
 
@@ -424,8 +423,8 @@ onUnmounted(() => {
   background: currentColor;
 }
 .space-badge.ok {
-  color: #3b63f6;
-  background: rgba(79, 107, 255, .12);
+  color: var(--el-color-primary, #256bf5);
+  background: rgba(37, 107, 245, .12);
 }
 .space-badge.warn {
   color: #d97706;
@@ -435,7 +434,7 @@ onUnmounted(() => {
   color: #dc2626;
   background: rgba(239, 68, 68, .14);
 }
-html.dark .space-badge.ok { color: #8ba3ff; background: rgba(79, 107, 255, .22); }
+html.dark .space-badge.ok { color: #8cb3fa; background: rgba(37, 107, 245, .20); }
 html.dark .space-badge.warn { color: #fbbf24; background: rgba(245, 158, 11, .2); }
 html.dark .space-badge.danger { color: #f87171; background: rgba(239, 68, 68, .22); }
 
@@ -475,7 +474,7 @@ html.dark .space-badge.danger { color: #f87171; background: rgba(239, 68, 68, .2
 .space-track {
   height: 18px;
   border-radius: var(--r-pill);
-  background: rgba(79, 107, 255, .13);
+  background: rgba(37, 107, 245, .10);
   box-shadow: inset 0 1px 2px rgba(31, 45, 90, .06);
   overflow: hidden;
   padding: 2px;
@@ -491,7 +490,7 @@ html.dark .space-track {
 }
 .space-fill.ok {
   background: var(--grad-brand);
-  box-shadow: 0 2px 12px rgba(79, 107, 255, .36), inset 0 1px 0 rgba(255, 255, 255, .32);
+  box-shadow: 0 1px 4px rgba(37, 107, 245, .30), inset 0 1px 0 rgba(255, 255, 255, .32);
 }
 .space-fill.warn {
   background: linear-gradient(90deg, #f59e0b 0%, #fb923c 100%);
@@ -542,41 +541,6 @@ html.dark .sm-val-free {
 }
 
 /* ---- 右卡：转存分类占比 ---- */
-.range-switch {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  padding: 2px;
-  border-radius: var(--r-pill);
-  background: rgba(79, 107, 255, .07);
-  border: 1px solid var(--saas-line);
-}
-html.dark .range-switch {
-  background: rgba(15, 23, 42, .45);
-}
-.range-btn {
-  border: none;
-  background: transparent;
-  color: var(--saas-text-sub);
-  font-family: inherit;
-  font-size: var(--fs-caption);
-  line-height: 1;
-  padding: 5px 11px;
-  border-radius: var(--r-pill);
-  cursor: pointer;
-  transition: all .18s ease;
-  white-space: nowrap;
-}
-.range-btn:hover {
-  color: var(--el-color-primary);
-}
-.range-btn.active {
-  background: var(--grad-brand);
-  color: #fff;
-  font-weight: 600;
-  box-shadow: 0 2px 8px rgba(79, 107, 255, .32);
-}
-
 .cat-body {
   display: flex;
   flex-direction: column;
@@ -588,51 +552,49 @@ html.dark .range-switch {
   gap: 22px;
 }
 .cat-donut {
-  width: 162px;
-  height: 162px;
+  width: 148px;
+  height: 148px;
   flex: none;
 }
 .cat-list {
   flex: 1;
   min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  max-height: 168px;
-  overflow-y: auto;
-  overflow-x: hidden;
-  padding-right: 4px;
-  scrollbar-width: thin;
-  scrollbar-color: rgba(126, 146, 196, .35) transparent;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 10px;
+  align-content: start;
 }
 .cat-row {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  padding: 6px 8px;
+  padding: 8px 10px;
   border-radius: var(--r-sm);
-  transition: background .15s ease;
+  background: var(--subcard-bg);
+  border: 1px solid var(--saas-line);
+  transition: background .15s ease, border-color .15s ease;
 }
 .cat-row.hovered,
 .cat-row:hover {
   background: var(--saas-hover);
+  border-color: var(--el-color-primary-light-5);
 }
 .cat-row-top {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: 8px;
   font-size: var(--fs-caption);
 }
 .cat-name-wrap {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
+  gap: 6px;
   min-width: 0;
 }
 .cat-dot {
-  width: 9px;
-  height: 9px;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
   flex: none;
 }
@@ -641,20 +603,25 @@ html.dark .range-switch {
   font-weight: 600;
   color: var(--saas-text-main);
   white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
-.cat-meta {
-  display: inline-flex;
+.cat-pct-badge {
+  flex: none;
+  font-size: var(--fs-caption);
+  font-weight: 600;
+  color: var(--saas-text-main);
+  font-variant-numeric: tabular-nums;
+}
+.cat-row-sub {
+  display: flex;
   align-items: center;
   gap: 5px;
-  flex: none;
+  font-size: var(--fs-caption);
   color: var(--saas-text-sub);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 .cat-count {
-  color: var(--saas-text-main);
+  color: var(--saas-text-sub);
   font-weight: 600;
 }
 .cat-sep {
@@ -665,9 +632,9 @@ html.dark .range-switch {
 }
 
 .cat-bar-track {
-  height: 10px;
+  height: 6px;
   border-radius: var(--r-pill);
-  background: rgba(79, 107, 255, .12);
+  background: rgba(37, 107, 245, .10);
   box-shadow: inset 0 1px 2px rgba(31, 45, 90, .05);
   overflow: hidden;
 }
@@ -677,7 +644,7 @@ html.dark .cat-bar-track {
 }
 .cat-bar-fill {
   height: 100%;
-  min-width: 10px;
+  min-width: 6px;
   border-radius: var(--r-pill);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, .28);
   transition: width .45s cubic-bezier(.22, 1, .36, 1);
@@ -698,18 +665,29 @@ html.dark .cat-bar-track {
   color: var(--saas-text-sub);
 }
 
-@media (max-width: 600px) {
+@media (max-width: 900px) {
+  .cat-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (max-width: 680px) {
   .cat-main {
     flex-direction: column;
     gap: 14px;
   }
   .cat-donut {
-    width: 146px;
-    height: 146px;
+    width: 142px;
+    height: 142px;
   }
   .cat-list {
     width: 100%;
-    max-height: 196px;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+}
+@media (max-width: 440px) {
+  .cat-list {
+    grid-template-columns: 1fr;
   }
 }
 </style>

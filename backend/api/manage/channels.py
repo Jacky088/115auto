@@ -94,22 +94,26 @@ def update_channel(ch_id: int, body: dict, _=Depends(require_user)):
                            f" → {label[new_type]}")
     if "enabled" in body:
         ch = db.query("SELECT name FROM channels WHERE id=?", (ch_id,), one=True)
-        is_en = 1 if body["enabled"] else 0
+        if not ch:
+            raise HTTPException(404, "频道不存在")
+        raw_en = body["enabled"]
+        is_en = 0 if (isinstance(raw_en, str) and raw_en.strip().lower() in ("0", "false", "no", "")) else (1 if raw_en else 0)
         if not is_en:
             # 停用频道时，下级「仅订阅」联动关闭并归零
             db.execute("UPDATE channels SET enabled=0, sub_only=0 WHERE id=?", (ch_id,))
         else:
             db.execute("UPDATE channels SET enabled=1 WHERE id=?", (ch_id,))
-        if ch:
-            state = "启用" if is_en else "停用"
-            logstream.info("channels", f"已{state}监控频道 @{ch['name']}" + ("（订阅模式已联动关闭）" if not is_en else ""))
+        state = "启用" if is_en else "停用"
+        logstream.info("channels", f"已{state}监控频道 @{ch['name']}" + ("（订阅模式已联动关闭）" if not is_en else ""))
     if "sub_only" in body:
         ch = db.query("SELECT name FROM channels WHERE id=?", (ch_id,), one=True)
         if not ch:
             raise HTTPException(404, "频道不存在")
-        db.execute("UPDATE channels SET sub_only=? WHERE id=?", (1 if body["sub_only"] else 0, ch_id))
+        raw_sub = body["sub_only"]
+        is_sub = False if (isinstance(raw_sub, str) and raw_sub.strip().lower() in ("0", "false", "no", "")) else bool(raw_sub)
+        db.execute("UPDATE channels SET sub_only=? WHERE id=?", (1 if is_sub else 0, ch_id))
         logstream.info("channels",
-                       f"频道 @{ch['name']} 订阅模式已{'开启（仅转存命中订阅关键词的内容）' if body['sub_only'] else '关闭（全盘转存）'}")
+                       f"频道 @{ch['name']} 订阅模式已{'开启（仅转存命中订阅关键词的内容）' if is_sub else '关闭（全盘转存）'}")
     return {"ok": True}
 
 

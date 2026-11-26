@@ -79,7 +79,7 @@ def save_auto_move_rule(body: dict, _=Depends(require_user)):
             raise HTTPException(
                 400,
                 f"源目录 {source_dir} 不是任何分类配置的云下载目录（当前：{'、'.join(cd_dirs) or '未配置'}）。"
-                "请先在「转存目录」页把对应分类的云下载目录设为该目录，或修改源目录后再开启此模式。")
+                "请先在「转存整理」页把对应分类的云下载目录设为该目录，或修改源目录后再开启此模式。")
 
     raw_kw = str(body.get("keyword", "")).strip()
     extracted_kw = pan.extract_target_folder_name(target_dir)
@@ -87,18 +87,19 @@ def save_auto_move_rule(body: dict, _=Depends(require_user)):
     if mode == "exact" and not keyword:
         raise HTTPException(400, "精确模式下目标目录未包含有效文件夹名称，无法提取匹配关键词，不予保存")
 
+    allow_english = 1 if body.get("allow_english") else 0
     enabled = 1 if body.get("enabled", True) else 0
     rule_id = body.get("id")
     if rule_id:
         db.execute(
-            "UPDATE auto_move_rules SET source_dir=?, target_dir=?, keyword=?, mode=?, media_type=?, dir_match=?, enabled=? WHERE id=?",
-            (source_dir, target_dir, keyword, mode, media_type, dir_match, enabled, rule_id)
+            "UPDATE auto_move_rules SET source_dir=?, target_dir=?, keyword=?, mode=?, media_type=?, dir_match=?, allow_english=?, enabled=? WHERE id=?",
+            (source_dir, target_dir, keyword, mode, media_type, dir_match, allow_english, enabled, rule_id)
         )
     else:
         db.execute(
-            "INSERT INTO auto_move_rules(source_dir, target_dir, keyword, mode, media_type, dir_match, enabled, created_at, last_run_at, last_moved_count) "
-            "VALUES(?,?,?,?,?,?,?,?,NULL,0)",
-            (source_dir, target_dir, keyword, mode, media_type, dir_match, enabled, time.time())
+            "INSERT INTO auto_move_rules(source_dir, target_dir, keyword, mode, media_type, dir_match, allow_english, enabled, created_at, last_run_at, last_moved_count) "
+            "VALUES(?,?,?,?,?,?,?,?,?,NULL,0)",
+            (source_dir, target_dir, keyword, mode, media_type, dir_match, allow_english, enabled, time.time())
         )
     mode_desc = "总库分流" if mode == "library" else ("精确匹配" if mode == "exact" else "跟随全局")
     type_desc = {"movie": "，电影库", "tv": "，剧集库"}.get(media_type, "")
@@ -200,9 +201,9 @@ async def run_auto_move_now(body: dict | None = None, _=Depends(require_user)):
         include_ids = [str(x).strip() for x in raw_ids if str(x).strip()]
         if not include_ids:
             raise HTTPException(400, "请至少选择一个需要执行分流整理的文件")
-    if not (str(db.get_setting("running", False)).lower() == "true"):
+    if not (str(await asyncio.to_thread(db.get_setting, "running", False)).lower() == "true"):
         raise HTTPException(400, "系统处于停止状态，请先在顶栏点击「运行」启动系统后再执行！")
-    if not bool(db.get_setting("auto_move_enabled", False)):
+    if not bool(await asyncio.to_thread(db.get_setting, "auto_move_enabled", False)):
         raise HTTPException(400, "定时文件整理功能未开启，请先打开功能总开关后再执行！")
 
     excl = transfer_gate.get_exclusive_status()
@@ -253,16 +254,16 @@ async def preview_auto_move_start(body: dict | None = None, _=Depends(require_us
     rule_ids = (body or {}).get("rule_ids")
     if rule_ids is not None and not isinstance(rule_ids, list):
         raise HTTPException(400, "rule_ids 必须是数组")
-    if str(db.get_setting("running", False)).lower() != "true":
+    if str(await asyncio.to_thread(db.get_setting, "running", False)).lower() != "true":
         raise HTTPException(400, "系统处于停止状态，请先在顶栏点击「运行」后再预览")
-    if not bool(db.get_setting("auto_move_enabled", False)):
+    if not bool(await asyncio.to_thread(db.get_setting, "auto_move_enabled", False)):
         raise HTTPException(400, "定时文件整理功能未开启，请先打开功能总开关")
     sql = "SELECT source_dir FROM auto_move_rules WHERE enabled=1"
     want_ids = [int(x) for x in rule_ids if str(x).isdigit()] if rule_ids else []
     if want_ids:
         sql += " AND id IN (" + ",".join("?" for _ in want_ids) + ")"
-    paths = [r["source_dir"] for r in db.query(sql, tuple(want_ids))]
-    guard = scan_index.scope_guard(paths, bool((body or {}).get("confirm_large")))
+    paths = [r["source_dir"] for r in await asyncio.to_thread(db.query, sql, tuple(want_ids))]
+    guard = await asyncio.to_thread(scan_index.scope_guard, paths, bool((body or {}).get("confirm_large")))
     if guard:
         return guard
     res = scan_index.start_job(

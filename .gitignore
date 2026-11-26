@@ -29,3 +29,5 @@ scratch/
 .coverage.*
 
 .screenshots/
+web/test-results/
+web/playwright-report/

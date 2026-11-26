@@ -143,7 +143,7 @@ def _process_one(job: dict):
         tops = [t for t in (snap.get("top_names") or []) if t]
         # 单顶层文件夹的分集分享：此前整包转存落在 target/<文件夹名>/ 下，
         # 新集数也应存回同一文件夹，保持目录结构一致
-        if len(tops) == 1 and len(snap["files"]) > len(tops):
+        if len(tops) == 1 and (len(snap["files"]) > 1 or (snap["files"] and snap["files"][0].get("fn") != tops[0])):
             target = f"{target.rstrip('/')}/{tops[0]}"
         existing: set[str] = set()
         try:
@@ -267,9 +267,9 @@ def _process_one(job: dict):
     confirmed = skip_receive  # 预检命中 = 已确认文件就在目标目录
     if not skip_receive:
         _assert_still_running(job)  # 看门狗可能已重排：旧线程不得继续执行真实 115 写操作
-        try:
-            pan.receive(code, rc, cid, file_ids)
-        except pan.Pan115Error as e:
+
+        def _handle_receive_error(e: pan.Pan115Error, allow_flat_fallback: bool) -> bool:
+            nonlocal confirmed
             msg = str(e)
             if any(m in msg for m in _DEAD_SHARE_MARKERS):
                 # 提交阶段也可能报链接失效/过期：确定性失败，不重试不计熔断
@@ -282,18 +282,26 @@ def _process_one(job: dict):
                 # 文件已在网盘中。直接按成功处理：不反查、不找回、不重试。
                 confirmed = True
                 logstream.info("transfer", f"分享 {code} 115 提示此前已接收，文件已在网盘中，按成功处理")
-            elif "已存在" in msg and "不存在" not in msg:
+                return False
+            if "已存在" in msg and "不存在" not in msg:
                 # "文件已存在"：目标目录已有同名文件 → 走反查确认。
                 # 注意不能宽泛匹配「存在」：「目录不存在」「分享文件不存在」会被误判，
                 # 触发无意义的全盘找回，甚至把网盘其他目录的同名文件错误复制进来
                 logstream.info("transfer", f"分享 {code} 文件已存在于目标目录，视为已转存")
-            elif top_ids and flat_ids and set(flat_ids) != set(top_ids):
-                # 极少数接口形态不接受目录 id：退回逐文件提交
-                logstream.warn("transfer",
-                               f"分享 {code} 顶层整包转存被拒（{msg[:120]}），改为逐文件提交")
-                pan.receive(code, rc, cid, flat_ids)
-            else:
-                raise
+                return False
+            if allow_flat_fallback and top_ids and flat_ids and set(flat_ids) != set(top_ids):
+                logstream.warn("transfer", f"分享 {code} 顶层整包转存被拒（{msg[:120]}），改为逐文件提交")
+                return True
+            raise
+
+        try:
+            pan.receive(code, rc, cid, file_ids)
+        except pan.Pan115Error as e:
+            if _handle_receive_error(e, allow_flat_fallback=True):
+                try:
+                    pan.receive(code, rc, cid, flat_ids)
+                except pan.Pan115Error as e2:
+                    _handle_receive_error(e2, allow_flat_fallback=False)
 
     # 5. 双重确认：反查目标目录，确认文件真实到达（防接口误报）。
     # 已确认文件在目标目录的（重试预检命中 / 已接收信号）除外。
@@ -488,11 +496,11 @@ def set_worker_task(task: asyncio.Task | None):
 
 
 def is_worker_stalled(threshold_seconds: float = 600.0) -> bool:
-    """判断转存工作器是否失联卡死：已启动且超过阈值无心跳且未处于计划休眠与转存活跃中。"""
+    """判断转存工作器是否失联卡死：已启动且超过阈值无心跳且未处于计划休眠、独占挂起或转存活跃中。"""
     now = time.time()
     if now < _worker_sleeping_until:
         return False
-    if transfer_gate.is_transfer_active():
+    if transfer_gate.is_transfer_active() or transfer_gate.is_exclusive_busy():
         return False
     if _worker_heartbeat_at <= 0.0:
         return False
@@ -596,6 +604,15 @@ async def queue_worker():
                 continue
             schedule_logged = False
 
+            # 115 风控指数冷却期等待：避免在风控期内继续撞接口加重限制
+            cd_rem = pan.risk_cooldown_remaining()
+            if cd_rem > 0:
+                step_wait = min(10, cd_rem)
+                mark_worker_sleeping(step_wait)
+                await asyncio.sleep(step_wait)
+                mark_worker_alive()
+                continue
+
             # 从「时段外」刚进入「时段内」时触发拟人化开工随机扰动（防整点脚本特征）
             if sched_on and not last_schedule_active:
                 last_schedule_active = True
@@ -635,15 +652,16 @@ async def queue_worker():
             # cookie 检查（不消耗重试次数：长时间失效不应把排队任务打成 failed）
             st = await pan.run_pan_thread(pan.check_login)
             if not st.get("ok"):
-                err = f"115 未登录或 Cookie 失效：{st.get('err', '')}"
+                is_net_err = st.get("ok") is None
+                err_prefix = "115 网络异常，暂无法确认 Cookie 状态" if is_net_err else "115 未登录或 Cookie 失效"
+                err = f"{err_prefix}：{st.get('err', '')}"
                 await asyncio.to_thread(
                     db.execute,
                     "UPDATE transfers SET status='queued', error=?, next_retry_at=?"
                     " WHERE id=? AND status='running'",
                     (err[:500], time.time() + 60, job["id"]),
                 )
-                logstream.warn("transfer",
-                               f"115 Cookie 失效，任务 #{job['id']} 暂缓 60 秒（不计入重试次数）")
+                logstream.warn("transfer", f"{err_prefix}，任务 #{job['id']} 暂缓 60 秒（不计入重试次数）")
                 await asyncio.sleep(60)
                 continue
 

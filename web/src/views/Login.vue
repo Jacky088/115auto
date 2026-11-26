@@ -6,12 +6,12 @@
         <h2>115 自动转存助手</h2>
         <p>Telegram 频道资源 · 自动分类转存</p>
       </div>
-      <el-form @submit.prevent="submit">
+      <el-form data-allow-autofill="true" @submit.prevent="submit">
         <el-form-item>
-          <el-input v-model="form.username" placeholder="用户名" size="large" />
+          <el-input v-model="form.username" name="username" autocomplete="username" placeholder="用户名" size="large" />
         </el-form-item>
         <el-form-item>
-          <el-input v-model="form.password" placeholder="密码" type="password" show-password size="large" />
+          <el-input v-model="form.password" name="password" autocomplete="current-password" placeholder="密码" type="password" show-password size="large" />
         </el-form-item>
         <el-button type="primary" size="large" class="login-btn" :loading="loading" native-type="submit">
           登 录
@@ -51,16 +51,16 @@ const submit = async () => {
 .login-wrap { height: 100%; }
 .login-card {
   width: min(390px, calc(100vw - 32px));
-  border-radius: 16px;
-  border: none;
-  box-shadow: 0 24px 70px rgba(5, 18, 48, .45) !important;
+  border-radius: var(--saas-radius, 12px);
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--glass-shadow-lg) !important;
   padding: 10px 8px;
 }
 .login-head { text-align: center; margin-bottom: 22px; }
 .login-mark {
   width: 56px; height: 56px; border-radius: var(--r-lg); margin: 0 auto 12px;
   display: block; object-fit: contain;
-  box-shadow: 0 8px 24px rgba(34, 120, 248, .28);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
 }
 .login-head h2 { margin: 0 0 4px; font-size: var(--fs-page); color: var(--saas-text-main); }
 .login-head p { color: var(--saas-text-sub); font-size: var(--fs-body); margin: 0; }

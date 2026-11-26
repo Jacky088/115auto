@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from .. import database as db
 from ..core import logstream
 from ..worker.queue_worker import validate_link
+from .manage._common import _client_ip
 
 router = APIRouter(prefix="/api/ext/v1")
 
@@ -51,8 +52,8 @@ def _rate_limited(ip: str = "") -> bool:
 
 
 def require_token(x_api_token: str = Header(default=""), request: Request = None):
-    # 限速在鉴权前计数：失败尝试同样受限，防爆破
-    ip = request.client.host if (request is not None and request.client) else ""
+    # 限速在鉴权前计数：失败尝试同样受限，防爆破（通过可信代理感知真实客户端 IP）
+    ip = _client_ip(request) if request is not None else ""
     if _rate_limited(ip):
         raise HTTPException(429, f"请求过于频繁（单来源 {_IP_RATE_LIMIT} 次/分钟、"
                                  f"全局 {_RATE_LIMIT} 次/分钟），请降低调用频率")

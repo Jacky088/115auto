@@ -22,12 +22,19 @@ _SORT_FIELD_MAP = {
 _STAT_TTL = 300.0
 _STAT_MAX_ENTRIES = 500
 _STAT_MIN_GAP = 0.5
+_LIST_TTL = 15.0
+_LIST_MAX_ENTRIES = 200
+_MIN_READ_GAP = 0.2
+_MAX_READ_GAP = 1.6
 _stat_cache_lock = threading.Lock()
 _stat_cache: dict[int, tuple[float, dict]] = {}
 _name_cache: dict[int, tuple[float, str]] = {}
 _counts_cache: dict[int, tuple[float, int, int, int]] = {}  # cid -> (expire_at, f_count, n_count, total)
+_list_cache: dict[tuple, tuple[float, dict]] = {}
 _stat_call_lock = threading.Lock()
 _last_stat_at = 0.0
+_read_call_lock = threading.Lock()
+_last_read_at = -1000.0
 
 
 def _clear_stat_cache():
@@ -35,6 +42,7 @@ def _clear_stat_cache():
         _stat_cache.clear()
         _name_cache.clear()
         _counts_cache.clear()
+        _list_cache.clear()
 
 
 def _get_counts_cache(cid: int) -> tuple[int, int, int] | None:
@@ -199,7 +207,7 @@ def _breadcrumb(resp: dict, cid: int) -> list[dict]:
 def _client():
     # pan.check_login 内部有 60s 缓存，连续翻目录不会重复请求 115
     st = pan.check_login()
-    if not st.get("ok"):
+    if st.get("ok") is False:
         raise HTTPException(400, "115 未登录或 Cookie 失效，请到「账号管理」重新扫码登录或导入 Cookie")
     try:
         return pan._get_client()
@@ -208,34 +216,67 @@ def _client():
         raise HTTPException(400, f"115 客户端不可用: {str(e)[:150]}")
 
 
+def _check_cooldown():
+    rem = pan.risk_cooldown_remaining()
+    if rem > 0:
+        raise HTTPException(429, f"115 风控冷却中，请 {rem} 秒后再试")
+
+
 def _check(resp, action: str) -> dict:
     if not isinstance(resp, dict):
+        pan.note_115_error(f"{action}返回异常")
         raise HTTPException(400, f"{action}失败: 115 返回数据异常")
     if not resp.get("state"):
         msg = resp.get("error") or resp.get("message") or str(resp)[:200]
+        pan.note_115_error(str(msg))
         raise HTTPException(400, f"{action}失败: {msg}")
+    pan.note_115_ok()
     return resp
 
 
 def _check_category_resp(resp, action: str) -> dict:
     """校验 fs_category_get 响应：115 /category/get 成功时默认不带 state 字段，失败才带 state=false 或 errno。"""
     if not isinstance(resp, dict) or not resp:
+        pan.note_115_error(f"{action}返回异常")
         raise HTTPException(400, f"{action}失败: 115 返回数据异常")
     if resp.get("state") is False or resp.get("state") == 0 or _int(resp.get("errno"), 0) != 0:
         msg = resp.get("error") or resp.get("message") or str(resp)[:200]
+        pan.note_115_error(str(msg))
         raise HTTPException(400, f"{action}失败: {msg}")
+    pan.note_115_ok()
     return resp
 
 
 def _call_impl(action: str, func, serialize: bool, *args, **kwargs) -> dict:
-    """调用 115 接口并统一将网络/业务异常转成可读的 400 错误。"""
-    try:
-        resp = pan.pan_call(func, *args, **kwargs) if serialize else func(*args, **kwargs)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(400, f"{action}失败: {str(e)[:150]}")
-    return _check(resp, action)
+    """调用 115 接口并统一将网络/业务异常转成可读的 400 错误。
+    只读操作（serialize=False）具备独立轻量节流 + 风控感知，不阻塞后台长任务锁。
+    """
+    global _last_read_at
+    max_retries = 1 if not serialize else 0
+    for attempt in range(max_retries + 1):
+        try:
+            if serialize:
+                resp = pan.pan_call(func, *args, **kwargs)
+            else:
+                _check_cooldown()
+                with _read_call_lock:
+                    gap = min(_MAX_READ_GAP, _MIN_READ_GAP * pan.pace_factor())
+                    wait = (_last_read_at + gap) - time.monotonic()
+                    if wait > 0:
+                        time.sleep(wait)
+                    try:
+                        resp = func(*args, **kwargs)
+                    finally:
+                        _last_read_at = time.monotonic()
+            return _check(resp, action)
+        except HTTPException:
+            raise
+        except Exception as e:
+            pan.note_115_error(str(e))
+            if attempt < max_retries and not serialize:
+                time.sleep(0.5)
+                continue
+            raise HTTPException(400, f"{action}失败: {str(e)[:150]}")
 
 
 def _call(action: str, func, *args, **kwargs) -> dict:
@@ -274,6 +315,22 @@ def _target(body: dict) -> int:
     return target
 
 
+def _get_list_cache(key: tuple) -> dict | None:
+    now = time.monotonic()
+    with _stat_cache_lock:
+        hit = _list_cache.get(key)
+        if hit and hit[0] > now:
+            return hit[1]
+    return None
+
+
+def _set_list_cache(key: tuple, data: dict) -> None:
+    with _stat_cache_lock:
+        if len(_list_cache) >= _LIST_MAX_ENTRIES:
+            _list_cache.clear()
+        _list_cache[key] = (time.monotonic() + _LIST_TTL, data)
+
+
 @router.get("/list")
 def list_files(
     cid: int = Query(0, ge=0),
@@ -287,38 +344,57 @@ def list_files(
     fc: int | None = Query(None, ge=0),
     file_count: int | None = Query(None, ge=0),
     total_count: int | None = Query(None, ge=0),
+    refresh: bool = Query(False),
     _=Depends(require_user),
 ):
-    """列出目录内容（支持服务端排序、类型筛选与当前目录/全盘搜索）。"""
+    """列出目录内容（支持服务端排序、类型筛选、15 秒短缓存与当前目录/全盘搜索）。"""
     client = _client()
     order_col = _SORT_FIELD_MAP.get((sort or "").strip().lower(), "file_name")
     asc_flag = 0 if (order or "").strip().lower() == "desc" else 1
     scope = "dir" if (search_scope or "").strip().lower() == "dir" else "all"
 
-    if search:
-        payload = {
-            "search_value": search,
-            "limit": size,
-            "offset": (page - 1) * size,
-            "o": order_col,
-            "asc": asc_flag,
-            "fc_mix": 0,
-            "count_folders": 1,
-        }
-        if scope == "dir" and cid > 0:
-            payload["cid"] = cid
-        if file_type > 0:
-            payload["type"] = file_type
-        resp = _call_read("搜索", client.fs_search, payload)
-        items = _parse_items(resp.get("data"))[:size]
-        return {
-            "items": items,
-            "total": _int(resp.get("count"), len(items)),
-            "folder_count": _opt_int(resp.get("folder_count")),
-            "file_count": _opt_int(resp.get("file_count")),
-            "cid": cid if scope == "dir" else -1,
-            "path": [],
-        }
+    if not search:
+        lkey = (cid, order_col, asc_flag, file_type, page, size)
+        if not refresh:
+            cached = _get_list_cache(lkey)
+            if cached is not None:
+                return cached
+        res = _list_files_uncached(
+            client, cid, order_col, asc_flag, file_type, page, size, fc, file_count, total_count
+        )
+        _set_list_cache(lkey, res)
+        return res
+
+    payload = {
+        "search_value": search,
+        "limit": size,
+        "offset": (page - 1) * size,
+        "o": order_col,
+        "asc": asc_flag,
+        "fc_mix": 0,
+        "count_folders": 1,
+    }
+    if scope == "dir" and cid > 0:
+        payload["cid"] = cid
+    if file_type > 0:
+        payload["type"] = file_type
+    resp = _call_read("搜索", client.fs_search, payload)
+    items = _parse_items(resp.get("data"))[:size]
+    return {
+        "items": items,
+        "total": _int(resp.get("count"), len(items)),
+        "folder_count": _opt_int(resp.get("folder_count")),
+        "file_count": _opt_int(resp.get("file_count")),
+        "cid": cid if scope == "dir" else -1,
+        "path": [],
+    }
+
+
+def _list_files_uncached(
+    client, cid: int, order_col: str, asc_flag: int, file_type: int,
+    page: int, size: int, fc: int | None, file_count: int | None, total_count: int | None,
+) -> dict:
+    """常规目录浏览（无缓存直查 115，含两阶段分页算法）。"""
 
     # 常规全目录/文件浏览（fc_mix=0 目录置顶模式）：
     # 115 的 fs_files 接口中，limit/offset 仅对文件生效，文件夹会作为置顶项全量返回。
@@ -470,6 +546,7 @@ def stat_dir(
                 return {**hit[1], "cached": True}
 
     client = _client()
+    _check_cooldown()
     with _stat_call_lock:
         # 复查缓存：防止同目录并发点击重复打 115
         now = time.monotonic()
@@ -478,12 +555,13 @@ def stat_dir(
                 hit = _stat_cache.get(cid)
                 if hit and hit[0] > now:
                     return {**hit[1], "cached": True}
-        wait = (_last_stat_at + _STAT_MIN_GAP) - time.monotonic()
+        wait = (_last_stat_at + (_STAT_MIN_GAP * pan.pace_factor())) - time.monotonic()
         if wait > 0:
             time.sleep(wait)
         try:
             resp = client.fs_category_get({"cid": cid})
         except Exception as e:
+            pan.note_115_error(str(e))
             raise HTTPException(400, f"统计目录失败: {str(e)[:150]}")
         finally:
             _last_stat_at = time.monotonic()

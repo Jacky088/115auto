@@ -99,7 +99,7 @@
       @pick-node="onMoveTargetPicked"
     />
     <!-- 新建文件夹与重命名弹窗 -->
-    <FilesActionDialogs ref="actionDialogsRef" :cid="cid" @saved="load" />
+    <FilesActionDialogs ref="actionDialogsRef" :cid="cid" @saved="reloadFresh" />
 
     <!-- 文件详情弹窗 -->
     <FilesDetailDialog
@@ -339,8 +339,15 @@ const load = async () => {
       },
     })
     if (seq !== loadSeq) return
-    items.value = data.items || []
-    total.value = data.total || 0
+    const nextItems = data.items || []
+    const nextTotal = data.total || 0
+    if (page.value > 1 && nextItems.length === 0 && nextTotal > 0) {
+      page.value = Math.max(1, Math.ceil(nextTotal / size.value))
+      load()
+      return
+    }
+    items.value = nextItems
+    total.value = nextTotal
     folderCount.value = data.folder_count ?? null
     fileCount.value = data.file_count ?? null
     selected.value = []
@@ -369,6 +376,12 @@ const load = async () => {
 const clearLocalDirStats = () => {
   for (const k of Object.keys(dirStats)) delete dirStats[k]
 }
+const reloadFresh = () => {
+  folderCount.value = null
+  fileCount.value = null
+  total.value = 0
+  load()
+}
 const {
   busy,
   clipboard,
@@ -388,7 +401,7 @@ const {
   currentName,
   isSearching,
   selected,
-  load,
+  load: reloadFresh,
   clearLocalDirStats,
 })
 const goRoot = () => {
@@ -560,7 +573,7 @@ const openRecycleBin = () => {
 }
 const onRecycleRecovered = () => {
   clearLocalDirStats()
-  load()
+  reloadFresh()
 }
 const copyText = async (text) => {
   try {

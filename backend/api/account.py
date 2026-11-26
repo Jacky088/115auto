@@ -41,16 +41,40 @@ def _reject(key: str, hint: str):
 
 
 # ---------- 115 ----------
+_FORCE_CHECK_COOLDOWN = 5.0
+_last_force_status: tuple[float, dict] | None = None
+_status_lock = threading.Lock()
+
+
 @router.get("/account/115/status")
-def status_115(_=Depends(require_user)):
-    st = pan.check_login()
-    data = {"login": st["ok"], "name": st.get("name", ""), "err": st.get("err", ""),
-            "cookie_ok": db.get_setting("cookie_ok", None)}
+def status_115(force: bool = False, _=Depends(require_user)):
+    global _last_force_status
+    now = time.time()
+    if force:
+        with _status_lock:
+            if _last_force_status and (now - _last_force_status[0] < _FORCE_CHECK_COOLDOWN):
+                res = dict(_last_force_status[1])
+                res["cooldown"] = True
+                return res
+
+    st = pan.check_login(force=bool(force))
+    data = {
+        "login": st["ok"],
+        "name": st.get("name", ""),
+        "err": st.get("err", ""),
+        "latency_ms": st.get("latency_ms"),
+        "checked_at": st.get("checked_at"),
+        "cooldown": False,
+        "cookie_ok": db.get_setting("cookie_ok", None),
+    }
     if st["ok"]:
         try:
-            data["space"] = pan.space_info()
+            data["space"] = pan.space_info(force=bool(force))
         except Exception as e:
             data["space_err"] = str(e)[:200]
+    if force:
+        with _status_lock:
+            _last_force_status = (now, data)
     return data
 
 

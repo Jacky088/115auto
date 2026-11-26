@@ -12,9 +12,18 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 import httpx  # noqa: F401  check_login 的网络异常分类依赖（缺失时 isinstance 抛 NameError）
+try:
+    from urllib3_future.exceptions import HTTPError as _Urllib3HTTPError
+except Exception:  # pragma: no cover
+    _Urllib3HTTPError = None
+
+_NET_EXC_TYPES = (
+    (httpx.HTTPError, ConnectionError, TimeoutError, OSError, _Urllib3HTTPError)
+    if _Urllib3HTTPError is not None
+    else (httpx.HTTPError, ConnectionError, TimeoutError, OSError)
+)
 
 from .. import config, database as db
-from ..core import logstream
 _lock = threading.Lock()
 _client = None  # P115Client 单例（懒加载）
 
@@ -23,11 +32,15 @@ _client = None  # P115Client 单例（懒加载）
 # 转存节奏由 queue_worker 读取 pace_factor() 应用。
 _risk_lock = threading.Lock()
 _consec_risk = 0
-_RISK_KEYWORDS = ("频繁", "风控", "验证码", "IP登录异常", "too many")
+_risk_cooldown_until = 0.0
+_last_risk_err = ""
+_last_risk_at = 0.0
+_RISK_KEYWORDS = ("频繁", "风控", "验证码", "ip登录异常", "too many")
 # limit / 405 用词边界匹配：errno=405、HTTP 405、rate limit 命中；
 # "abc405xx"（分享码）、"file size limitation" 等无关错误串不命中（子串匹配误升退避档）
 _RISK_WORD_RE = re.compile(r"(?<![0-9a-z])(?:limit|405)(?![0-9a-z])")
 _PACE_STEPS = (1, 2, 3, 5, 8)
+_COOLDOWN_STEPS = (0, 60, 180, 600, 1800)  # 各风控档位对应的自适应冷却秒数
 
 
 def _hits_risk_keyword(s: str) -> bool:
@@ -35,26 +48,75 @@ def _hits_risk_keyword(s: str) -> bool:
 
 
 def note_115_error(err: str):
-    """转存相关接口报错后调用：命中风控征兆词则升级退避档位。"""
-    global _consec_risk
+    """转存相关接口报错后调用：命中风控征兆词则升级退避档位并启动指数冷却。"""
+    global _consec_risk, _risk_cooldown_until, _last_risk_err, _last_risk_at
     s = (err or "").lower()
     with _risk_lock:
         if _hits_risk_keyword(s):
             _consec_risk = min(_consec_risk + 1, len(_PACE_STEPS) - 1)
+            now = time.time()
+            _last_risk_at = now
+            _last_risk_err = (err or "").strip()[:160]
+            cd = _COOLDOWN_STEPS[_consec_risk]
+            if cd > 0:
+                _risk_cooldown_until = max(_risk_cooldown_until, now + cd)
 
 
 def note_115_ok():
-    """一次完整成功后调用：逐级恢复到正常节奏。"""
-    global _consec_risk
+    """一次完整成功后调用：逐级恢复到正常节奏并解除冷却。"""
+    global _consec_risk, _risk_cooldown_until
     with _risk_lock:
         if _consec_risk > 0:
             _consec_risk -= 1
+        if _consec_risk == 0:
+            _risk_cooldown_until = 0.0
 
 
 def pace_factor() -> int:
     """当前应使用的间隔倍数（1 = 正常）。"""
     with _risk_lock:
         return _PACE_STEPS[_consec_risk]
+
+
+def risk_cooldown_remaining() -> int:
+    """当前仍需等待的风控冷却剩余秒数（0 表示无冷却）。"""
+    with _risk_lock:
+        rem = _risk_cooldown_until - time.time()
+        return max(0, int(rem))
+
+
+def risk_status() -> dict:
+    """返回当前 115 风控退避与冷却状态，供仪表盘看板展示。"""
+    with _risk_lock:
+        now = time.time()
+        rem = max(0, int(_risk_cooldown_until - now))
+        return {
+            "level": _consec_risk,
+            "max_level": len(_PACE_STEPS) - 1,
+            "pace_factor": _PACE_STEPS[_consec_risk],
+            "cooling": rem > 0,
+            "cooldown_remaining_sec": rem,
+            "cooldown_until": _risk_cooldown_until if rem > 0 else 0.0,
+            "last_error": _last_risk_err,
+            "last_risk_at": _last_risk_at,
+        }
+
+
+def probe_and_recover_risk() -> dict:
+    """手动探测 115 接口健康度：若恢复正常则清零冷却并重置风控档位。"""
+    global _consec_risk, _risk_cooldown_until
+    from ..core import logstream
+    st = check_login(force=True)
+    if st.get("ok"):
+        with _risk_lock:
+            _consec_risk = 0
+            _risk_cooldown_until = 0.0
+        logstream.info("115", "手动探测 115 接口正常，已解除风控冷却并恢复标准转存节奏")
+        return {"ok": True, "risk": risk_status(), "msg": "115 接口探测正常，已退出风控冷却"}
+    err = st.get("err") or "115 接口暂未恢复"
+    if _hits_risk_keyword(err.lower()):
+        note_115_error(err)
+    return {"ok": False, "risk": risk_status(), "msg": f"探测未通过：{err[:120]}"}
 
 
 # ---- 进程级 115 后台/写接口串行队列与最小冷却间隔 ----
@@ -225,29 +287,37 @@ def space_info(force: bool = False, timeout: int = 15) -> dict:
         _space_call_lock.release()
 
 
-def check_login(force: bool = False) -> dict:
-    """校验 cookie，返回 {ok, name, err}。成功缓存 60s、失败缓存 30s（force 跳过缓存）。
+def _get_cached_login(now: float, force: bool) -> dict | None:
+    if force:
+        return None
+    with _cache_lock:
+        cached = _login_cache
+    if cached and now < cached[0]:
+        return cached[1]
+    return None
 
-    缓存未命中时用锁合并并发：转存 worker / 文件浏览 / 仪表盘同时来校验
-    也只放一个真实请求到 115，其余复用结果（防止并发堆积触发风控）。
+
+def check_login(force: bool = False) -> dict:
+    """校验 cookie，返回 {ok, name, err, latency_ms, checked_at}。
+    常规调用成功缓存 60s、失败缓存 30s；force=True 跳过缓存实时检测。
     """
     global _login_cache
-    if not force:
-        with _cache_lock:
-            cached = _login_cache
-        if cached and time.time() < cached[0]:
-            return cached[1]
+    now = time.time()
+    hit = _get_cached_login(now, force)
+    if hit:
+        return hit
+
     with _login_call_lock:
         now = time.time()
-        if not force:
-            with _cache_lock:
-                cached = _login_cache
-            if cached and now < cached[0]:
-                return cached[1]
+        hit = _get_cached_login(now, force)
+        if hit:
+            return hit
+
+        t0 = time.monotonic()
         try:
             client = _get_client()
             try:
-                resp = client.user_my_info(timeout=15)
+                resp = client.user_my_info(timeout=12)
             except TypeError:
                 resp = client.user_my_info()
             if resp.get("state"):
@@ -260,15 +330,17 @@ def check_login(force: bool = False) -> dict:
                 result = {"ok": False, "err": str(resp)[:200]}
                 ttl = _LOGIN_BAD_TTL
         except Exception as e:
-            # 网络类异常（超时/断连/DNS）≠ Cookie 失效：不翻转 cookie_ok，
-            # 返回 ok=None 让健康监控只告警不熔断，避免出口网络抖动导致自动停机
-            if isinstance(e, (httpx.HTTPError, ConnectionError, TimeoutError, OSError)):
+            if isinstance(e, _NET_EXC_TYPES):
                 result = {"ok": None, "err": f"网络异常，无法确认 Cookie 状态: {e}", "network": True}
-                ttl = _LOGIN_BAD_TTL
             else:
                 db.set_setting("cookie_ok", False)
                 result = {"ok": False, "err": str(e)[:200]}
-                ttl = _LOGIN_BAD_TTL
+            ttl = _LOGIN_BAD_TTL
+
+        latency = round((time.monotonic() - t0) * 1000)
+        result["latency_ms"] = latency
+        result["checked_at"] = time.time()
+
         with _cache_lock:
             _login_cache = (time.time() + ttl, result)
         return result
@@ -327,143 +399,10 @@ from .dirs import (  # noqa: F401
 
 
 # ---------- 分享 ----------
-
-def share_snap_all(share_code: str, receive_code: str, max_files: int = 5000) -> dict:
-    """遍历分享的全部文件。返回 {title, files: [{fid, fn, fs}], total_size, top_names}。
-
-    top_names 记录分享顶层（cid=0）的条目名：115 转存后若把分享整体以文件夹形式
-    落到目标目录，顶层文件夹名只存在于这里，反查确认需要它。
-    """
-    from p115client import P115Client
-    title = ""
-    files: list[dict] = []
-    total_size = 0
-    top_names: list[str] = []
-    top_ids: list[str] = []  # 分享顶层条目 id（目录为 cid）：整包转存用，保留目录结构
-
-    def snap(cid: int, offset: int):
-        resp = pan_call(P115Client.share_snap, {
-            "share_code": share_code, "receive_code": receive_code,
-            "cid": cid, "limit": 1150, "offset": offset,
-        })
-        if not resp.get("state"):
-            raise Pan115Error(f"读取分享失败: {str(resp)[:300]}")
-        return resp
-
-    def _unwrap(resp: dict):
-        """兼容两种响应形态：
-        - 新（实测 web 接口）：列表/标题/计数都包在 data 里 → data.list / data.shareinfo / data.count
-        - 旧（平铺）：resp.data 是 list → resp.shareinfo / resp.count
-        """
-        data = resp.get("data")
-        if isinstance(data, dict):
-            items = data.get("list") or []
-            shareinfo = data.get("shareinfo") or resp.get("shareinfo") or {}
-            count = data.get("count", resp.get("count", 0))
-        elif isinstance(data, list):
-            items = data
-            shareinfo = resp.get("shareinfo") or {}
-            count = resp.get("count", 0)
-        else:
-            items, shareinfo, count = [], {}, 0
-        return items, (shareinfo if isinstance(shareinfo, dict) else {}), count
-
-    stack = [0]
-    seen_dirs: set[int] = set()
-    seen_files: set[str] = set()  # 文件 fid 去重：服务端异常返回重复页时不重复计数
-    truncated = False
-    while stack and len(files) < max_files:
-        cid = stack.pop(0)
-        if cid in seen_dirs:
-            continue
-        seen_dirs.add(cid)
-        offset = 0
-        while True:
-            resp = snap(cid, offset)
-            items, shareinfo, total = _unwrap(resp)
-            if not title:
-                title = shareinfo.get("share_title", "") or resp.get("title", "") or ""
-            for f in items:
-                if not isinstance(f, dict):  # 防御：任何非 dict 元素跳过而不是崩溃
-                    continue
-                fid = _file_id(f)
-                if not fid:  # 防御：缺 id 的条目无法转存，跳过而不是带着 None 提交
-                    continue
-                name = _file_name(f)
-                if cid == 0 and name and name not in top_names:
-                    top_names.append(name)  # 分享顶层条目名（文件或文件夹）
-                if cid == 0 and str(fid) not in top_ids:
-                    top_ids.append(str(fid))  # 顶层条目 id（文件夹为 cid）
-                if _is_dir_item(f):  # 子目录，继续遍历
-                    child = _to_int(fid, -1)
-                    if child >= 0:
-                        stack.append(child)
-                    continue
-                if str(fid) in seen_files:
-                    continue
-                seen_files.add(str(fid))
-                size = _to_int(f.get("fs") or f.get("file_size") or f.get("s"), 0)
-                files.append({"fid": str(fid), "fn": name, "fs": size})
-                total_size += size
-            offset += len(items)  # 按实际返回条数翻页：固定 1150 在服务端少返回时会漏项
-            if not items or len(files) >= max_files:
-                # total 用 _to_int 容错：接口偶发返回字符串/异常值时不能中断整个遍历
-                if len(files) >= max_files and (_to_int(total, 0) > max_files or stack):
-                    truncated = True  # 超大分享达到遍历上限，超出部分不会转存
-                break
-            if total and offset >= _to_int(total, 0):
-                # count 偶发缺失（total=0）时以空页作为唯一退出条件，避免大分享漏扫
-                break
-            time.sleep(0.5)
-        time.sleep(0.5)  # 目录之间也留间隔：多目录分享逐页轰炸易触发风控
-    if truncated:
-        logstream.warn("115", f"分享 {share_code} 文件数达到 {max_files} 上限，"
-                              f"仅遍历前 {max_files} 个文件，超出部分不会转存")
-    return {"title": title, "files": files, "total_size": total_size, "truncated": truncated,
-            "top_names": top_names, "top_ids": top_ids}
-
-
-def receive(share_code: str, receive_code: str, cid: int, file_ids: list[str]) -> dict:
-    """转存指定文件到目录 cid。
-
-    注意：不能传 ``is_check=1``——115 把它当作「只校验能否转存」的预检请求，
-    接口照样返回 ``state: true``，但实际不会落文件到网盘（线上表现为反查目录
-    永远没有文件、任务无限重试）。官方网页真正执行转存时不带该参数。
-    单次请求按 500 个 file_id 分批串行提交，避免超长分享整单被 115 拒收。
-    """
-    client = _get_client()
-    ids = [str(i) for i in (file_ids or []) if i]
-    if not ids:
-        ids = ["0"]  # 整包转存语义：115 约定 file_id=0 表示全部
-    resp: dict = {}
-    batch_size = 500
-    total_batches = (len(ids) + batch_size - 1) // batch_size
-    try:
-        user_id = client.user_id  # 与 115 网页请求一致；取不到时省略
-    except Exception:
-        user_id = None
-    for bi in range(0, len(ids), batch_size):
-        chunk = ids[bi:bi + batch_size]
-        payload = {
-            "share_code": share_code,
-            "receive_code": receive_code,
-            "file_id": ",".join(chunk),
-            "cid": cid,
-        }
-        if user_id:
-            payload["user_id"] = user_id
-        if total_batches > 1:
-            logstream.info("115", f"分享 {share_code} 文件较多，分批转存 {bi // batch_size + 1}/{total_batches} 批")
-        resp = pan_call(client.share_receive, payload)
-        if not resp.get("state"):
-            code = str(resp.get("error_code") or "").strip()
-            msg = resp.get("error", "") or str(resp)[:200]
-            if "目录" in msg or "cid" in msg.lower():
-                clear_dir_cache()  # 目标目录可能已被删除/重命名：缓存失效，下次重新逐级解析
-            raise Pan115Error(f"{msg}（error_code={code}）" if code else msg)
-        if bi + batch_size < len(ids):
-            time.sleep(0.5 * pace_factor())  # 分批之间留间隔，防风控
-    return resp
+from .share import (  # noqa: F401
+    receive,
+    share_snap_all,
+)
 
 
 def offline_download(url: str, cid: int) -> dict:
@@ -570,7 +509,7 @@ def list_entries(cid: int, limit: int = 2000, known_ids: set[str] | None = None,
             complete = False  # 达到单目录上限，目录可能还有更旧条目
             break
         if offset < limit:
-            time.sleep(0.4)
+            time.sleep(0.4 * pace_factor())
     if state is not None:
         state["complete"] = complete
         state["early_stopped"] = early_stopped
@@ -594,7 +533,10 @@ def search_file(name: str, limit: int = 20) -> list[dict]:
     client = _get_client()
     resp = pan_call(client.fs_search, {"search_value": name, "limit": limit})
     if not resp.get("state"):
-        raise Pan115Error(f"搜索失败: {str(resp)[:200]}")
+        msg = str(resp.get("error") or resp.get("errno") or str(resp)[:200])
+        note_115_error(msg)
+        raise Pan115Error(f"搜索失败: {msg}")
+    note_115_ok()
     out: list[dict] = []
     for f in (resp.get("data") or []):
         if not isinstance(f, dict):
@@ -651,7 +593,7 @@ def list_file_names(cid: int, limit: int = 500) -> set[str]:
         if count and offset >= count:
             break
         if offset < limit:
-            time.sleep(0.4)  # 多页翻页间隔，降低请求频率
+            time.sleep(0.4 * pace_factor())  # 多页翻页间隔，降低请求频率
     return names
 
 

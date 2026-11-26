@@ -13,7 +13,7 @@ router = APIRouter()
 
 
 @router.get("/transfers")
-def list_transfers(status: str = "", category: str = "", search: str = "",
+def list_transfers(status: str = "", category: str = "", kind: str = "", search: str = "",
                    page: int = 1, size: int = 30, _=Depends(require_user)):
     page, size = _clamp_page(page, size, 200)
     where, params = ["1=1"], []
@@ -21,6 +21,14 @@ def list_transfers(status: str = "", category: str = "", search: str = "",
         where.append("status=?"); params.append(status)
     if category:
         where.append("category=?"); params.append(category)
+    if kind == "offline":
+        where.append("kind='offline'")
+    elif kind == "backfill":
+        where.append("priority > 0")
+    elif kind == "increment":
+        where.append("increment=1 AND priority=0")
+    elif kind == "share":
+        where.append("kind='share' AND increment=0 AND priority=0")
     if search:
         search = search.strip()[:100]
         esc = _like_escape(search)
@@ -31,7 +39,10 @@ def list_transfers(status: str = "", category: str = "", search: str = "",
     rows = db.query(
         f"SELECT * FROM transfers WHERE {w} ORDER BY id DESC LIMIT ? OFFSET ?",
         tuple(params + [size, (page - 1) * size]))
-    return {"total": total, "items": [dict(r) for r in rows]}
+    stat_rows = db.query("SELECT status, count(*) c FROM transfers GROUP BY status")
+    status_counts = {r["status"]: int(r["c"]) for r in stat_rows}
+    status_counts["all"] = sum(status_counts.values())
+    return {"total": total, "items": [dict(r) for r in rows], "status_counts": status_counts}
 
 
 @router.post("/transfers/{t_id}/retry")
@@ -97,6 +108,25 @@ def batch_delete_transfers(body: dict, _=Depends(require_user)):
             tuple(deletable))
         logstream.info("transfer", f"批量删除 {n} 条任务记录（跳过 {skipped} 条不可删除记录）")
     return {"ok": True, "deleted": n, "skipped": skipped}
+
+
+@router.post("/transfers/clear-stale")
+def clear_stale_transfers(body: dict | None = None, _=Depends(require_user)):
+    """安全清理非活动且未成功的陈旧记录（仅允许 skipped/duplicate/failed/blocked）。"""
+    allowed = {"skipped", "duplicate", "failed", "blocked"}
+    raw = (body or {}).get("statuses") if isinstance(body, dict) else None
+    if isinstance(raw, list) and raw:
+        targets = [str(s).strip() for s in raw if str(s).strip() in allowed]
+    else:
+        targets = ["skipped", "duplicate"]
+    if not targets:
+        raise HTTPException(400, "未指定可清理的状态（仅支持 skipped / duplicate / failed / blocked）")
+    n = db.execute(
+        f"DELETE FROM transfers WHERE status IN ({','.join('?' * len(targets))})",
+        tuple(targets),
+    )
+    logstream.info("transfer", f"已清理陈旧转存记录 {n} 条（状态: {', '.join(targets)}）")
+    return {"ok": True, "deleted": n}
 
 
 @router.post("/transfers/manual")

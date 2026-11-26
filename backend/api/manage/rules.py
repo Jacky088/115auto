@@ -29,12 +29,14 @@ def save_rules(body: dict, _=Depends(require_user)):
     - 带 `routes` 时按提交的完整列表同步：未提交的分类会被删除（支持删除分类映射）
     """
     saved_rules = saved_routes = None
+    cleaned_rules = None
+    cleaned_routes = None
 
     if "rules" in body:
         rules = body.get("rules") or []
         if not isinstance(rules, list):
             raise HTTPException(400, "rules 必须是数组")
-        cleaned = []
+        cleaned_rules = []
         for i, r in enumerate(rules):
             if not isinstance(r, dict):
                 raise HTTPException(400, f"第 {i + 1} 条规则格式不正确")
@@ -51,13 +53,8 @@ def save_rules(body: dict, _=Depends(require_user)):
                 raise HTTPException(400, f"第 {i + 1} 条规则的优先级必须是数字")
             if priority < 1:
                 raise HTTPException(400, f"第 {i + 1} 条规则的优先级必须是大于等于 1 的整数")
-            cleaned.append((pattern, category, priority, 1 if r.get("enabled", 1) else 0))
-        # 整批一个事务：避免删+插逐条 commit（几十次写锁获取）
-        with db.transaction() as con:
-            con.execute("DELETE FROM rules")
-            con.executemany("INSERT INTO rules(pattern,category,priority,enabled) VALUES(?,?,?,?)",
-                            cleaned)
-        saved_rules = len(cleaned)
+            note = str(r.get("note") or "").strip()[:120]
+            cleaned_rules.append((pattern, category, priority, 1 if r.get("enabled", 1) else 0, note))
 
     if "routes" in body:
         routes = body.get("routes") or []
@@ -69,20 +66,29 @@ def save_rules(body: dict, _=Depends(require_user)):
             if not isinstance(r, dict):
                 raise HTTPException(400, f"第 {i + 1} 个分类映射格式不正确")
             category = str(r.get("category") or "").strip()
-            target = str(r.get("target_dir") or "").strip()
-            offline = str(r.get("offline_dir") or "").strip()
+            target = _clean_dir_action(r.get("target_dir") or "")
+            raw_off = str(r.get("offline_dir") or "").strip()
+            offline = _clean_dir_action(raw_off) if raw_off else ""
             if not category:
                 raise HTTPException(400, f"第 {i + 1} 个分类映射的分类名不能为空")
             if not target:
                 raise HTTPException(400, f"分类「{category}」的分享转存目录不能为空（可填 skip）")
             categories.add(category)
             cleaned_routes.append((category, target, offline))
-        # 整批一个事务：先全部校验再统一落库，避免中途失败留下半套映射
-        with db.transaction() as con:
-            con.execute("DELETE FROM routes")
-            con.executemany("INSERT INTO routes(category,target_dir,offline_dir) VALUES(?,?,?)",
-                            cleaned_routes)
         saved_routes = len(categories)
+
+    if cleaned_rules is not None or cleaned_routes is not None:
+        # 全部校验通过后同一事务原子提交，防止 rules 成功但 routes 校验失败导致半套状态
+        with db.transaction() as con:
+            if cleaned_rules is not None:
+                con.execute("DELETE FROM rules")
+                con.executemany("INSERT INTO rules(pattern,category,priority,enabled,note) VALUES(?,?,?,?,?)",
+                                cleaned_rules)
+                saved_rules = len(cleaned_rules)
+            if cleaned_routes is not None:
+                con.execute("DELETE FROM routes")
+                con.executemany("INSERT INTO routes(category,target_dir,offline_dir) VALUES(?,?,?)",
+                                cleaned_routes)
 
     if "unclassified_action" in body:
         db.set_setting("unclassified_action", _clean_dir_action(body["unclassified_action"]))
@@ -116,7 +122,8 @@ def reset_rules(_=Depends(require_user)):
 def test_rule(body: dict, _=Depends(require_user)):
     # 截断超长输入：规则测试是同步正则执行，超大文本有拖慢接口的风险
     text = str(body.get("text", ""))[:2000]
-    return classifier.test_text(text)
+    channel = str(body.get("channel") or "").strip()[:120]
+    return classifier.test_text(text, channel=channel or None)
 
 
 # ---------- blacklist ----------
@@ -127,11 +134,14 @@ def hits(_=Depends(require_user)):
 
 
 @router.post("/blacklist/hits/{hit_id}/release")
-async def release_hit(hit_id: int, _=Depends(require_user)):
-    """误杀放行：忽略黑名单重新处理。share_info 环节的命中给对应任务打免检标记重新入队。"""
+async def release_hit(hit_id: int, remove_rule: bool = False, _=Depends(require_user)):
+    """误杀放行：忽略黑名单重新处理；可选同步从黑名单移除触发拦截的词条。"""
     hit = db.query("SELECT * FROM blacklist_hits WHERE id=?", (hit_id,), one=True)
     if not hit:
         raise HTTPException(404, "记录不存在")
+    if remove_rule and hit["rule_type"] in ("keyword", "channel", "file_pattern") and hit["rule_value"]:
+        db.execute("DELETE FROM blacklist WHERE type=? AND value=?",
+                   (hit["rule_type"], hit["rule_value"]))
     if hit["stage"] == "share_info" and hit["share_code"]:
         # 活动任务唯一：同分享码已有排队/转存中任务时不重复入队（放行记录保留）
         changed = db.execute(

@@ -73,7 +73,7 @@
               <span class="not-ready-dot"></span>未就绪
             </el-tag>
             <el-tooltip v-if="sysSpaceBlocked" placement="bottom"
-                        :content="'115 空间不足（' + (sysSpaceReason || '剩余空间不足') + '）：当前这一条已标记跳过、不会自动重试，其他任务继续排队不会丢失；清理空间后自动恢复转存。可在「系统设置 → 转存控制」关闭自动暂停'">
+                        :content="'115 空间不足（' + (sysSpaceReason || '剩余空间不足') + '）：当前任务已跳过，其余任务继续排队；清理空间后自动恢复（可在「系统设置 → 转存控制」关闭此保护）。'">
               <el-tag disable-transitions size="small" class="run-tag run-tag--space">
                 <span class="space-dot"></span><span class="space-tag-full">空间不足·已暂停</span><span class="space-tag-short">空间不足</span>
               </el-tag>
@@ -96,20 +96,20 @@
           <el-tooltip content="刷新当前数据" placement="bottom">
             <button class="theme-btn refresh-btn" :class="{ 'is-refreshing': isRefreshing }"
                     aria-label="刷新当前数据" title="刷新当前数据" @click="handlePageRefresh">
-              <svg class="topbar-svg" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
-                <path d="M3 3v5h5" />
-                <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16" />
-                <path d="M16 21h5v-5" />
+              <svg class="topbar-svg" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8" />
+                <path d="M21 3v5h-5" />
               </svg>
             </button>
           </el-tooltip>
           <el-tooltip v-if="!isInstalled" content="安装为独立应用 (PWA)" placement="bottom">
             <button class="theme-btn" aria-label="安装为独立应用" @click="handleInstall">
-              <svg class="topbar-svg" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                <polyline points="7 10 12 15 17 10" />
-                <line x1="12" y1="15" x2="12" y2="3" />
+              <svg class="topbar-svg" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 13V4" />
+                <path d="m9 10 3 3 3-3" />
+                <path d="M8 4H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2h-3" />
+                <path d="M8 21h8" />
+                <path d="M12 17v4" />
               </svg>
             </button>
           </el-tooltip>
@@ -117,12 +117,12 @@
             <button class="theme-btn"
                     :aria-label="isDark ? '切换到浅色模式' : '切换到深色模式'"
                     @click="toggleTheme">
-              <svg v-if="isDark" class="topbar-svg" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <svg v-if="isDark" class="topbar-svg" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round" shape-rendering="geometricPrecision">
                 <circle cx="12" cy="12" r="4" />
-                <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41" />
+                <path d="M12 2v2.5M12 19.5V22M4.93 4.93l1.77 1.77M17.3 17.3l1.77 1.77M2 12h2.5M19.5 12H22M6.7 17.3l-1.77 1.77M19.07 4.93 17.3 6.7" />
               </svg>
-              <svg v-else class="topbar-svg" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" />
+              <svg v-else class="topbar-svg" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M20.354 15.354A9 9 0 0 1 8.646 3.646 9.003 9.003 0 0 0 12 21a9.003 9.003 0 0 0 8.354-5.646Z" />
               </svg>
             </button>
           </el-tooltip>
@@ -170,34 +170,36 @@
             <svg class="pull-refresh-icon"
                  :class="{ 'is-spinning': isRefreshing }"
                  :style="{ transform: isRefreshing ? '' : `rotate(${pullRotate}deg)` }"
-                 viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
-              <path d="M3 3v5h5" />
-              <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16" />
-              <path d="M16 21h5v-5" />
+                 viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8" />
+              <path d="M21 3v5h-5" />
             </svg>
             <span class="pull-refresh-text">{{ pullText }}</span>
           </div>
         </div>
-        <router-view :key="routerKey" />
+        <router-view v-slot="{ Component }">
+          <transition name="page-fade" mode="out-in">
+            <component :is="Component" :key="routerKey" />
+          </transition>
+        </router-view>
       </el-main>
     </el-container>
   </el-container>
 
-  <el-dialog v-model="pwdVisible" title="修改用户名 / 密码" :width="'min(440px, 94vw)'" align-center class="pc-dialog">
-    <el-form ref="pwdFormRef" :rules="pwdRules" :model="pwdForm" label-width="96px" @submit.prevent>
+  <el-dialog v-model="pwdVisible" title="修改用户名 / 密码" :width="'min(440px, calc(100vw - 36px))'" align-center class="pc-dialog">
+    <el-form ref="pwdFormRef" :rules="pwdRules" :model="pwdForm" label-width="96px" autocomplete="off" @submit.prevent>
       <el-form-item label="用户名" prop="username">
-        <el-input v-model="pwdForm.username" maxlength="32" placeholder="登录用户名" />
+        <el-input v-model="pwdForm.username" autocomplete="off" maxlength="32" placeholder="登录用户名" />
       </el-form-item>
       <el-form-item label="旧密码" prop="old">
-        <el-input v-model="pwdForm.old" type="password" show-password placeholder="验证身份，必填" />
+        <el-input v-model="pwdForm.old" type="password" autocomplete="new-password" show-password placeholder="验证身份，必填" />
       </el-form-item>
       <el-form-item label="新密码" prop="new">
-        <el-input v-model="pwdForm.new" type="password" show-password maxlength="128"
+        <el-input v-model="pwdForm.new" type="password" autocomplete="new-password" show-password maxlength="128"
                   placeholder="不修改密码请留空（8~128 位）" />
       </el-form-item>
       <el-form-item label="确认新密码" prop="confirm">
-        <el-input v-model="pwdForm.confirm" type="password" show-password
+        <el-input v-model="pwdForm.confirm" type="password" autocomplete="new-password" show-password
                   placeholder="再次输入新密码" />
       </el-form-item>
     </el-form>
@@ -521,7 +523,9 @@ const changePwd = async () => {
   try {
     await pwdFormRef.value.validate()
   } catch { return }  // 校验不通过：字段下方已显示红字原因，阻止修改
-  if (!pwdForm.username.trim() && !pwdForm.new) { ElMessage.warning('新用户名与新密码至少填写一项'); return }
+  const uname = pwdForm.username.trim()
+  if (!uname && !pwdForm.new) { ElMessage.warning('新用户名与新密码至少填写一项'); return }
+  if (uname === username.value && !pwdForm.new) { ElMessage.warning('请填写不同的新用户名或新密码'); return }
   if (pwdForm.confirm && !pwdForm.new) { ElMessage.warning('已填写确认新密码，请同时填写新密码'); return }
   try {
     await api.post('/api/auth/password', pwdForm)
@@ -539,11 +543,11 @@ const changePwd = async () => {
 .auto-stop-body { font-size: var(--fs-caption); line-height: 1.7; color: var(--el-text-color-regular); margin-top: 2px; }
 .pwd-tips {
   margin-top: 4px; padding: 10px 12px; border-radius: 8px;
-  background: #f6f9ff; border: 1px solid #e9eefb;
+  background: var(--subcard-bg); border: 1px solid var(--saas-line);
 }
-.pwd-tips-title { margin: 0 0 6px; font-size: var(--fs-caption); font-weight: 600; color: #3a4661; }
+.pwd-tips-title { margin: 0 0 6px; font-size: var(--fs-caption); font-weight: 600; color: var(--saas-text-main); }
 .pwd-tips ul { margin: 0; padding-left: 16px; }
-.pwd-tips li { font-size: var(--fs-caption); line-height: 1.8; color: #7c8aa5; list-style: disc; }
+.pwd-tips li { font-size: var(--fs-caption); line-height: 1.8; color: var(--saas-text-sub); list-style: disc; }
 .aside {
   height: 100%;
   display: flex; flex-direction: column;
@@ -587,13 +591,13 @@ const changePwd = async () => {
 }
 .theme-btn:hover {
   color: var(--el-color-primary);
-  background: rgba(79, 107, 255, 0.10);
-  border-color: rgba(79, 107, 255, 0.20);
+  background: rgba(37, 107, 245, 0.08);
+  border-color: rgba(37, 107, 245, 0.18);
 }
 html.dark .theme-btn:hover {
   color: var(--el-color-primary-light-3);
-  background: rgba(125, 144, 255, 0.16);
-  border-color: rgba(125, 144, 255, 0.30);
+  background: rgba(37, 107, 245, 0.14);
+  border-color: rgba(37, 107, 245, 0.28);
 }
 .topbar-svg {
   display: block;
@@ -608,11 +612,14 @@ html.dark .theme-btn:hover {
 .header {
   display: flex; align-items: center; gap: 8px;
   flex-wrap: nowrap !important; white-space: nowrap;
-  background: var(--saas-card);
-  -webkit-backdrop-filter: var(--glass-blur);
-  backdrop-filter: var(--glass-blur);
+  background: rgba(255, 255, 255, 0.86);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
   border-bottom: 1px solid var(--glass-border); padding: 0 12px;
   box-sizing: border-box;
+}
+html.dark .header {
+  background: rgba(18, 20, 28, 0.82);
 }
 .header-left { flex: 1 1 auto; display: flex; align-items: center; gap: 10px; min-width: 0; overflow: hidden; white-space: nowrap; }
 .header-right { display: flex; align-items: center; gap: 3px; flex-shrink: 0; margin-left: auto; white-space: nowrap; }
@@ -626,13 +633,13 @@ html.dark .theme-btn:hover {
 .run-tag { flex-shrink: 0; white-space: nowrap; }
 .space-tag-short { display: none; }
 .user-chip { display: flex; align-items: center; gap: 6px; cursor: pointer; padding: 2px 6px; border-radius: var(--r-pill); transition: background .15s ease; flex-shrink: 0; }
-.user-chip:hover { background: rgba(79, 107, 255, .14); }
+.user-chip:hover { background: var(--saas-hover); }
 .avatar {
   width: 30px; height: 30px; border-radius: 50%;
   background: var(--grad-brand);
   color: #fff; display: flex; align-items: center; justify-content: center;
   font-size: var(--fs-body); font-weight: 600;
-  box-shadow: 0 3px 10px rgba(79, 107, 255, .35);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.18);
   flex-shrink: 0;
 }
 .user-name { color: var(--saas-text-main); font-size: var(--fs-body); }
@@ -724,7 +731,7 @@ html.dark .theme-btn:hover {
   padding: 5px 14px;
   background: var(--saas-card);
   border: 1px solid var(--glass-border);
-  box-shadow: 0 4px 16px rgba(79, 107, 255, 0.16);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.12);
   backdrop-filter: var(--glass-blur);
   -webkit-backdrop-filter: var(--glass-blur);
   border-radius: 20px;

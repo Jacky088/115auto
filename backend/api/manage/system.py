@@ -100,6 +100,12 @@ def system_resume(_=Depends(require_user)):
     return {"ok": True}
 
 
+@router.post("/system/115/probe")
+async def system_115_probe(_=Depends(require_user)):
+    """手动探测 115 接口并尝试解除风控冷却。"""
+    return await pan.run_pan_thread(pan.probe_and_recover_risk)
+
+
 @router.get("/system/state")
 def system_state(_=Depends(require_user)):
     """运行状态 + 完整就绪检查（供顶栏「开始运行」按钮门控）。
@@ -256,7 +262,7 @@ def system_doctor(_=Depends(require_user)):
         if stale:
             return "fail", f"{stale} 个任务长时间 running（超过 {timeout} 分钟未完成），等待看门狗回收"
         if failed:
-            return "warn", f"排队 {queued} 个；近 24 小时失败 {failed} 个，可到「转存记录」查看原因"
+            return "warn", f"排队 {queued} 个；近 24 小时失败 {failed} 个，可到「记录查询」查看原因"
         return "ok", f"排队 {queued} 个，近 24 小时无失败任务"
     run("queue", "转存队列", _queue)
 
@@ -345,6 +351,49 @@ def _category_breakdown() -> dict:
     }
 
 
+def _transfer_trend(days: int = 30) -> list[dict]:
+    """按天统计近 N 天转存成功、失败/拦截数量与成功转存体积（GB）。"""
+    from datetime import date, datetime, timedelta
+
+    today = date.today()
+    start_day = today - timedelta(days=days - 1)
+    start_ts = datetime(start_day.year, start_day.month, start_day.day).timestamp()
+    rows = db.query(
+        "SELECT date(created_at,'unixepoch','localtime') d, status, count(*) c,"
+        " sum(CASE WHEN status='success' THEN COALESCE(size, 0) ELSE 0 END) sz"
+        " FROM transfers WHERE created_at>=? GROUP BY d, status",
+        (start_ts,),
+    )
+    by_day: dict[str, dict] = {}
+    for r in rows:
+        d = r["d"]
+        if not d:
+            continue
+        item = by_day.setdefault(d, {"success": 0, "failed": 0, "blocked": 0, "bytes": 0})
+        st = r["status"]
+        if st == "success":
+            item["success"] += r["c"]
+            item["bytes"] += int(r["sz"] or 0)
+        elif st == "failed":
+            item["failed"] += r["c"]
+        elif st == "blocked":
+            item["blocked"] += r["c"]
+    out = []
+    for i in range(days):
+        cur = start_day + timedelta(days=i)
+        ds = cur.isoformat()
+        v = by_day.get(ds, {"success": 0, "failed": 0, "blocked": 0, "bytes": 0})
+        out.append({
+            "date": ds[5:],
+            "full_date": ds,
+            "success": v["success"],
+            "failed": v["failed"],
+            "blocked": v["blocked"],
+            "size_gb": round(v["bytes"] / (1024 ** 3), 2),
+        })
+    return out
+
+
 @router.get("/dashboard/stats")
 def dashboard(_=Depends(require_user)):
     from datetime import datetime
@@ -367,7 +416,9 @@ def dashboard(_=Depends(require_user)):
         "channels": channels,
         "cookie_ok": db.get_setting("cookie_ok", None),
         "userbot_ok": db.get_setting("userbot_ok", None),
+        "risk_115": pan.risk_status(),
         "categories": _category_breakdown(),
+        "trend": _transfer_trend(30),
     }
 
 

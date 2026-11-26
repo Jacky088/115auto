@@ -5,7 +5,7 @@
         <div class="title-with-badge">
           <span class="card-title">历史日志</span>
           <el-tag size="small" class="count-tag">共 {{ total }} 条日志</el-tag>
-          <span class="tip">默认保留 7 天（可在系统设置中修改），到期自动删除</span>
+          <span class="tip">系统自动保留最近 7 天日志，到期自动清理</span>
         </div>
         <el-button @click="exportTxt">导出当天全部日志</el-button>
       </div>
@@ -200,13 +200,13 @@ onMounted(async () => {
 }
 .day-chip:hover {
   border-color: var(--el-color-primary);
-  background: rgba(79, 107, 255, .08);
+  background: var(--saas-hover);
   transform: translateY(-1px);
 }
 .day-chip.active {
   border-color: var(--el-color-primary);
   background: var(--el-color-primary-light-9);
-  box-shadow: 0 2px 10px rgba(47, 107, 255, .12);
+  box-shadow: 0 2px 8px rgba(37, 107, 245, .14);
 }
 .d-name { font-weight: 600; font-size: var(--fs-body); color: var(--saas-text-main);
           display: flex; align-items: center; gap: 8px; }

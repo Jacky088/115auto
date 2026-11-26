@@ -11,7 +11,7 @@
       @sort-change="$emit('sort-change', $event)"
     >
       <template #empty>
-        <el-empty :image-size="60" :description="emptyDesc" />
+        <el-empty v-if="!loading" :image-size="60" :description="emptyDesc" />
       </template>
       <el-table-column type="selection" width="44" />
       <el-table-column prop="name" label="名称" min-width="280" sortable="custom">

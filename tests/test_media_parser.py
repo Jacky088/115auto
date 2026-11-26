@@ -124,3 +124,32 @@ def test_subtitle_matching_and_format_media_target():
 
     assert sanitize_filename('Spider:Man/No?Way*Home') == 'Spider：Man No Way Home'
     assert resolution_rank("2160p") > resolution_rank("1080p") > resolution_rank("720p")
+
+
+def test_parser_multi_episode_and_subtitle_edge_cases():
+    from backend.core.episode import cn_to_int
+
+    # 无 S01 前缀多集范围 & 动漫横杠多集范围
+    pm1 = parse_media_filename("Show.E01-E02.1080p.mkv")
+    assert pm1.episode == 1 and pm1.episode_end == 2
+    pm2 = parse_media_filename("[Sub] Anime - 03-04 [1080p].mkv")
+    assert pm2.episode == 3 and pm2.episode_end == 4
+    pm3 = parse_media_filename("某剧 第一-三集 1080p.mkv")
+    assert pm3.episode == 1 and pm3.episode_end == 3
+
+    # 集数后置年份补采
+    pm4 = parse_media_filename("Show.S01E01.2023.1080p.mkv")
+    assert pm4.season == 1 and pm4.episode == 1 and pm4.year == "2023"
+
+    # cn_to_int 非法后缀返回 None
+    assert cn_to_int("十X") is None
+
+    # S00 特别篇不与 S01 字幕混配，且支持多段语言后缀
+    m_sub = match_subtitle_for_video(
+        "Anime.S00E01.1080p.mkv",
+        ["Anime.S01E01.chs.ass", "Anime.S00E01.chs.eng.ass"],
+    )
+    d_sub = dict(m_sub)
+    assert "Anime.S01E01.chs.ass" not in d_sub
+    assert d_sub.get("Anime.S00E01.chs.eng.ass") == ".chs.eng"
+

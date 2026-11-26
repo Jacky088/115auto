@@ -6,16 +6,10 @@
     :title="ruleDialog.mode === 'organize'
       ? (ruleDialog.id ? '编辑目录整理规则' : '新增目录整理规则')
       : (ruleDialog.id ? '编辑媒体刮削目录' : '新增媒体刮削目录')"
-    width="min(560px, 94vw)"
+    width="min(560px, calc(100vw - 36px))"
     align-center
   >
-    <!-- 必选项明确文字提示横幅 -->
-    <div class="rule-dialog-hint">
-      <span class="rdh-icon">⚠️</span>
-      <span>标有 <b class="red">*</b> 的项目为<b>必选项</b>，必须选取有效网盘目录方可保存规则！</span>
-    </div>
-
-    <el-form :model="ruleDialog" label-width="110px">
+    <el-form :model="ruleDialog" :label-width="isMobile ? 'auto' : '110px'" :label-position="isMobile ? 'top' : 'left'">
       <el-form-item label="规则名称">
         <el-input
           v-model="ruleDialog.name"
@@ -36,10 +30,10 @@
               <el-button type="primary" plain @click="openDirPicker('source_dir')">
                 📁 选取网盘源目录
               </el-button>
-              <span class="required-warn">（* 必选：必须选取源目录）</span>
+              <span class="required-warn">（必选）</span>
             </div>
           </div>
-          <div class="tip-block">包含待分类整理杂乱文件的网盘源目录（必须选取）</div>
+          <div class="tip-block">包含待分类整理文件的网盘源目录</div>
         </el-form-item>
         <el-form-item label="目标整理目录">
           <div class="dir-selector-wrap">
@@ -67,9 +61,9 @@
             <el-radio-button value="movie">仅电影</el-radio-button>
             <el-radio-button value="tv">仅剧集 / 动漫</el-radio-button>
           </el-radio-group>
-          <div class="tip-block rule-type-tip">
+          <div class="tip-block" style="margin-top: 8px">
             <template v-if="ruleDialog.media_type === 'auto'">
-              ℹ️ <b>全部处理（不限类型）</b>：源目录内的所有视频无论电影或剧集均统一按本规则整理。⚠️ 注意：若源目录混杂了电影与剧集且需要自动分流进不同目录，请不要选此项，请分别创建「仅电影」和「仅剧集」两条独立规则！
+              ℹ️ <b>全部处理（不限类型）</b>：不区分电影与剧集统一整理；若需将电影和剧集分流到不同目录，请分别创建「仅电影」与「仅剧集 / 动漫」规则。
             </template>
             <template v-else-if="ruleDialog.media_type === 'tv'">
               ✨ <b>仅剧集 / 动漫</b>：精准互斥处理电视剧、动画番剧（有 SxxExx 或集数），扫描时遇到单部电影会自动跳过不碰，完整留给电影规则处理。
@@ -94,10 +88,10 @@
               <el-button type="success" plain @click="openDirPicker('target_dir')">
                 📁 选取媒体库目录
               </el-button>
-              <span class="required-warn">（* 必选：必须选取刮削目录）</span>
+              <span class="required-warn">（必选）</span>
             </div>
           </div>
-          <div class="tip-block">已整理好的影视库目录，程序将联网 TMDB 匹配并生成本地元数据（必须选取）</div>
+          <div class="tip-block">已整理好的影视库目录，程序将联网 TMDB 匹配并生成本地元数据</div>
         </el-form-item>
       </template>
     </el-form>
@@ -126,7 +120,7 @@ import { computed, inject, ref } from 'vue'
 import { api, errMsg, toast } from '../../api'
 import DirPicker from '../DirPicker.vue'
 
-const { loadRules, loadStatus } = inject('mediaCtx')
+const { loadRules, loadStatus, isMobile } = inject('mediaCtx')
 
 const savingRule = ref(false)
 const ruleDialog = ref({

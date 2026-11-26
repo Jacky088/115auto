@@ -190,12 +190,9 @@ def _build_organize_tg_report(
             lines.append(f"• … 另有 {len(fail_items) - 3} 项失败，详情见网页任务记录")
 
     lines.append("")
-    if done_cnt > 0:
-        undo_note = "（已完成部分仍可一键撤销）" if (outcome != "done" or fail_cnt > 0) else ""
-        lines.append(f"📌 批次编号：{batch_id}{undo_note}")
     lines.append(resume_line)
     if done_cnt > 0:
-        lines.append("💡 如需回退，可在网页「操作账本」按批次一键撤销")
+        lines.append(f"📌 批次：{batch_id}（可在网页「记录查询 → 整理记录」按批次撤销）")
 
     text = "\n".join(lines)
     if len(text) > 3900:
@@ -290,9 +287,9 @@ def _build_scrape_tg_report(
     if not is_commit and pending_items:
         lines.append("")
         if len(pending_items) > 6:
-            lines.append(f"以下作品未自动锁定，已跳过并加入网页「待确认列表」（共 {len(pending_items)} 部，前 6 部）：")
+            lines.append(f"⏳ 待确认作品（共 {len(pending_items)} 部，显示前 6 部）：")
         else:
-            lines.append("以下作品未自动锁定，已跳过并加入网页「待确认列表」：")
+            lines.append("⏳ 待确认作品：")
         for idx, p in enumerate(pending_items[:6], 1):
             icon = "📺" if p.get("media_type") == "tv" else "🎬"
             disp = str(p.get("title") or p.get("orig_name") or "未命名").strip()
@@ -311,7 +308,7 @@ def _build_scrape_tg_report(
             lines.append(f"{idx}. {icon} {disp}{yr_part}{ep_part}｜{hint}")
         if len(pending_items) > 6:
             lines.append(f"… 另有 {len(pending_items) - 6} 部待确认作品，请打开网页查看")
-        lines.append("👉 请前往网页「整理刮削 → 待确认列表」点选候选后点击「提交队列」")
+        lines.append("👉 请到网页「整理刮削 → 待确认列表」确认并提交")
 
     if fail_items:
         lines.append("")

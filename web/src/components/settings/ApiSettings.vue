@@ -7,11 +7,16 @@
           <el-input
             v-model="f.api_token"
             type="password"
+            autocomplete="new-password"
             show-password
             :placeholder="f.api_token === SECRET_MASK ? '已配置（保持不变即继续生效；清空并保存则关闭对外 API）' : '未设置时对外 API 关闭'"
             clearable
           />
           <el-button @click="genToken">生成随机 Token</el-button>
+          <el-button
+            :disabled="!f.api_token || f.api_token === SECRET_MASK"
+            @click="copyToken"
+          >复制</el-button>
         </div>
         <div class="tip" style="width: 100%">
           留空关闭。开启后调用方携带请求头 <code>X-API-Token</code> 访问 <code>/api/ext/v1/*</code> 接口
@@ -44,5 +49,16 @@ const genToken = async () => {
   crypto.getRandomValues(bytes)
   props.f.api_token = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
   ElMessage.success('已生成随机 Token，点击「保存设置」后生效')
+}
+
+const copyToken = async () => {
+  const val = String(props.f.api_token || '').trim()
+  if (!val || val === SECRET_MASK) return
+  try {
+    await navigator.clipboard.writeText(val)
+    ElMessage.success('API Token 已复制')
+  } catch {
+    ElMessage.warning('复制失败，请手动复制')
+  }
 }
 </script>

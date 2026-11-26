@@ -3,14 +3,14 @@
     <!-- 规则表格工具栏：紧贴列表上方，便于直观管理与添加 -->
     <div class="rules-table-toolbar">
       <div class="rules-toolbar-left">
-        <span class="rules-toolbar-title">整理规则映射列表</span>
+        <span class="rules-toolbar-title">归档规则列表</span>
         <el-tag v-if="rules.length" size="small" class="count-tag">共 {{ rules.length }} 条规则</el-tag>
-        <span class="rules-toolbar-tip">按由上至下顺序依次排队扫描与移动（只移动正片文件，文件夹本身不移动）</span>
+        <span class="rules-toolbar-tip">按由上至下顺序依次扫描与移动</span>
       </div>
       <div class="rules-toolbar-right">
         <el-button type="primary" size="small" @click="$emit('add')">
           <el-icon><Plus /></el-icon>
-          <span>添加整理规则</span>
+          <span>添加归档规则</span>
         </el-button>
       </div>
     </div>
@@ -100,10 +100,7 @@
               <span>云下载</span>
               <el-tooltip placement="top" effect="dark">
                 <template #content>
-                  云下载目录专用模式：<br />
-                  115 云下载的中文标题只在任务目录名上，目录内文件多为纯英文名——开启后按<b>任务子目录名</b>匹配（自动剥除含网址的广告括号段），目录内文件继承归属。<br />
-                  电影/剧集按集数标识自动判别；广告域名/微小体积文件自动过滤不入库；<br />
-                  仅当源目录是分类路由配置的云下载目录时可开启，配置变更后失效会自动拦下并告警。
+                  云下载专用：按任务子目录名匹配（保留纯英文正片），自动过滤广告与 &lt;10MB 小文件，散落单文件与字幕不移动；仅限源目录为云下载目录时可用。
                 </template>
                 <el-icon class="info-tip-icon" :size="14" tabindex="0"><InfoFilled /></el-icon>
               </el-tooltip>
@@ -123,7 +120,21 @@
             </el-tooltip>
           </template>
         </el-table-column>
-        <el-table-column label="上次整理状态" width="150">
+        <el-table-column width="84">
+          <template #header>
+            <span class="info-tip-label">
+              <span>英文片名</span>
+              <el-tooltip placement="top" effect="dark" content="开启后允许纯英文文件名及英文库目录参与整理（默认仅处理含汉字资源）">
+                <el-icon class="info-tip-icon" :size="14" tabindex="0"><InfoFilled /></el-icon>
+              </el-tooltip>
+            </span>
+          </template>
+          <template #default="{ row }">
+            <el-switch v-model="row.allow_english" :active-value="1" :inactive-value="0"
+                       @change="$emit('save-rule', row)" />
+          </template>
+        </el-table-column>
+        <el-table-column label="上次整理状态" width="140">
           <template #default="{ row }">
             <span v-if="row.last_run_at" style="font-size: var(--fs-caption); color: var(--saas-text-main)">
               {{ row.last_moved_count > 0 ? `移动 ${row.last_moved_count} 个文件` : '无新匹配文件' }}
@@ -147,9 +158,12 @@
             </el-tooltip>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="84" fixed="right">
+        <el-table-column label="操作" width="140" fixed="right">
           <template #default="{ row }">
-            <el-button type="danger" text @click="$emit('delete-rule', row.id)">删除</el-button>
+            <div class="table-actions">
+              <el-button type="primary" text @click="$emit('preview-rule', row)">预览</el-button>
+              <el-button type="danger" text @click="$emit('delete-rule', row.id)">删除</el-button>
+            </div>
           </template>
         </el-table-column>
       </el-table>
@@ -175,7 +189,7 @@ const props = defineProps({
   }
 })
 
-defineEmits(['add', 'pick-dir', 'save-rule', 'delete-rule', 'toggle-dir-match'])
+defineEmits(['add', 'pick-dir', 'save-rule', 'delete-rule', 'toggle-dir-match', 'preview-rule'])
 
 const cloudValid = (row) => (props.cloudDirs || []).includes(normPath(row.source_dir))
 </script>

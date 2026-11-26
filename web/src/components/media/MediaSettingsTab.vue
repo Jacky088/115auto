@@ -1,5 +1,9 @@
 <template>
   <div>
+  <div v-if="dirty" class="cfg-dirty-bar mb12">
+    <el-tag type="danger" effect="plain" size="small">● 有未保存的更改</el-tag>
+    <el-button type="primary" size="small" :loading="savingCfg" @click="saveSettings">保存设置</el-button>
+  </div>
   <el-form
     :model="cfg"
     :label-position="isMobile ? 'top' : 'left'"
@@ -39,9 +43,31 @@
         <el-form-item label="重名冲突策略">
           <el-radio-group v-model="cfg.media_conflict_policy">
             <el-radio-button value="skip">安全跳过</el-radio-button>
-            <el-radio-button value="replace_if_better">高画质洗版（旧版移至归档目录）</el-radio-button>
+            <el-radio-button value="replace_if_better">高画质替换（旧版移至归档目录）</el-radio-button>
             <el-radio-button value="keep_both">保留双版本</el-radio-button>
           </el-radio-group>
+        </el-form-item>
+
+        <el-form-item v-if="cfg.media_conflict_policy === 'replace_if_better'" label="BDMV 蓝光原盘优先">
+          <el-switch v-model="cfg.media_bdmv_prefer_best" />
+          <span class="tip-inline" style="margin-left: 8px">
+            {{ cfg.media_bdmv_prefer_best ? '开启：默认以 BDMV 原盘为最优版本，自动替换普通视频且不被普通视频覆盖' : '关闭：不特殊优待原盘，统一按分辨率与文件体积对比替换' }}
+          </span>
+        </el-form-item>
+
+        <el-form-item v-if="cfg.media_conflict_policy === 'replace_if_better'" label="旧版归档目录" required>
+          <div style="display: flex; align-items: center; gap: 8px; width: 100%">
+            <el-button class="dir-btn" style="max-width: 420px" @click="archivePickerOpen = true">
+              <el-icon><FolderOpened /></el-icon>
+              <span>{{ cfg.wash_archive_dir || '点击选择 115 网盘目录' }}</span>
+            </el-button>
+            <el-button link type="primary" size="small" @click="$router.push('/settings?tab=wash')">
+              前往「洗版升级」设置 →
+            </el-button>
+          </div>
+          <div class="tip-block">
+            与「系统设置 → 洗版升级」共用同一归档目录，修改任意一处同步生效；替换时仅将旧版移入此处，不直接删除。
+          </div>
         </el-form-item>
 
         <el-form-item label="附件与目录净化">
@@ -53,7 +79,7 @@
         </el-form-item>
 
         <el-form-item v-if="cfg.media_skip_extras" label="电影最小正片体积">
-          <el-input-number v-model="cfg.media_extra_min_mb" :min="0" :max="2048" :step="10" />
+          <el-input-number v-model="cfg.media_extra_min_mb" :min="0" :max="2048" :step="10" :precision="0" />
           <span class="tip-inline">MB（小于该值的非 ISO 电影视作预告样片跳过；剧集不受此限）</span>
         </el-form-item>
       </div>
@@ -66,7 +92,7 @@
           <span class="step-badge">板块 2</span>
           <div>
             <div class="step-title">刮削精准度与本地元数据</div>
-            <div class="step-desc">TMDB 智能匹配打分门禁；影视 NFO 与高清封面完全本地隔离存放，绝对不上传污染 115 网盘。</div>
+            <div class="step-desc">TMDB 匹配打分门禁与本地元数据存储说明。</div>
           </div>
         </div>
       </div>
@@ -80,8 +106,13 @@
         </el-form-item>
 
         <el-form-item label="一二名领先分差门禁">
-          <el-input-number v-model="cfg.media_scrape_margin_threshold" :min="0" :max="40" />
+          <el-input-number v-model="cfg.media_scrape_margin_threshold" :min="0" :max="40" :precision="0" :value-on-clear="0" />
           <span class="tip-inline">分（第 1 候选得分比第 2 候选高出此分差时才自动确认，防止同名翻拍影视误伤）</span>
+        </el-form-item>
+
+        <el-form-item label="TG Bot 待确认快捷审批">
+          <el-switch v-model="cfg.media_scrape_tg_confirm" />
+          <span class="tip-inline" style="margin-left: 8px">开启后，低置信度待确认条目将附带候选按钮推送到 Telegram，点选即可确认并入队</span>
         </el-form-item>
 
         <el-form-item label="本地元数据与海报">
@@ -91,7 +122,7 @@
               <span class="mdb-title">自动生成标准 .nfo 元数据与海报/背景高清封面</span>
             </div>
             <div class="mdb-text">
-              刮削成功后，系统会在本地持久化生成符合 Kodi / Emby / Jellyfin 规范的影视 <code>.nfo</code> 详情文件与高清海报。元数据及图片文件<b>完全存储在本地，绝不上传或污染 115 网盘</b>。
+              刮削成功后将在本地生成符合 Kodi / Emby / Jellyfin 规范的 <code>.nfo</code> 与海报，<b>绝不上传至 115 网盘</b>。
             </div>
           </div>
         </el-form-item>
@@ -103,7 +134,7 @@
               <code class="path-code">data/media_meta/</code>
             </div>
             <div class="mdb-text">
-              固定存储于容器主数据卷目录 <code>data/media_meta/</code>，不允许自定义修改。此机制确保所有刮削元数据与海报能够随系统整机一键冷备份与数据迁移无损打包，彻底杜绝因自定义外部路径导致备份遗漏或数据脱落！
+              固定存于 <code>data/media_meta/</code>（不可修改），以便整机迁移包统一打包备份，避免路径遗漏。
             </div>
           </div>
         </el-form-item>
@@ -126,9 +157,9 @@
         <!-- 单次写操作随机延时 -->
         <el-form-item label="单次写操作随机延时">
           <div class="delay-inputs">
-            <el-input-number v-model="cfg.media_op_delay_min" :min="0.3" :max="20" :step="0.2" :precision="1" />
+            <el-input-number v-model="cfg.media_op_delay_min" :min="0.3" :max="20" :step="0.2" :precision="1" :value-on-clear="0.8" />
             <span class="mx8">至</span>
-            <el-input-number v-model="cfg.media_op_delay_max" :min="0.5" :max="40" :step="0.2" :precision="1" />
+            <el-input-number v-model="cfg.media_op_delay_max" :min="0.5" :max="40" :step="0.2" :precision="1" :value-on-clear="2.0" />
             <span class="tip-inline">秒（如遇 115 限流提示会自动退避拉长间隔）</span>
           </div>
         </el-form-item>
@@ -145,8 +176,19 @@
             </span>
           </div>
 
-          <div class="schedule-risk-note">
-            执行周期同时受防风控允许时段管辖，时段外触发将自动顺延，避免深夜高频写操作。
+          <div class="schedule-risk-note" style="display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap">
+            <span>
+              当前全局防风控：
+              <template v-if="cfg.risk_schedule_enabled">
+                <b>允许时段 {{ cfg.risk_schedule_start }} ~ {{ cfg.risk_schedule_end }}</b>
+                <template v-if="cfg.risk_jitter_min > 0">｜开工扰动 0~{{ cfg.risk_jitter_min }} 分钟</template>
+              </template>
+              <template v-else><b>全天候运行（未限制时段）</b></template>
+              ｜连存小憩：{{ cfg.risk_batch_rest_enabled ? '已开启' : '未开启' }}
+            </span>
+            <el-button link type="primary" size="small" @click="$router.push('/settings?tab=schedule')">
+              前往风控管理调整 →
+            </el-button>
           </div>
 
           <!-- 总开关 -->
@@ -185,22 +227,23 @@
                     : '当前为【每天固定时间点】：在每天设定的指定时间点准时排队扫描并整理'"
                   placement="top"
                 >
-                  <div class="capsule-toggle">
-                    <div
-                      class="capsule-seg"
-                      :class="{ 'is-active': cfg.media_organize_schedule_type === 'interval' }"
+                  <div class="seg-group" role="group" aria-label="调度方式">
+                    <button
+                      type="button"
+                      class="seg-btn"
+                      :class="{ active: cfg.media_organize_schedule_type === 'interval' }"
                       @click="changeScheduleType('interval')"
                     >
                       固定间隔轮询
-                    </div>
-                    <div class="capsule-divider"></div>
-                    <div
-                      class="capsule-seg"
-                      :class="{ 'is-active': cfg.media_organize_schedule_type === 'fixed_times' }"
+                    </button>
+                    <button
+                      type="button"
+                      class="seg-btn"
+                      :class="{ active: cfg.media_organize_schedule_type === 'fixed_times' }"
                       @click="changeScheduleType('fixed_times')"
                     >
                       每天固定时间点
-                    </div>
+                    </button>
                   </div>
                 </el-tooltip>
               </div>
@@ -231,17 +274,20 @@
                     v-for="t in (cfg.media_organize_fixed_times || [])"
                     :key="t"
                     closable
-                    type="primary"
+                    :type="isOutsideRiskWindow(t) ? 'warning' : 'primary'"
                     effect="light"
                     class="fixed-time-tag"
                     @close="removeFixedTime(t)"
                   >
-                    {{ t }}
+                    {{ t }}{{ isOutsideRiskWindow(t) ? '（时段外顺延）' : '' }}
                   </el-tag>
                   <span v-if="!(cfg.media_organize_fixed_times || []).length" class="empty-tag-tip">
                     暂未配置时间点，请在下方选择并添加
                   </span>
                 </div>
+              </div>
+              <div v-if="hasOutsideRiskTimes" class="tip-box is-warn mb12">
+                ⚠️ 标为橙色的时间点位于系统「风控管理」允许时段（{{ cfg.risk_schedule_start }} ~ {{ cfg.risk_schedule_end }}）之外，到点后将自动等待至允许时段开启时顺延执行。
               </div>
 
               <div class="config-form-item">
@@ -289,27 +335,43 @@
 
     <!-- 保存控制台操作栏 -->
     <div class="cfg-actions-card">
-      <el-button type="primary" size="large" :loading="savingCfg" @click="saveSettings">
-        💾 保存策略与设置
+      <span v-if="dirty" class="tip-text" style="margin-right: 10px">修改需点击「保存设置」后生效</span>
+      <el-button type="primary" size="large" :disabled="!dirty" :loading="savingCfg" @click="saveSettings">
+        保存设置
       </el-button>
     </div>
   </el-form>
+
+  <Teleport to="body">
+    <div v-if="dirty" class="media-save-dock">
+      <span class="dock-hint">有未保存的更改</span>
+      <el-button type="primary" size="small" :loading="savingCfg" @click="saveSettings">保存设置</el-button>
+    </div>
+  </Teleport>
+  <DirPicker v-model="archivePickerOpen" title="选择旧版归档目录" @pick="onArchivePicked" />
   </div>
 </template>
 
 <script setup>
-import { inject, ref } from 'vue'
-import { Timer, Lock, Calendar, Plus } from '@element-plus/icons-vue'
+import { computed, inject, nextTick, ref, watch } from 'vue'
+import { Timer, Lock, Calendar, Plus, FolderOpened } from '@element-plus/icons-vue'
 import { api, errMsg, toast } from '../../api'
+import { useUnsavedGuard } from '../../composables/unsavedGuard'
+import DirPicker from '../DirPicker.vue'
 
 const { isMobile } = inject('mediaCtx')
 
 const savingCfg = ref(false)
+const dirty = ref(false)
+let suppressWatch = false
+let baselineSnapshot = ''
 const cfg = ref({
   media_append_tmdb_tag: true,
   media_organize_template_movie: '{title} ({year}){tmdb_tag}/{title} ({year}){part_tag}{res_tag}{ext}',
   media_organize_template_tv: '{title} ({year}){tmdb_tag}/Season {season_00}/{title} - S{season_00}E{episode_00}{part_tag}{ext}',
   media_conflict_policy: 'skip',
+  media_bdmv_prefer_best: false,
+  wash_archive_dir: '',
   media_move_subtitles: true,
   media_skip_extras: true,
   media_extra_min_mb: 50,
@@ -318,6 +380,7 @@ const cfg = ref({
   media_scrape_margin_threshold: 12,
   media_scrape_write_local_nfo: true,
   media_scrape_download_poster: true,
+  media_scrape_tg_confirm: false,
   media_local_meta_dir: '',
   media_op_delay_min: 0.8,
   media_op_delay_max: 2.0,
@@ -326,12 +389,78 @@ const cfg = ref({
   media_organize_schedule_type: 'interval',
   media_organize_schedule_hours: 12,
   media_organize_fixed_times: ['06:00', '12:00', '18:00'],
+  risk_schedule_enabled: false,
+  risk_schedule_start: '22:00',
+  risk_schedule_end: '08:00',
+  risk_jitter_min: 0,
+  risk_batch_rest_enabled: true,
 })
 
 const newFixedTime = ref('')
 const nextRuns = ref([])
+const archivePickerOpen = ref(false)
 
+function isOutsideRiskWindow(hm) {
+  if (!cfg.value.risk_schedule_enabled) return false
+  const s = String(cfg.value.risk_schedule_start || '22:00').padStart(5, '0')
+  const e = String(cfg.value.risk_schedule_end || '08:00').padStart(5, '0')
+  const cur = String(hm || '').padStart(5, '0')
+  if (!s || !e || s === e) return false
+  return s <= e ? (cur < s || cur > e) : (cur < s && cur > e)
+}
+const hasOutsideRiskTimes = computed(() =>
+  (cfg.value.media_organize_fixed_times || []).some(isOutsideRiskWindow),
+)
+
+function onArchivePicked(path) {
+  const p = String(path || '').trim()
+  if (!p) return
+  if (p === '/') {
+    toast.warning('归档目录不能是网盘根目录，请选择或新建一个子目录')
+    return
+  }
+  cfg.value.wash_archive_dir = p
+}
+
+const SCHEDULE_KEYS = [
+  'media_organize_schedule_enabled',
+  'media_scrape_schedule_enabled',
+  'media_organize_schedule_type',
+  'media_organize_schedule_hours',
+  'media_organize_fixed_times',
+  'risk_schedule_enabled',
+  'risk_schedule_start',
+  'risk_schedule_end',
+  'risk_jitter_min',
+  'risk_batch_rest_enabled',
+]
+
+function takePolicySnapshot() {
+  const snap = {}
+  for (const [k, v] of Object.entries(cfg.value)) {
+    if (!SCHEDULE_KEYS.includes(k)) snap[k] = v
+  }
+  return JSON.stringify(snap)
+}
+
+function lockBaseline() {
+  baselineSnapshot = takePolicySnapshot()
+  dirty.value = false
+}
+
+watch(cfg, () => {
+  if (suppressWatch || !baselineSnapshot) return
+  dirty.value = takePolicySnapshot() !== baselineSnapshot
+}, { deep: true })
+
+useUnsavedGuard(dirty, () => {
+  dirty.value = false
+})
+
+const savingSchedule = ref(false)
 async function saveScheduleQuick() {
+  if (savingSchedule.value) return
+  savingSchedule.value = true
   try {
     const { data } = await api.put('/api/media/settings', {
       media_organize_schedule_enabled: cfg.value.media_organize_schedule_enabled,
@@ -345,6 +474,9 @@ async function saveScheduleQuick() {
     }
   } catch (e) {
     toast.error(errMsg(e))
+    await loadSettings()
+  } finally {
+    savingSchedule.value = false
   }
 }
 
@@ -389,16 +521,31 @@ function removeFixedTime(t) {
 }
 
 async function loadSettings() {
+  suppressWatch = true
   try {
     const { data } = await api.get('/api/media/settings')
     Object.assign(cfg.value, data)
     if (data && data.next_runs) {
       nextRuns.value = data.next_runs
     }
-  } catch {}
+    await nextTick()
+    lockBaseline()
+  } catch (e) {
+    toast.error(errMsg(e))
+  } finally {
+    suppressWatch = false
+  }
 }
 
 async function saveSettings() {
+  if (cfg.value.media_conflict_policy === 'replace_if_better' && !String(cfg.value.wash_archive_dir || '').trim()) {
+    toast.warning('选择「高画质替换（旧版移至归档目录）」必须先选择旧版归档目录')
+    return
+  }
+  if (Number(cfg.value.media_op_delay_min) > Number(cfg.value.media_op_delay_max)) {
+    toast.warning('单次写操作随机延时的最小值不能大于最大值')
+    return
+  }
   savingCfg.value = true
   try {
     cfg.value.media_scrape_write_local_nfo = true
@@ -408,6 +555,10 @@ async function saveSettings() {
     if (data && data.next_runs) {
       nextRuns.value = data.next_runs
     }
+    suppressWatch = true
+    await nextTick()
+    lockBaseline()
+    suppressWatch = false
     toast.success('策略与设置已保存')
   } catch (e) { toast.error(errMsg(e)) }
   finally { savingCfg.value = false }

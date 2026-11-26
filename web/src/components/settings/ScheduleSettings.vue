@@ -5,7 +5,7 @@
       <el-form-item id="setting-schedule-item" label="定时计划">
         <div class="switch-row">
           <el-switch v-model="f.schedule_enabled" />
-          <span class="tip">开启后仅在允许时段内执行转存、云下载与定时文件整理（任务排队保留，时段外自动等待，规避深夜异常特征）</span>
+          <span class="tip">开启后仅在允许时段内执行转存、云下载、自动归档及整理刮削（时段外自动等待，规避深夜异常特征）</span>
         </div>
         <div v-if="f.schedule_enabled" class="range-row" style="margin-top: 8px">
           <el-time-select
@@ -55,7 +55,7 @@
       <el-form-item label="拟人化连存小憩">
         <div class="switch-row">
           <el-switch v-model="f.batch_rest_enabled" />
-          <span class="tip">连续完成多笔转存后自动插入小憩，模拟真人离开电脑、喝水或浏览，打破固定匀速特征</span>
+          <span class="tip">连续完成多笔转存或整理刮削写入后自动插入小憩，打破固定匀速特征</span>
         </div>
         <template v-if="f.batch_rest_enabled">
           <div class="range-row" style="margin-top: 8px">
@@ -105,7 +105,7 @@
             <el-option label="每 15 分钟" :value="15" />
             <el-option label="每 30 分钟" :value="30" />
           </el-select>
-          <span class="tip range-tip">空闲时探测 115 Cookie 存活状态的间隔；适度放宽可削减 80% 的无效背景心跳调用</span>
+          <span class="tip range-tip">空闲时检测 115 Cookie 有效性的间隔，适当调大可减少后台请求频率</span>
         </div>
       </el-form-item>
 

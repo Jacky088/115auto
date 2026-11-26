@@ -113,6 +113,7 @@ async def _finalize_scraped_task(
     last_placement: dict = {"status": "done", "dest_path": "", "dest_name": "", "reason": ""}
     first_ok_placement: dict | None = None
     placed_paths: list[str] = []
+    replaced_file_ids: list[str] = []
     subtitles_moved = 0
     ok_cnt = 0
     ep_fail_cnt = 0
@@ -173,6 +174,8 @@ async def _finalize_scraped_task(
         last_placement = placement
         if first_ok_placement is None:
             first_ok_placement = placement
+        if placement.get("replaced_file_id"):
+            replaced_file_ids.append(str(placement["replaced_file_id"]))
         if placement.get("dest_path"):
             dp = str(placement["dest_path"]).rstrip("/")
             if dp and dp not in placed_paths:
@@ -224,6 +227,17 @@ async def _finalize_scraped_task(
         has_poster = bool(meta_res.get("poster_local")) or any(
             str(p).lower().endswith((".jpg", ".jpeg", ".png")) for p in saved_meta_files
         )
+
+    if replaced_file_ids:
+        from . import meta_gc
+        new_ep_stems = {stem for _, _, stem in ep_items} if ep_items else None
+        for rfid in replaced_file_ids:
+            await asyncio.to_thread(
+                meta_gc.cleanup_replaced_media_task,
+                rfid,
+                local_dir_str,
+                new_ep_stems,
+            )
 
     now = time.time()
     final_status = "skipped" if conflict_skipped_all else (
@@ -427,22 +441,25 @@ async def execute_scrape_queue(mode: str = "scan_and_run", rule_ids: list[int] |
                         if show_group_key and show_group_key in show_confirm_tid:
                             grp_tid = show_confirm_tid[show_group_key]
                             grp_row = await asyncio.to_thread(
-                                db.query, "SELECT parsed_json FROM media_tasks WHERE id=?", (grp_tid,), one=True
+                                db.query,
+                                "SELECT parsed_json FROM media_tasks WHERE id=? AND status='need_confirm'",
+                                (grp_tid,), one=True,
                             )
                             if grp_row:
                                 grp_p = json.loads(grp_row["parsed_json"] or "{}")
                                 grp_items = list(grp_p.get("_grouped_items") or [])
                                 grp_items.append(item_snap)
                                 grp_p["_grouped_items"] = grp_items
-                                await asyncio.to_thread(
+                                changed = await asyncio.to_thread(
                                     db.execute,
-                                    "UPDATE media_tasks SET parsed_json=?, updated_at=? WHERE id=?",
+                                    "UPDATE media_tasks SET parsed_json=?, updated_at=? WHERE id=? AND status='need_confirm'",
                                     (json.dumps(grp_p, ensure_ascii=False), time.time(), grp_tid),
                                 )
-                                pending_file_ids.add(str(it["file_id"]))
-                                if grp_tid in pending_map:
-                                    pending_map[grp_tid]["ep_count"] = len(grp_items)
-                                continue
+                                if changed:
+                                    pending_file_ids.add(str(it["file_id"]))
+                                    if grp_tid in pending_map:
+                                        pending_map[grp_tid]["ep_count"] = len(grp_items)
+                                    continue
 
                         parsed_snap = pm.to_dict()
                         parsed_snap["_parent_cid"] = it["parent_cid"]
@@ -581,9 +598,31 @@ async def execute_scrape_queue(mode: str = "scan_and_run", rule_ids: list[int] |
                                 tid,
                             ),
                         )
+                        if compact and await asyncio.to_thread(db.get_setting, "media_scrape_tg_confirm", False):
+                            from .. import jobs as _jobs_pkg
+                            rows_kb = [
+                                [{"text": f"{i + 1}. {c.get('title') or ''} ({c.get('year') or '-'})"[:48],
+                                  "callback_data": f"m:pick:{tid}:{i}"}]
+                                for i, c in enumerate(compact[:3])
+                            ]
+                            rows_kb.append([{"text": "⏭ 跳过忽略", "callback_data": f"m:skip:{tid}"}])
+                            _jobs_pkg.enqueue_tg_message(
+                                f"🎬 媒体刮削待确认 #{tid}\n"
+                                f"📄 文件：{it['orig_name']}\n"
+                                f"🔍 解析：{pm.title or it['orig_name']}" + (f" ({pm.year})" if pm.year else "") + "\n\n"
+                                "请点击下方按钮快速确认匹配（确认后自动提交刮削）：",
+                                reply_markup={"inline_keyboard": rows_kb},
+                            )
 
             # 消费全部状态为 queued 的待执行刮削任务（含人工提交队列与重启恢复队列）
             if not no_rules_exit:
+                q_cnt_row = await asyncio.to_thread(
+                    db.query,
+                    "SELECT count(*) c FROM media_tasks WHERE task_kind='scrape' AND status='queued'",
+                    one=True,
+                )
+                total_queued = int(q_cnt_row["c"]) if q_cnt_row else 0
+                commit_idx = 0
                 while True:
                     _check_not_cancelled()
                     _mw()._COMMIT_WAKEUP_REQUESTED = False
@@ -594,12 +633,14 @@ async def execute_scrape_queue(mode: str = "scan_and_run", rule_ids: list[int] |
                     )
                     if not q_row:
                         break
+                    commit_idx += 1
                     qr = dict(q_row)
                     protect_cids.add(str(qr.get("source_cid") or ""))
                     await asyncio.to_thread(db.execute, "UPDATE media_tasks SET status='running', updated_at=? WHERE id=?", (time.time(), qr["id"]))
                     transfer_gate.set_media_progress({
                         "mode": "scrape", "phase": "running",
-                        "current": auto_cnt + 1, "total": auto_cnt + 1, "label": f"执行已确认: {qr.get('selected_title') or qr['orig_name']}",
+                        "current": commit_idx, "total": max(total_queued, commit_idx),
+                        "label": f"执行已确认: {qr.get('selected_title') or qr['orig_name']}",
                     })
                     try:
                         sel_id = int(qr.get("selected_tmdb_id") or 0)
@@ -648,7 +689,25 @@ async def execute_scrape_queue(mode: str = "scan_and_run", rule_ids: list[int] |
                     if removed_dirs:
                         logstream.info("scrape", f"🧹 已清理 {removed_dirs} 个已搬空的旧目录")
 
-                await asyncio.to_thread(db.set_setting, "media_scrape_last_run", time.time())
+                if mode == "scan_and_run" and rules:
+                    inplace_rids = {
+                        int(r["id"])
+                        for r in rules
+                        if (str(r.get("target_dir") or r["source_dir"]).rstrip("/") == str(r["source_dir"]).rstrip("/"))
+                    }
+                    if inplace_rids:
+                        from . import meta_gc
+                        live_ids = {str(it["file_id"]) for it in items if it.get("file_id")}
+                        gc_res = await asyncio.to_thread(meta_gc.gc_orphan_local_metadata, live_ids, inplace_rids)
+                        if gc_res["tasks_marked"] > 0 or gc_res["dirs_removed"] > 0:
+                            logstream.info(
+                                "scrape",
+                                f"🧹 已对账清理 {gc_res['tasks_marked']} 条已删改旧记录"
+                                f"（移除 {gc_res['nfo_removed']} 份旧 NFO、{gc_res['dirs_removed']} 个旧元数据目录）",
+                            )
+
+                if mode != "commit_only":
+                    await asyncio.to_thread(db.set_setting, "media_scrape_last_run", time.time())
                 logstream.info("scrape", f"✅ 媒体刮削批次结束：完成 {auto_cnt}，待确认 {confirm_cnt}，失败 {fail_cnt}")
                 result_payload = {
                     "ok": True,

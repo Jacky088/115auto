@@ -85,20 +85,23 @@ def test_doctor_never_leaks_secrets(monkeypatch):
 
 
 def _reset():
+    from backend.core import subscribe as submod
     db.execute("DELETE FROM transfers")
     db.execute("DELETE FROM subscriptions")
     db.execute("DELETE FROM messages")
+    submod.invalidate_cache()
 
 
 def test_quality_best_pick_per_episode():
     """同一订阅同一集：同画质跳过、更高画质替代排队中的低画质任务。"""
-    from backend.core import pipeline
+    from backend.core import pipeline, subscribe as submod
 
     _reset()
     db.set_setting("quality_policy_enabled", True)
     db.set_setting("quality_min_resolution", "")
     db.execute("INSERT INTO subscriptions(keyword,enabled,min_quality,created_at) VALUES(?,?,?,?)",
                ("测试质量剧", 1, "", 0))
+    submod.invalidate_cache()
 
     r1 = pipeline.process_message("qtest", 900001,
                                   "测试质量剧 S01E01 1080p WEB-DL https://115.com/s/qq1080")
@@ -123,13 +126,14 @@ def test_quality_best_pick_per_episode():
 
 def test_min_quality_subscription_override():
     """订阅级最低画质：明确低于门槛才拦截，识别不出画质一律放行。"""
-    from backend.core import pipeline
+    from backend.core import pipeline, subscribe as submod
 
     _reset()
     db.set_setting("quality_policy_enabled", True)
     db.set_setting("quality_min_resolution", "")
     db.execute("INSERT INTO subscriptions(keyword,enabled,min_quality,created_at) VALUES(?,?,?,?)",
                ("测试画质门槛", 1, "1080p", 0))
+    submod.invalidate_cache()
 
     r1 = pipeline.process_message("qtest", 900011,
                                   "测试画质门槛 S01E02 720p https://115.com/s/q2min1")

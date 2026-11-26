@@ -7,12 +7,13 @@ import tempfile
 import time
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 
-from ... import database as db
+from ... import auth, database as db
 from ...core import migration_bundle, webdav
 from ...core.executors import run_ext_thread
 from ..deps import require_user
+from ._common import _client_ip, _set_auth_cookie, _set_poster_cookie, _web_username
 
 router = APIRouter(prefix="/backup/webdav")
 
@@ -39,7 +40,12 @@ def save_config(body: dict, _=Depends(require_user)):
     username = str(body.get("username") or "").strip()
     password = body.get("password")
     root_dir = str(body.get("root_dir") or "/115AutoSave_Backup").strip()
-    keep_count = int(body.get("keep_count") or 10)
+    if "\x00" in root_dir or ".." in root_dir.split("/"):
+        raise HTTPException(400, "远端备份目录包含非法路径段")
+    try:
+        keep_count = int(body.get("keep_count") or 10)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "保留份数必须是整数")
     auto_backup = bool(body.get("auto_backup_enabled", False))
 
     if not url or not username:
@@ -91,10 +97,14 @@ async def test_connection(body: dict, _=Depends(require_user)):
         root_dir=root_dir,
     )
     res = await run_ext_thread(client.test_connection)
+    now_ts = time.time()
+    res["tested_at"] = now_ts
     if res.get("ok"):
         await asyncio.to_thread(db.set_setting, "webdav_last_test_ok", True)
         await asyncio.to_thread(db.set_setting, "webdav_tested_url", url.rstrip("/"))
         await asyncio.to_thread(db.set_setting, "webdav_tested_user", username)
+        await asyncio.to_thread(db.set_setting, "webdav_last_test_at", now_ts)
+        await asyncio.to_thread(db.set_setting, "webdav_last_test_ms", res.get("elapsed_ms") or 0)
     else:
         await asyncio.to_thread(db.set_setting, "webdav_last_test_ok", False)
         await asyncio.to_thread(db.set_setting, "webdav_tested_url", "")
@@ -103,7 +113,7 @@ async def test_connection(body: dict, _=Depends(require_user)):
 
 
 @router.post("/export_now")
-async def export_to_webdav(body: dict | None = None, _=Depends(require_user)):
+async def export_to_webdav(request: Request, body: dict | None = None, _=Depends(require_user)):
     """立即生成一份整机迁移包并直接流式上传至已配置的 WebDAV。"""
     client = webdav.create_configured_client()
     if not client:
@@ -117,6 +127,16 @@ async def export_to_webdav(body: dict | None = None, _=Depends(require_user)):
     meta_mode = str(payload.get("meta_mode") or "nfo")
     slim_db = bool(payload.get("slim_db", True))
     include_credentials = bool(payload.get("include_credentials", False))
+
+    if include_credentials:
+        ip = _client_ip(request)
+        if auth.login_throttled(ip):
+            raise HTTPException(429, "密码错误次数过多，请 1 分钟后再试", headers={"Retry-After": "60"})
+        pwd = str(payload.get("password") or "")
+        stored_hash = str(await asyncio.to_thread(db.get_setting, "web_password_hash", "") or "")
+        if not pwd or not auth.verify_password(pwd, stored_hash):
+            auth.record_login_fail(ip)
+            raise HTTPException(400, "导出含凭据与会话的迁移包前，必须输入正确的当前登录密码")
 
     def _do_build_and_upload():
         work_dir = None
@@ -189,6 +209,8 @@ async def restore_preview_from_webdav(
 
 @router.post("/restore_apply")
 async def restore_apply_from_webdav(
+    request: Request,
+    response: Response,
     filename: str = Query(..., description="远端备份文件名"),
     restore_credentials: bool = Query(False),
     restore_meta: bool = Query(True),
@@ -210,7 +232,13 @@ async def restore_apply_from_webdav(
             restore_credentials=restore_credentials,
             restore_meta=restore_meta,
         )
-        return res
+        out = {"ok": True, **res}
+        if res.get("restored_credentials"):
+            new_token = auth.make_token(_web_username())
+            _set_poster_cookie(response, request, new_token)
+            _set_auth_cookie(response, request, new_token)
+            out["token"] = new_token
+        return out
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
 

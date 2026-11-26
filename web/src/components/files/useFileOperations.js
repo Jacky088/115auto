@@ -108,6 +108,7 @@ export function useFileOperations({
       message: '删除后可在 115 回收站中找回。',
       confirmText: '删除',
       type: 'danger',
+      danger: true,
     })
     if (!ok) return
 

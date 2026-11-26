@@ -5,7 +5,7 @@
     <template #header>
       <div class="organize-header-toolbar">
         <div class="header-left">
-          <span class="organize-main-title">定时文件整理（自动归档与分流）</span>
+          <span class="organize-main-title">定时自动归档分流</span>
           <el-tooltip
             :disabled="systemRunning"
             content="系统未运行，请先点击顶栏「开始运行」"
@@ -27,13 +27,13 @@
         <div class="header-actions">
           <el-tooltip
             :disabled="systemRunning && computedAutoMoveEnabled && !isMediaMutexActive"
-            :content="!systemRunning ? '系统处于停止状态，请先在顶栏点击「开始运行」启动系统' : (isMediaMutexActive ? `当前正在执行「${activeMode === 'organize' ? '目录整理' : '媒体刮削'}」，请稍后再试` : '定时文件整理功能当前为关闭状态，请先开启左侧总开关')"
+            :content="!systemRunning ? '系统处于停止状态，请先在顶栏点击「开始运行」' : (isMediaMutexActive ? `当前正在执行「${activeMode === 'organize' ? '目录整理' : '媒体刮削'}」，请稍后再试` : '定时自动归档分流功能当前为关闭状态，请先开启左侧总开关')"
             placement="top"
           >
             <span>
               <el-button
                 type="primary"
-                :disabled="!systemRunning || !computedAutoMoveEnabled || isMediaMutexActive"
+                :disabled="!systemRunning || !computedAutoMoveEnabled || isMediaMutexActive || gateState !== 'idle'"
                 :loading="runningMove"
                 @click="runAutoMoveNow"
               >
@@ -60,9 +60,9 @@
     <div class="organize-notice-banner">
       <div class="notice-icon"><el-icon><InfoFilled /></el-icon></div>
       <div class="notice-body">
-        <div class="notice-title">自动整理规则说明与风控隔离保护</div>
+        <div class="notice-title">自动归档规则说明与风控保护</div>
         <div class="notice-desc">
-          系统按规则排队执行，<strong>只移动正片文件，文件夹本身绝不移动</strong>。仅当文件名满足「<strong>包含汉字</strong>」且「<strong>匹配剧集名称</strong>」时才会移动（如：<code>折月亮.S01E12.mkv</code> 移动，<code>1.mp4</code> 绝不移动）。执行期间系统将<strong>自动暂停转存工作器</strong>，完成后自动恢复，彻底杜绝 115 并发风控与目录并发写入冲突。
+          按规则顺序<strong>仅移动正片视频（不移动文件夹）</strong>，默认需文件名含<strong>汉字</strong>且<strong>匹配剧名</strong>（如 <code>折月亮.S01E12.mkv</code> 移动，<code>1.mp4</code> 不移动）。执行期间会<strong>自动暂停转存</strong>以防风控，完成后自动恢复。
         </div>
       </div>
     </div>
@@ -283,20 +283,20 @@
     <div v-if="gateState === 'draining'" class="drain-banner">
       <el-icon class="is-loading" style="color: #e6a23c; font-size: var(--fs-title); flex-shrink: 0"><Loading /></el-icon>
       <span>
-        <strong>转存与云下载队列排空中（正在等待所有队列任务到达终点）：</strong>
-        当前剩余 <strong>{{ drainStatus.unfinished }}</strong> 个任务处理中
+        <strong>正在等待当前转存与云下载队列完成：</strong>
+        剩余 <strong>{{ drainStatus.unfinished }}</strong> 个任务
         <template v-if="drainStatus.running">（{{ drainStatus.running }} 个转存中）</template>
         <template v-if="drainStatus.submitted">（{{ drainStatus.submitted }} 个云下载中）</template>
         <template v-if="drainStatus.retrying">（{{ drainStatus.retrying }} 个等待重试）</template>
         <template v-if="drainStatus.queued">（{{ drainStatus.queued }} 个排队中）</template>
-        ，系统需等待队列全部到达终态（成功、云下载落盘、跳过或重试结束）后，自动独占开启移动归档！
+        ，全部结束后将自动开始归档。
       </span>
     </div>
 
     <div v-else-if="gateState === 'organizing'" class="organizing-banner">
       <el-icon class="is-loading" style="color: #409eff; font-size: var(--fs-title); flex-shrink: 0"><Loading /></el-icon>
       <span>
-        <strong>队列已全部终态，正在独占执行文件整理移动中：</strong>转存工作器已挂起（零并发保护 115 账号安全），正在扫描各源目录并智能归类...
+        <strong>正在执行自动归档分流：</strong>转存已暂停（防并发风控），正在扫描各源目录并归类...
       </span>
     </div>
 
@@ -310,6 +310,7 @@
       @save-rule="saveMoveRule"
       @delete-rule="deleteMoveRule"
       @toggle-dir-match="toggleDirMatch"
+      @preview-rule="previewSingleRule"
     />
   </el-card>
 
@@ -330,7 +331,7 @@
 
 <script setup>
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import { api, errMsg, saveOk } from '../../api'
 import { usePolling } from '../../composables/usePolling'
 import { confirmAction } from '../../composables/confirmDialog'
@@ -506,23 +507,23 @@ const onTablePickDir = ({ row, kind }) => {
   pickerVisible.value = true
 }
 
-const onPickDir = (val) => {
+const onPickDir = async (val) => {
   if (pickerKind.value === 'move_source') {
     if (pickerRow) {
       const oldSource = pickerRow.source_dir
       pickerRow.source_dir = val
       if (pickerRow.dir_match && !(cloudDirs.value || []).includes(normPath(val))) {
-        ElMessageBox.confirm(
-          '新源目录不是云下载目录，云下载模式将自动关闭，' +
-          '回落为按文件名匹配的基本规则并保持启用。',
-          '修改源目录？',
-          { type: 'warning', confirmButtonText: '修改并关闭', cancelButtonText: '取消' }
-        ).then(() => {
+        const ok = await confirmAction({
+          title: '修改源目录？',
+          message: '新源目录不是云下载目录，云下载模式将自动关闭，回落为按文件名匹配的基本规则并保持启用。',
+          confirmText: '修改并关闭',
+        })
+        if (ok) {
           pickerRow.dir_match = 0
           saveMoveRule(pickerRow)
-        }).catch(() => {
+        } else {
           pickerRow.source_dir = oldSource
-        })
+        }
       } else {
         saveMoveRule(pickerRow)
       }
@@ -615,13 +616,13 @@ const toggleDirMatch = async (row) => {
     await saveMoveRule(row)
     return
   }
-  try {
-    await ElMessageBox.confirm(
-      '本规则将按任务子目录名匹配（子目录内文件可为纯英文名），不再按文件名匹配；' +
+  const ok = await confirmAction({
+    title: '开启云下载模式？',
+    message: '本规则将按任务子目录名匹配（子目录内文件可为纯英文名），不再按文件名匹配；' +
       '源目录根部散落的文件不参与整理；目录内广告/微小体积文件自动过滤。',
-      '开启云下载模式？',
-      { type: 'warning', confirmButtonText: '开启', cancelButtonText: '取消' })
-  } catch {
+    confirmText: '开启',
+  })
+  if (!ok) {
     row.dir_match = 0
     return
   }
@@ -648,6 +649,16 @@ const openAddMoveRule = () => {
   dialogVisible.value = true
 }
 
+const previewSingleRule = async (row) => {
+  if (runningMove.value || !row?.id) return
+  runningMove.value = true
+  try {
+    await previewDlgRef.value?.runPreview([row.id])
+  } finally {
+    runningMove.value = false
+  }
+}
+
 const runAutoMoveNow = async () => {
   if (runningMove.value) return
   if (!moveSettings.value.auto_move_enabled) {
@@ -663,6 +674,7 @@ const runAutoMoveNow = async () => {
 }
 
 const onPreviewStarted = ({ gate_state, drain_status }) => {
+  runningMove.value = false
   gateState.value = gate_state || 'draining'
   if (drain_status) drainStatus.value = drain_status
   startAutoMovePolling()

@@ -1,5 +1,6 @@
 """数据快照备份恢复与整机迁移 ZIP 包流式导出/导入路由。"""
 import asyncio
+from pathlib import Path
 import time
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
@@ -54,7 +55,7 @@ async def backup_restore(request: Request, _=Depends(require_user)):
     """
     data = await _read_backup_request(request)
     try:
-        stats = db.restore_payload(data)
+        stats = await asyncio.to_thread(db.restore_payload, data)
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
     logstream.info("system", f"已从备份恢复数据：{_format_backup_stats_text(stats)}")
@@ -141,12 +142,17 @@ async def backup_local_preview(
         return {"ok": True, "filename": p.name, "summary": db.backup_counts(data)}
     except ValueError as e:
         if p.name.lower().endswith(".zip"):
+            import shutil
+            import tempfile
+            from ...core import migration_bundle
+            stage_dir = Path(tempfile.mkdtemp(dir=migration_bundle.tmp_backup_root(), prefix="loc_prev_"))
             try:
-                from ...core import migration_bundle
-                info = await asyncio.to_thread(migration_bundle.inspect_migration_bundle, p)
+                info = await asyncio.to_thread(migration_bundle.inspect_migration_bundle, p, stage_dir)
                 return {"ok": True, "filename": p.name, "summary": info.get("counts", {})}
-            except Exception:
-                pass
+            except ValueError as e2:
+                raise HTTPException(400, f"解析迁移包失败：{e2}") from e2
+            finally:
+                shutil.rmtree(stage_dir, ignore_errors=True)
         raise HTTPException(400, f"解析备份文件失败：{e}") from e
 
 
@@ -157,7 +163,7 @@ async def backup_local_restore(
 ):
     """从本地备份文件恢复业务数据（整体覆盖）。"""
     try:
-        db.ensure_restore_idle_guard()
+        await asyncio.to_thread(db.ensure_restore_idle_guard)
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
 
@@ -165,7 +171,7 @@ async def backup_local_restore(
     raw = await asyncio.to_thread(p.read_bytes)
     try:
         data = db.parse_backup_bytes(raw, filename=p.name)
-        stats = db.restore_payload(data)
+        stats = await asyncio.to_thread(db.restore_payload, data)
     except ValueError as e:
         if p.name.lower().endswith(".zip"):
             from ...core import migration_bundle

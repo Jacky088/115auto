@@ -118,7 +118,7 @@ def _norm_setting(k: str, v):
         if s and not re.match(r"^(https?|socks5h?|socks4)://[^\s]+$", s, re.IGNORECASE):
             raise HTTPException(400, "代理地址需以 http(s):// 或 socks5:// 开头")
         return s
-    if k in ("bark_url", "ntfy_url"):  # 推送地址必须是 http(s)：拦截手滑填错的协议（如 file:）
+    if k in ("bark_url", "ntfy_url", "webhook_url"):  # 推送地址必须是 http(s)：拦截手滑填错的协议（如 file:）
         s = str(v or "").strip()
         if s and not re.match(r"^https?://[^\s]+$", s, re.IGNORECASE):
             raise HTTPException(400, f"{k} 需为 http(s):// 开头的完整 URL")
@@ -205,6 +205,7 @@ def get_settings(_=Depends(require_user)):
             "space_guard_enabled",
             "tmdb_api_key",
             "bark_url", "pushplus_token", "pushplus_topic", "ntfy_url", "ntfy_token",
+            "webhook_url", "webhook_preset", "webhook_template",
             "digest_enabled", "digest_time",
             "auto_backup_enabled", "auto_backup_days", "auto_backup_time",
             "auto_backup_channels",
@@ -233,11 +234,12 @@ def get_settings(_=Depends(require_user)):
                 "bundle_export_dest": "local", "bundle_restore_source": "local",
                 "bundle_restore_credentials": False, "bundle_restore_meta": True,
                 "auto_move_enabled": False, "auto_move_dedup_by_episode": True,
-                "running_timeout_min": 60}
+                "running_timeout_min": 60,
+                "webhook_preset": "wecom", "webhook_template": ""}
     # 密钥类键不回传明文（token/api_hash/推送 key/代理凭据等，口径与备份脱敏一致）：
     # 已配置 → 回哨兵值 SECRET_MASK（前端据此显示「已配置」），未配置 → 空串
     _SECRET_KEYS = {"notify_token", "tg_api_hash", "tg_phone", "proxy",
-                    "bark_url", "pushplus_token", "ntfy_token", "api_token", "tmdb_api_key"}
+                    "bark_url", "pushplus_token", "ntfy_token", "webhook_url", "api_token", "tmdb_api_key"}
     out = {k: db.get_setting(k, defaults.get(k)) for k in keys}
     for k in _SECRET_KEYS:
         out[k] = SECRET_MASK if str(out.get(k) or "").strip() else ""
@@ -263,6 +265,7 @@ def put_settings(body: dict, _=Depends(require_user)):
             "space_guard_enabled",
                "tmdb_api_key",
                "bark_url", "pushplus_token", "pushplus_topic", "ntfy_url", "ntfy_token",
+               "webhook_url", "webhook_preset", "webhook_template",
                "digest_enabled", "digest_time",
                "auto_backup_enabled", "auto_backup_days", "auto_backup_time",
                "auto_backup_channels",
@@ -275,7 +278,7 @@ def put_settings(body: dict, _=Depends(require_user)):
     # null 表示「前端从未配置过该键」，跳过不写，防止 bool(null)=false 把默认开启的功能关掉
     # 哨兵值 SECRET_MASK 表示「密钥保持已存值不变」（GET 掩码后的表单整体保存原样回传）
     _SECRET_KEYS = {"notify_token", "tg_api_hash", "tg_phone", "proxy",
-                    "bark_url", "pushplus_token", "ntfy_token", "api_token", "tmdb_api_key"}
+                    "bark_url", "pushplus_token", "ntfy_token", "webhook_url", "api_token", "tmdb_api_key"}
     updates = {k: _norm_setting(k, v) for k, v in body.items()
                if k in allowed and v is not None
                and not (k in _SECRET_KEYS and v == SECRET_MASK)}
@@ -348,10 +351,13 @@ def test_proxy(body: dict = None, _=Depends(require_user)):
         proxy = _norm_setting("proxy", proxy)
         if not proxy:
             raise HTTPException(400, "代理地址不能为空")
+    t0 = time.monotonic()
     ok, detail = jobs.test_proxy(proxy)
+    latency_ms = round((time.monotonic() - t0) * 1000)
+    now_ts = time.time()
     if not ok:
         raise HTTPException(400, detail)
-    return {"ok": True, "detail": detail}
+    return {"ok": True, "detail": detail, "latency_ms": latency_ms, "tested_at": now_ts}
 
 
 @router.post("/settings/notify/test")
@@ -361,11 +367,16 @@ def test_notify(body: dict = None, _=Depends(require_user)):
     token = str(body.get("token") or "").strip()
     if not token or token == SECRET_MASK:
         token = str(db.get_setting("notify_token", "") or "").strip()
+    if token and not re.fullmatch(r"[0-9A-Za-z_:\-]+", token):
+        raise HTTPException(400, "Telegram Bot Token 格式无效")
     chat_id = str(body.get("chat_id") or "").strip() or str(db.get_setting("notify_chat_id", "") or "").strip()
+    t0 = time.monotonic()
     ok, detail = jobs.send_test(token, chat_id)
+    latency_ms = round((time.monotonic() - t0) * 1000)
+    now_ts = time.time()
     if not ok:
         raise HTTPException(400, detail)
-    return {"ok": True}
+    return {"ok": True, "detail": "测试通知已成功发送至 Telegram", "latency_ms": latency_ms, "tested_at": now_ts}
 
 
 @router.post("/settings/notify/test/{channel}")
@@ -374,10 +385,13 @@ def test_channel(channel: str, _=Depends(require_user)):
 
     返回 ok + 说明；失败时说明里含未配置提示或失败原因，前端直接展示。
     """
+    t0 = time.monotonic()
     ok, detail = jobs.test_channel(channel)
+    latency_ms = round((time.monotonic() - t0) * 1000)
+    now_ts = time.time()
     if not ok:
         raise HTTPException(400, detail)
-    return {"ok": True, "detail": detail}
+    return {"ok": True, "detail": detail, "latency_ms": latency_ms, "tested_at": now_ts}
 
 
 @router.post("/settings/digest/test")

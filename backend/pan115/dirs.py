@@ -32,7 +32,9 @@ def _list_dir(pid: int = 0) -> dict[str, int]:
         resp = pan.pan_call(client.fs_files, {"cid": pid, "fc_mix": 0, "limit": 1150, "offset": offset,
                                               "o": "user_ptime", "asc": 0, "show_dir": 1})
         if not resp.get("state"):
-            raise pan.Pan115Error(f"fs_files 失败: {str(resp)[:200]}")
+            msg = str(resp.get("error") or resp.get("errno") or str(resp)[:200])
+            pan.note_115_error(msg)
+            raise pan.Pan115Error(f"fs_files 失败: {msg}")
         data = resp.get("data") or []
         for f in data:
             if not isinstance(f, dict):
@@ -51,7 +53,7 @@ def _list_dir(pid: int = 0) -> dict[str, int]:
             break
         if offset > 500_000:  # count 偶发缺失时防止失控翻页的兜底上限
             break
-        time.sleep(0.4)  # 大目录多页翻页间隔，降低请求频率
+        time.sleep(0.4 * pan.pace_factor())  # 大目录多页翻页间隔，随风控档位自适应放大
     return dirs
 
 
@@ -137,10 +139,12 @@ def mkdirs(path: str) -> int:
             new_cid = _to_int(data.get("file_id") or data.get("cid") or resp.get("cid"), 0)
             if not new_cid:
                 new_cid = _list_dir(pid).get(name, 0)  # 响应缺 id 时回查上级目录
+            if not new_cid:
+                raise pan.Pan115Error(f"创建目录「{name}」后未能定位 cid")
             pid = new_cid
             logstream.info("115", f"已创建目录 {name} (cid={pid})")
         _dir_cache_put(walked, pid)
-        time.sleep(0.5)
+        time.sleep(0.5 * pan.pace_factor())
     return pid
 
 

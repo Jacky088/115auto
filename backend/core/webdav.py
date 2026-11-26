@@ -30,6 +30,8 @@ def get_webdav_config() -> dict[str, Any]:
     keep_count = int(db.get_setting("webdav_keep_count", 10) or 10)
     auto_backup = bool(db.get_setting("webdav_auto_backup_enabled", False))
     last_test_ok = bool(db.get_setting("webdav_last_test_ok", False))
+    last_test_at = float(db.get_setting("webdav_last_test_at", 0) or 0)
+    last_test_ms = int(db.get_setting("webdav_last_test_ms", 0) or 0)
     last_backup_at = float(db.get_setting("webdav_last_backup_at", 0) or 0)
     last_backup_status = str(db.get_setting("webdav_last_backup_status", "") or "")
 
@@ -55,6 +57,8 @@ def get_webdav_config() -> dict[str, Any]:
         "keep_count": max(1, min(100, keep_count)),
         "auto_backup_enabled": auto_backup,
         "last_test_ok": last_test_ok,
+        "last_test_at": last_test_at,
+        "last_test_ms": last_test_ms,
         "last_backup_at": last_backup_at,
         "last_backup_status": last_backup_status,
     }
@@ -159,19 +163,22 @@ class WebDAVClient:
         return httpx.Client(
             auth=(self.username, self.password),
             timeout=self.timeout,
-            follow_redirects=True,
+            follow_redirects=False,
             verify=True,
         )
 
     def _build_url(self, path: str = "") -> str:
-        """安全拼接 URL，保留 base_url 的已有 path 前缀（如 /dav）。"""
+        """安全拼接 URL，保留 base_url 的已有 path 前缀（如 /dav），并过滤越界路径段。"""
         p = str(path or "").strip()
         if not p.startswith("/"):
             p = f"/{p}"
         # 兼容 base_url 尾部已有路径（如 https://nas.local/dav）
         parsed = urllib.parse.urlparse(self.base_url)
         combined_path = f"{parsed.path.rstrip('/')}{p}"
-        parts = [urllib.parse.quote(seg) for seg in combined_path.split("/") if seg]
+        raw_segs = [seg for seg in combined_path.split("/") if seg and seg != "."]
+        if any(seg == ".." for seg in raw_segs):
+            raise ValueError("WebDAV 路径不允许包含 '..' 段")
+        parts = [urllib.parse.quote(seg) for seg in raw_segs]
         escaped_path = "/" + "/".join(parts)
         if p.endswith("/") and not escaped_path.endswith("/"):
             escaped_path += "/"
@@ -264,6 +271,7 @@ class WebDAVClient:
             "ok": True,
             "message": f"连接与读写权限测试成功（耗时 {elapsed_ms} ms）",
             "elapsed_ms": elapsed_ms,
+            "latency_ms": elapsed_ms,
         }
 
     def upload_file(self, local_path: Path, remote_filename: str) -> dict[str, Any]:
@@ -334,7 +342,9 @@ class WebDAVClient:
         if resp.status_code not in (200, 207):
             raise RuntimeError(f"列出远端备份失败（HTTP {resp.status_code}）")
 
-        # 解析 XML 多状态响应
+        # 解析 XML 多状态响应（限制 10MB 防止畸形超大响应引发 OOM）
+        if len(resp.content) > 10 * 1024 * 1024:
+            raise RuntimeError("远端目录返回 XML 体积过大（>10 MB），已中止解析")
         items: list[dict[str, Any]] = []
         try:
             root = ET.fromstring(resp.content)

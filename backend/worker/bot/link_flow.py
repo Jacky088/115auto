@@ -20,7 +20,7 @@ def _usage_add() -> str:
     for r in rows:
         lines.append(f"· @{r['name']}（{'仅订阅' if r['sub_only'] else '全盘转存'}）")
     lines.append("")
-    lines.append(USAGE_ADD)
+    lines.append("发送 /add <频道名或链接> on|off 添加（on=仅订阅，off=全盘转存）")
     return "\n".join(lines)
 
 
@@ -97,21 +97,12 @@ def _split_category(body: str) -> tuple[str, str, str]:
 
 def _link_usage(reason: str = "") -> str:
     """直发链接格式说明（缺指令头 / 链接类型不符 / 无法确定目录时统一回复）。"""
-    cats = " / ".join(_route_categories())
+    cats = " / ".join(_route_categories()) or "（尚未配置分类）"
     lines = [f"❌ {reason}", ""] if reason else []
     lines += [
-        "直发链接需以指令头开头，程序据此判断进哪个队列：",
-        "",
-        "转存 [分类] <115 分享链接>",
-        "云下载 [分类] <磁力 / 电驴 / 迅雷链接>",
-        "",
-        "示例（空格不影响识别，链接可紧贴指令头）：",
-        "云下载 magnet:?xt=urn:btih:xxxxxxxx",
-        "云下载 动漫 magnet:?xt=urn:btih:xxxxxxxx",
-        "转存 电影 https://115.com/s/xxxx?password=yyyy",
-        "",
-        "[分类] 可选，须与「分类 → 目录映射」的分类名完全一致：" + (cats or "（尚未配置分类）"),
-        "分类名写错会拒绝入队并列出现有分类；不写分类时按标题规则识别，识别不出则用「未分类动作」。",
+        "格式：转存|云下载 [分类] <链接>",
+        "示例：云下载 动漫 magnet:?xt=urn:btih:xxxxxxxx",
+        f"可选分类：{cats}（省略分类则自动识别）",
     ]
     return "\n".join(lines)
 
@@ -143,16 +134,13 @@ def _bot_enqueue_links(text: str, message_id: int) -> str:
     category, body, unknown = _split_category(body)
     if unknown:
         cats = " / ".join(_route_categories()) or "（尚未配置分类）"
-        return ("⚠️ 分类「" + unknown + "」不存在，本次未入队。\n\n"
-                "现有分类（须与「分类 → 目录映射」完全一致）：\n" + cats + "\n\n"
-                "请修正分类名后重发，例如：\n"
-                "云下载 动漫 <磁力链接>\n"
-                "转存 电影 <115 分享链接>\n\n"
-                "也可以不写分类：云下载 <链接>（按标题规则识别，识别不出用「未分类动作」）")
+        return (f"⚠️ 分类「{unknown}」不存在，本次未入队。\n"
+                f"可选分类：{cats}\n"
+                "请修正分类名或省略分类后重发（如：云下载 <链接>）。")
     if category and not classifier.resolve_target(category, kind=kind):
         label = "云下载" if kind == "offline" else "转存"
         return (f"⚠️ 分类「{category}」没有可用的{label}目录（未配置或设为跳过）。\n"
-                "请到「分类 → 目录映射」为该分类设置目录，或不写分类后重发。")
+                "请到「转存整理」页设置目录，或省略分类后重发。")
     mid = int(message_id or 0)
     try:
         res = pipeline.process_message(channel="tgbot", message_id=mid,
@@ -178,7 +166,7 @@ def _bot_enqueue_links(text: str, message_id: int) -> str:
         reason = str((row["error"] if row else "") or "未分类，且没有可用的目标目录")
         parts.append(f"⏭ 未入队：{reason}")
         if "未分类" in reason:
-            parts.append("可在「分类 → 目录映射」把「未分类动作」设为目录（如 /待整理）后重发。")
+            parts.append("可在「转存整理」页将「未分类动作」设为目录（如 /待整理）后重发。")
     elif res.get("skipped"):
-        parts.append(f"⏭ 另有 {res['skipped']} 个未入队（原因见「分流记录」记录）")
+        parts.append(f"⏭ 另有 {res['skipped']} 个未入队（原因见网页「记录查询」）")
     return "\n".join(parts) or "未入队（原因见日志）"

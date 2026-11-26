@@ -22,7 +22,8 @@ CREATE TABLE IF NOT EXISTS rules(
     pattern TEXT NOT NULL,
     category TEXT NOT NULL,
     priority INTEGER NOT NULL DEFAULT 100,
-    enabled INTEGER NOT NULL DEFAULT 1
+    enabled INTEGER NOT NULL DEFAULT 1,
+    note TEXT DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS routes(
     category TEXT PRIMARY KEY,
@@ -51,6 +52,7 @@ CREATE TABLE IF NOT EXISTS subscriptions(
     note TEXT DEFAULT '',
     enabled INTEGER NOT NULL DEFAULT 1,
     aliases TEXT DEFAULT '',           -- 别名（JSON 数组）：TMDB 原始名等，任一命中即算命中
+    exclude_keywords TEXT DEFAULT '',  -- 排除词（JSON 数组）：命中任一排除词则忽略本条订阅
     tmdb_id INTEGER,                   -- TMDB 条目 ID（仅用于展示/追溯）
     kind TEXT DEFAULT '',              -- tv | movie | ''
     last_ep TEXT DEFAULT '',           -- 最近一次命中的集数标识（S01E48 / 第495集）
@@ -59,6 +61,7 @@ CREATE TABLE IF NOT EXISTS subscriptions(
     last_title TEXT DEFAULT '',        -- 最近一次命中的标题
     last_match_at REAL,                -- 最近命中时间
     min_quality TEXT DEFAULT '',       -- 该订阅最低画质（空=跟随全局设置）
+    auto_disable_movie INTEGER NOT NULL DEFAULT 1,  -- 电影类型命中转存后是否自动停用
     created_at REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS messages(

@@ -249,7 +249,7 @@ def test_tg_verify_restore_handles_legacy_runtime_keys_and_media_tables():
     bot_commands._RESTORE_PENDING[chat_id] = (legacy_backup, 9e18)
     reply = bot_commands._do_restore(chat_id)
     assert reply.startswith("✅ 已从备份恢复"), reply
-    assert "整理刮削 1" in reply and "操作账本 1" in reply
+    assert "整理刮削 1" in reply and "账本 1" in reply
 
     # 本机状态未被旧备份覆写，且残留挂起任务已随回滚清空
     assert db.get_setting("web_password_hash") == "keep_hash"
@@ -695,5 +695,31 @@ def test_local_backup_management_endpoints():
     finally:
         if fpath.exists():
             fpath.unlink()
+
+
+def test_local_backup_preview_zip_bundle():
+    """本地整机迁移包 .zip 预览接口必须正常解压识别并返回摘要。"""
+    token = auth.make_token("admin")
+    headers = {"Authorization": f"Bearer {token}"}
+    local_dir = config.DATA_DIR / "backups"
+    local_dir.mkdir(parents=True, exist_ok=True)
+
+    stage_dir, zip_path, zip_name, _manifest = migration_bundle.build_migration_bundle(
+        meta_mode="none", slim_db=True, include_credentials=False
+    )
+    target = local_dir / zip_name
+    try:
+        target.write_bytes(Path(zip_path).read_bytes())
+        prev = client.post(f"/api/backup/local/preview?filename={zip_name}", headers=headers)
+        assert prev.status_code == 200
+        pdata = prev.json()
+        assert pdata["ok"] is True
+        assert pdata.get("summary", {}).get("settings", 0) > 0
+    finally:
+        import shutil
+        shutil.rmtree(stage_dir, ignore_errors=True)
+        if target.exists():
+            target.unlink()
+
 
 

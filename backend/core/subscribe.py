@@ -10,6 +10,7 @@
 """
 import json
 import re
+import threading
 import time
 import unicodedata
 
@@ -21,6 +22,31 @@ _KEEP_RE = re.compile(r"[^0-9a-z\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]")
 
 MAX_KEYWORD_LEN = 100
 MAX_ALIASES = 20
+
+_subs_cache_lock = threading.Lock()
+_subs_cache: tuple[list[dict], float] = ([], 0.0)
+_SUBS_CACHE_TTL = 5.0
+
+
+def invalidate_cache() -> None:
+    """订阅增删改后立即清空进程内订阅缓存。"""
+    global _subs_cache
+    with _subs_cache_lock:
+        _subs_cache = ([], 0.0)
+
+
+def _get_enabled_subs() -> list[dict]:
+    """带 5 秒 TTL 的启用订阅缓存，降低高频消息进线时的重复读库开销。"""
+    global _subs_cache
+    now = time.monotonic()
+    with _subs_cache_lock:
+        rows, exp = _subs_cache
+        if now < exp:
+            return rows
+    fresh = [dict(r) for r in db.query("SELECT * FROM subscriptions WHERE enabled=1 ORDER BY id")]
+    with _subs_cache_lock:
+        _subs_cache = (fresh, time.monotonic() + _SUBS_CACHE_TTL)
+    return fresh
 
 
 def normalize(s: str) -> str:
@@ -83,22 +109,30 @@ def _term_hit(term: str, text_norm: str, low: str) -> bool:
     return True
 
 
+def excludes_of(sub: dict) -> list[str]:
+    """读取订阅排除词列表（兼容 JSON 数组、逗号/换行分隔）。"""
+    return aliases_of({"aliases": sub.get("exclude_keywords") or ""})
+
+
 def match_all(text: str) -> list[dict]:
     """返回所有命中的启用中订阅（一条消息可同时命中多个订阅）。
 
-    匹配策略（两级）：
+    匹配策略（两级 + 排除词过滤）：
     1. 归一化子串：双方去空格/标点、全角转半角、忽略大小写后做子串匹配；
     2. 短词边界保护：归一化后不足 4 个字符的纯英文短词（如 IT、Up）
-       改用原文完整单词匹配，避免误命中 supernatural 这类长词。
+       改用原文完整单词匹配，避免误命中 supernatural 这类长词；
+    3. 排除词过滤：若命中任一排除词（如 花絮/预告/解说），本条订阅不触发。
     """
     if not text:
         return []
     low = str(text).lower()
     text_norm = normalize(text)
     hits = []
-    for r in db.query("SELECT * FROM subscriptions WHERE enabled=1 ORDER BY id"):
-        row = dict(r)
+    for row in _get_enabled_subs():
         if any(_term_hit(t, text_norm, low) for t in terms_of(row)):
+            ex = excludes_of(row)
+            if ex and any(_term_hit(e, text_norm, low) for e in ex):
+                continue
             hits.append(row)
     return hits
 
@@ -193,6 +227,11 @@ def record_progress(sub: dict, title: str, season: int | None = None,
          ep if ep is not None else old_ep,
          (title or "")[:200], time.time(), sub["id"],
          cas_display, cas_season, cas_episode))
+    if changed and str(sub.get("kind") or "") == "movie":
+        auto_dis = sub.get("auto_disable_movie")
+        if auto_dis is None or int(auto_dis) == 1:
+            db.execute("UPDATE subscriptions SET enabled=0 WHERE id=?", (sub["id"],))
+            invalidate_cache()
     return bool(changed)
 
 

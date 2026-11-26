@@ -4,18 +4,18 @@
   width: 100%;
   box-sizing: border-box;
   margin: 0 0 12px;
-  color: var(--saas-primary, #4f6bff);
-  background: rgba(79, 107, 255, 0.08);
-  border: 1px dashed rgba(79, 107, 255, 0.25);
+  color: var(--saas-text-sub);
+  background: rgba(37, 107, 245, 0.05);
+  border: 1px dashed rgba(37, 107, 245, 0.22);
   border-radius: var(--r-sm);
   padding: 6px 10px;
   line-height: 1.55;
   font-size: var(--fs-caption);
 }
 html.dark .dirs-page .page-tip {
-  color: #9cb1ff;
-  background: rgba(79, 107, 255, 0.14);
-  border-color: rgba(120, 145, 255, 0.35);
+  color: #8cb3fa;
+  background: rgba(37, 107, 245, 0.08);
+  border-color: rgba(37, 107, 245, 0.28);
 }
 /* 弹窗内目录选择按钮：与表单输入框同高同圆角，保持整体主题一致（覆盖主题对 small 按钮的统一加高） */
 .dirs-page .dir-btn .el-icon {
@@ -27,14 +27,6 @@ html.dark .dirs-page .page-tip {
 .dirs-page .dir-btn.dir-skip .el-icon { color: #e6a23c; }
 .dirs-page .dir-btn.dir-empty { color: var(--el-text-color-secondary); font-style: italic; }
 .dirs-page .dir-btn.dir-empty .el-icon { color: #c0c4cc; }
-.dirs-page .dir-btn:hover, .dirs-page .dir-btn:active {
-  background-color: var(--el-color-primary) !important;
-  border-color: var(--el-color-primary) !important;
-  color: #ffffff !important;
-}
-.dirs-page .dir-btn:hover *, .dirs-page .dir-btn:active * {
-  color: #ffffff !important;
-}
 
 /* ---- 定时文件整理：全新现代响应式布局 ---- */
 .dirs-page .organize-header-toolbar {
@@ -93,8 +85,8 @@ html.dark .dirs-page .page-tip {
   display: flex;
   align-items: flex-start;
   gap: 12px;
-  background: rgba(64, 158, 255, 0.06);
-  border: 1px solid rgba(64, 158, 255, 0.18);
+  background: rgba(37, 107, 245, 0.06);
+  border: 1px solid rgba(37, 107, 245, 0.20);
   border-radius: var(--radius-sm, 8px);
   padding: 12px 14px;
   margin-bottom: 14px;
@@ -112,7 +104,7 @@ html.dark .dirs-page .page-tip {
 .dirs-page .notice-title {
   font-weight: 600;
   font-size: var(--fs-caption);
-  color: var(--el-color-primary-dark-2, #2b73af);
+  color: var(--el-color-primary);
   margin-bottom: 4px;
 }
 .dirs-page .notice-desc {
@@ -206,10 +198,10 @@ html.dark .dirs-page .page-tip {
   width: 5px;
   height: 5px;
   border-radius: 50%;
-  background: var(--el-color-primary, #4f6bff);
+  background: var(--el-color-primary);
   margin-right: 6px;
   flex-shrink: 0;
-  box-shadow: 0 0 0 1.5px rgba(79, 107, 255, 0.18);
+  box-shadow: 0 0 0 1.5px rgba(37, 107, 245, 0.18);
 }
 .dirs-page .config-control {
   display: flex;
@@ -218,21 +210,9 @@ html.dark .dirs-page .page-tip {
   flex-wrap: wrap;
 }
 
-/* 胶囊单选按钮统一视觉规范 */
-.dirs-page .capsule-radio-group .el-radio-button__inner {
-  border-radius: var(--r-sm);
-  padding: 7px 14px;
-  font-size: var(--fs-caption);
-  height: 32px;
-  line-height: 16px;
-}
-.dirs-page .capsule-radio-group .el-radio-button:first-child .el-radio-button__inner {
-  border-top-left-radius: 6px;
-  border-bottom-left-radius: 6px;
-}
-.dirs-page .capsule-radio-group .el-radio-button:last-child .el-radio-button__inner {
-  border-top-right-radius: 6px;
-  border-bottom-right-radius: 6px;
+/* 胶囊单选按钮由全局 Linear Segmented Control 统领 */
+.dirs-page .capsule-radio-group {
+  margin-bottom: 2px;
 }
 
 /* 功能特性 2x2 开关卡片 */
@@ -255,8 +235,8 @@ html.dark .dirs-page .page-tip {
   transition: all 0.2s ease;
 }
 .dirs-page .feature-switch-pill.is-active {
-  border-color: rgba(64, 158, 255, 0.45);
-  background: rgba(64, 158, 255, 0.04);
+  border-color: rgba(37, 107, 245, 0.45);
+  background: rgba(37, 107, 245, 0.05);
 }
 .dirs-page .feature-switch-pill.is-disabled {
   opacity: 0.55;
@@ -331,7 +311,7 @@ html.dark .dirs-page .page-tip {
 /* 48 小时执行时间预测嵌入卡片 */
 .dirs-page .prediction-box {
   background: var(--el-bg-color, #ffffff);
-  border: 1px dashed rgba(64, 158, 255, 0.35);
+  border: 1px dashed rgba(37, 107, 245, 0.28);
   border-radius: 8px;
   padding: 10px 12px;
   margin-top: auto;
@@ -375,12 +355,12 @@ html.dark .dirs-page .page-tip {
   display: flex;
   align-items: center;
   gap: 10px;
-  background: rgba(64, 158, 255, 0.1);
-  border: 1px solid rgba(64, 158, 255, 0.3);
+  background: rgba(37, 107, 245, 0.08);
+  border: 1px solid rgba(37, 107, 245, 0.24);
   border-radius: var(--radius-sm, 6px);
   padding: 10px 14px;
   margin-bottom: 12px;
-  color: #2b73af;
+  color: var(--el-color-primary, #256bf5);
   font-size: var(--fs-caption);
   line-height: 1.5;
 }
@@ -572,24 +552,24 @@ html.dark .dirs-page .page-tip {
   }
 }
 
-/* 长胶囊双选分段开关（长胶囊，左右文字，中间分隔符，选左高亮左，选右高亮右） */
+/* 长胶囊双选分段开关（Linear 工业分段轨道规范） */
 .dirs-page .capsule-toggle {
   display: inline-flex;
   align-items: center;
-  height: 32px;
-  border-radius: var(--r-pill);
-  border: 1px solid rgba(126, 146, 196, 0.40);
-  background: rgba(255, 255, 255, 0.70);
-  box-shadow: 0 1px 3px rgba(31, 45, 90, 0.05);
-  overflow: hidden;
+  height: 30px;
+  border-radius: 8px;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  background: #f1f3f7;
+  padding: 2px;
+  gap: 2px;
+  box-sizing: border-box;
   user-select: none;
   cursor: pointer;
-  transition: all .2s ease;
+  transition: all .18s ease;
 }
 html.dark .dirs-page .capsule-toggle {
-  border-color: rgba(255, 255, 255, 0.18);
-  background: rgba(20, 28, 48, 0.75);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  border-color: rgba(255, 255, 255, 0.08);
+  background: #141722;
 }
 .dirs-page .capsule-toggle.is-disabled {
   opacity: 0.55;
@@ -603,49 +583,44 @@ html.dark .dirs-page .capsule-toggle {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 0 16px;
+  padding: 0 14px;
+  border-radius: 6px;
   font-size: var(--fs-caption);
   font-weight: 500;
-  color: var(--saas-text-main);
+  color: var(--saas-text-sub, #64748b);
   white-space: nowrap;
-  transition: all .25s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: all .18s cubic-bezier(0.4, 0, 0.2, 1);
   cursor: pointer;
 }
 html.dark .dirs-page .capsule-seg {
-  color: #b7c4de;
+  color: #9da4b3;
 }
 
 /* 未选中时悬停 */
 .dirs-page .capsule-seg:not(.is-active):hover {
-  background: rgba(79, 107, 255, 0.14);
-  color: var(--el-color-primary);
+  background: rgba(0, 0, 0, 0.05);
+  color: #0f172a;
 }
 html.dark .dirs-page .capsule-seg:not(.is-active):hover {
-  background: rgba(79, 107, 255, 0.22);
-  color: #fff;
+  background: rgba(255, 255, 255, 0.06);
+  color: #f1f3f7;
 }
 
-/* 选中高亮（左右选中对应侧完全填充渐变色与清晰白字） */
+/* 选中高亮（Linear 实心浮动分段） */
 .dirs-page .capsule-seg.is-active {
-  background: var(--grad-brand);
+  background: var(--el-color-primary, #256bf5);
   color: #ffffff !important;
   font-weight: 600;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.22);
 }
 html.dark .dirs-page .capsule-seg.is-active {
-  background: var(--grad-brand);
+  background: var(--el-color-primary, #256bf5);
   color: #ffffff !important;
 }
 
-/* 中间分隔符 */
+/* 中间分隔符（Linear 独立分段模式无需竖线） */
 .dirs-page .capsule-divider {
-  width: 1px;
-  height: 18px;
-  background: rgba(126, 146, 196, 0.40);
-  flex-shrink: 0;
-  transition: opacity .2s ease;
-}
-html.dark .dirs-page .capsule-divider {
-  background: rgba(255, 255, 255, 0.20);
+  display: none;
 }
 
 @media (max-width: 768px) {

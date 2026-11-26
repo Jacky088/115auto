@@ -38,12 +38,15 @@ class _RiskCircuitBreak(Exception):
 
 
 def _is_risk_error(err: Exception | str) -> bool:
-    """判断异常文本是否命中 115 风控限制关键词。"""
+    """判断异常文本是否命中 115 风控限制关键词（含词边界 405 / limit）。"""
     s = str(err or "").lower()
     if not s:
         return False
-    kws = getattr(_mw().client, "_RISK_KEYWORDS", ("频繁", "风控", "验证码", "IP登录异常", "too many", "limit", "405"))
-    return any(str(k).lower() in s for k in kws)
+    hits_fn = getattr(_mw().client, "_hits_risk_keyword", None)
+    if callable(hits_fn):
+        return bool(hits_fn(s))
+    kws = getattr(_mw().client, "_RISK_KEYWORDS", ("频繁", "风控", "验证码", "ip登录异常", "too many"))
+    return any(str(k).lower() in s for k in kws) or "405" in s or "limit" in s
 
 
 def _get_lock(name: str) -> asyncio.Lock:
@@ -66,6 +69,7 @@ def get_media_settings() -> dict:
         "media_organize_template_movie",
         "media_organize_template_tv",
         "media_conflict_policy",
+        "media_bdmv_prefer_best",
         "media_move_subtitles",
         "media_skip_extras",
         "media_extra_min_mb",
@@ -74,6 +78,7 @@ def get_media_settings() -> dict:
         "media_scrape_margin_threshold",
         "media_scrape_write_local_nfo",
         "media_scrape_download_poster",
+        "media_scrape_tg_confirm",
         "media_scrape_wait_seconds",
         "media_local_meta_dir",
         "media_op_delay_min",
@@ -83,6 +88,7 @@ def get_media_settings() -> dict:
         "media_organize_schedule_type",
         "media_organize_schedule_hours",
         "media_organize_fixed_times",
+        "wash_archive_dir",
     )
     out = {}
     for k in keys:
@@ -95,6 +101,12 @@ def get_media_settings() -> dict:
             out["media_organize_fixed_times"] = ["06:00", "12:00", "18:00"]
     elif not isinstance(ft_raw, list):
         out["media_organize_fixed_times"] = ["06:00", "12:00", "18:00"]
+    # 透出全局 115 防风控只读摘要，供「整理刮削 → 策略与设置」展示与冲突校验
+    out["risk_schedule_enabled"] = bool(db.get_setting("schedule_enabled", False))
+    out["risk_schedule_start"] = str(db.get_setting("schedule_start", "22:00") or "22:00")
+    out["risk_schedule_end"] = str(db.get_setting("schedule_end", "08:00") or "08:00")
+    out["risk_jitter_min"] = int(db.get_setting("schedule_jitter_min", 0) or 0)
+    out["risk_batch_rest_enabled"] = bool(db.get_setting("batch_rest_enabled", True))
     return out
 
 
@@ -103,9 +115,15 @@ def _check_not_cancelled():
         raise MediaCancelled("系统已停止运行，整理/刮削队列安全中断")
 
 
+async def _check_not_cancelled_async() -> None:
+    """协程内非阻塞检查取消状态，避免高频直调同步 SQLite 阻塞事件循环。"""
+    if await transfer_gate.is_cancel_requested_async():
+        raise MediaCancelled("系统已停止运行，整理/刮削队列安全中断")
+
+
 async def _pacing_sleep(settings: dict) -> None:
     """防风控随机退避延时，并按步长感知取消信号。"""
-    _check_not_cancelled()
+    await _check_not_cancelled_async()
     try:
         dmin = max(0.2, float(settings.get("media_op_delay_min", 0.8)))
         dmax = max(dmin, float(settings.get("media_op_delay_max", 2.0)))
@@ -114,7 +132,7 @@ async def _pacing_sleep(settings: dict) -> None:
     wait = random.uniform(dmin, dmax) * max(1.0, _mw().client.pace_factor())
     end = time.monotonic() + wait
     while time.monotonic() < end:
-        _check_not_cancelled()
+        await _check_not_cancelled_async()
         await asyncio.sleep(min(0.4, max(0.05, end - time.monotonic())))
 
 
@@ -125,8 +143,14 @@ async def _interruptible_batch_rest(
     every: int = 15,
     rest_sec: float = 12.0,
 ) -> None:
-    """每连续写入 N 次进行一次可中断长休眠，降低批量操作触发 115 风控的概率。"""
-    if op_counter <= 0 or op_counter % every != 0:
+    """复用系统「拟人化连存小憩」设置：每连续写入 N 次进行可中断休眠，降低触发 115 风控概率。"""
+    if not bool(db.get_setting("batch_rest_enabled", True)):
+        return
+    try:
+        every_n = max(1, int(db.get_setting("batch_rest_count", every) or every))
+    except (TypeError, ValueError):
+        every_n = every
+    if op_counter <= 0 or op_counter % every_n != 0:
         return
     try:
         cfg_max = float(settings.get("media_op_delay_max", 2.0) or 0)
@@ -135,10 +159,16 @@ async def _interruptible_batch_rest(
     # 测试环境配置极小延迟时跳过长休眠，保持单测快速执行
     if cfg_max < 0.2:
         return
-    logstream.info(log_mod, f"☕ 已连续完成 {op_counter} 次 115 写操作，礼貌休眠 {rest_sec:.0f}s 避风控...")
-    end = time.monotonic() + rest_sec
+    try:
+        rmin = max(1, int(db.get_setting("batch_rest_min", int(rest_sec)) or int(rest_sec)))
+        rmax = max(rmin, int(db.get_setting("batch_rest_max", int(rest_sec)) or int(rest_sec)))
+    except (TypeError, ValueError):
+        rmin = rmax = int(rest_sec)
+    actual_rest = random.uniform(rmin, rmax)
+    logstream.info(log_mod, f"☕ 已连续完成 {op_counter} 次 115 写操作，礼貌休眠 {actual_rest:.0f}s 避风控...")
+    end = time.monotonic() + actual_rest
     while time.monotonic() < end:
-        _check_not_cancelled()
+        await _check_not_cancelled_async()
         await asyncio.sleep(min(0.4, max(0.05, end - time.monotonic())))
 
 

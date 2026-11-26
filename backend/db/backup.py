@@ -216,8 +216,10 @@ def _validate_restored_meta_dir(raw) -> str:
     resolved = Path(raw).expanduser().resolve()
     if (len(resolved.parts) <= 1
             or resolved.is_relative_to(config.BACKEND_DIR)
-            or config.BACKEND_DIR.is_relative_to(resolved)):
-        raise ValueError("备份中的本地元数据目录不合法（不允许系统根目录或程序目录）")
+            or config.BACKEND_DIR.is_relative_to(resolved)
+            or resolved.is_relative_to(config.DATA_DIR)
+            or config.DATA_DIR.is_relative_to(resolved)):
+        raise ValueError("备份中的本地元数据目录不合法（不允许系统根目录、程序目录或系统数据目录）")
     return str(resolved)
 
 
@@ -243,20 +245,19 @@ def restore_payload(data: dict) -> dict:
 
     ensure_restore_idle_guard()
 
-    # 列名白名单：备份行的 key 直接拼进 SQL，必须先按真实表结构校验（防恶意备份注入）
-    allowed_cols = {t: {r["name"] for r in _db()._conn.execute(f"PRAGMA table_info({t})")}
-                    for t in BACKUP_TABLES}
-    for t in BACKUP_TABLES:
-        for r in (data[t] or []):
-            if not isinstance(r, dict):
-                raise ValueError(f"{t} 中存在非对象行")
-            unknown = set(r.keys()) - allowed_cols[t]
-            if unknown:
-                raise ValueError(f"备份 {t} 段包含未知列: {', '.join(sorted(unknown))}")
-
     with _db()._lock:
         try:
             _restore_idle_checks_locked()  # 锁内复查，缩小 TOCTOU 窗口
+            # 列名白名单：在连接互斥锁内读取真实表结构（防恶意备份注入与并发连接冲突）
+            allowed_cols = {t: {r["name"] for r in _db()._conn.execute(f"PRAGMA table_info({t})")}
+                            for t in BACKUP_TABLES}
+            for t in BACKUP_TABLES:
+                for r in (data[t] or []):
+                    if not isinstance(r, dict):
+                        raise ValueError(f"{t} 中存在非对象行")
+                    unknown = set(r.keys()) - allowed_cols[t]
+                    if unknown:
+                        raise ValueError(f"备份 {t} 段包含未知列: {', '.join(sorted(unknown))}")
             cur = _db()._conn.cursor()
             cur.execute("BEGIN")
             # 先记下需要保留的当前设置（凭据及本机登录/向导状态，恢复后原样带回来）

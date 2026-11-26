@@ -47,7 +47,7 @@
 .files-page .file-name:hover .file-text { color: var(--el-color-primary); }
 .folder-icon { color: #f0a020; flex: none; }
 .file-icon { color: #7c8aa5; flex: none; }
-.file-icon--video { color: #4f6bff; }
+.file-icon--video { color: var(--el-color-primary, #256bf5); }
 .file-icon--sub { color: #16a394; }
 .file-icon--image { color: #e68a1e; }
 .file-icon--audio { color: #d94f7a; }
@@ -103,4 +103,10 @@
   .files-page .search-title { max-width: 180px; }
   .files-page .pager { justify-content: center; }
   .files-page .hint { width: 100%; text-align: center; }
+}
+
+/* 加载中隐藏底层空占位，避免与加载遮罩同时穿透重叠 */
+.files-page .el-table.is-loading .el-table__empty-block,
+.files-page .el-loading-parent--relative .el-table__empty-block {
+  visibility: hidden;
 }

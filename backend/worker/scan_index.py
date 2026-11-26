@@ -269,7 +269,8 @@ def _run_job_sync(job_id: str, runner, ctx: ScanContext) -> None:
 
 
 def job_status(job_id: str) -> dict:
-    job = _JOBS.get(str(job_id or ""))
+    with _JOBS_LOCK:
+        job = _JOBS.get(str(job_id or ""))
     if not job:
         return {"ok": False, "msg": "扫描任务不存在或已过期，请重新发起"}
     ctx: ScanContext = job["ctx"]
@@ -283,7 +284,8 @@ def job_status(job_id: str) -> dict:
 
 
 def cancel_job(job_id: str) -> dict:
-    job = _JOBS.get(str(job_id or ""))
+    with _JOBS_LOCK:
+        job = _JOBS.get(str(job_id or ""))
     if not job:
         return {"ok": False, "msg": "扫描任务不存在或已过期"}
     if job["state"] != "running":

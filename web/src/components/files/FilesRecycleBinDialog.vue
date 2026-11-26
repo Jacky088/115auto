@@ -2,7 +2,7 @@
   <el-dialog
     :model-value="modelValue"
     title="115 回收站"
-    :width="'min(780px, 94vw)'"
+    :width="'min(780px, calc(100vw - 36px))'"
     align-center
     @update:model-value="$emit('update:modelValue', $event)"
   >
@@ -75,10 +75,6 @@
         @current-change="loadRecycleBin"
       />
     </div>
-
-    <template #footer>
-      <el-button @click="$emit('update:modelValue', false)">关闭</el-button>
-    </template>
   </el-dialog>
 </template>
 

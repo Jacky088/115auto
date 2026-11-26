@@ -64,7 +64,8 @@ def _find_risky_quantified_group(pattern: str) -> bool:
         # 含嵌套组的组体也直接判定（如 ((a+))+ 的危险来自内层量词），宁可保守
         if nxt in ("+", "*", "{") and _group_is_risky(body):
             return True
-        i = j
+        # 步进 1 继续向下检查内部嵌套分组，防止 (?:(a|aa)+) 被外层非量化组遮蔽绕过
+        i += 1
     return False
 
 

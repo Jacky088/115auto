@@ -10,11 +10,25 @@
             <el-tag :type="form.last_test_ok ? 'success' : 'info'" effect="plain" size="small">
               {{ form.last_test_ok ? '✓ 已配置并连接' : '✓ 已配置' }}
             </el-tag>
+            <span v-if="form.last_test_ms" class="status-meta-tip">
+              · 延迟 <b>{{ form.last_test_ms }}ms</b>
+            </span>
+            <span v-if="form.last_test_at" class="status-meta-tip">
+              （检测于 {{ fmtClock(form.last_test_at) }}）
+            </span>
             <span class="tip dav-identity-text">
               <code>{{ form.url }}</code>（{{ form.username }}）
             </span>
           </div>
           <div class="row-actions">
+            <el-button
+              :loading="testing"
+              :disabled="testCooldown > 0"
+              size="small"
+              @click="testSavedWebDAV"
+            >
+              {{ testCooldown > 0 ? `已测试 (${testCooldown}s)` : '测试连接' }}
+            </el-button>
             <el-button text type="primary" size="small" @click="startEdit">更换</el-button>
             <el-button text type="danger" size="small" @click="handleClear">清除</el-button>
           </div>
@@ -43,12 +57,13 @@
             type="primary"
             plain
             :loading="testing"
+            :disabled="testCooldown > 0"
             @click="testWebDAV"
           >
-            测试连接
+            {{ testCooldown > 0 ? `已测试 (${testCooldown}s)` : '测试连接' }}
           </el-button>
           <span v-if="testedOk" class="tip dav-tested">
-            ✅ 连接与读写权限测试通过
+            ✅ 连接与读写权限测试通过<template v-if="testLatency">（耗时 {{ testLatency }}ms）</template>
           </span>
         </div>
         <div class="tip">支持坚果云、群晖、威联通、Alist、Nextcloud 或自建 WebDAV，可用于自动异地容灾冷备</div>
@@ -58,12 +73,14 @@
         <div class="range-row dav-cred-row">
           <el-input
             v-model="form.username"
+            autocomplete="off"
             placeholder="用户名 / 账户"
             @input="onFieldChange"
           />
           <el-input
             v-model="form.password"
             type="password"
+            autocomplete="new-password"
             show-password
             :placeholder="configured ? '留空则保持原有应用密码' : '应用密码 / Token'"
             @input="onFieldChange"
@@ -120,16 +137,24 @@
       v-model="restoreVisible"
       :root-dir="form.root_dir"
       :initial-filter="restoreFilter"
+      :restore-credentials="restoreCredentials"
+      :restore-meta="restoreMeta"
     />
   </div>
 </template>
 
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue'
-import { ElMessage } from 'element-plus'
-import { api, errMsg, fmtSize, fmtTime, saveOk } from '../../api'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { api, errMsg, fmtClock, fmtSize, fmtTime, saveOk } from '../../api'
 import { confirmAction } from '../../composables/confirmDialog'
+import { useCooldown } from '../../composables/useCooldown'
 import WebDAVRestoreDialog from './WebDAVRestoreDialog.vue'
+
+defineProps({
+  restoreCredentials: { type: Boolean, default: false },
+  restoreMeta: { type: Boolean, default: true },
+})
 
 const emit = defineEmits(['backup-done', 'status-changed'])
 
@@ -141,6 +166,8 @@ const form = reactive({
   keep_count: 10,
   password_set: false,
   last_test_ok: false,
+  last_test_at: 0,
+  last_test_ms: 0,
   last_backup_status: '',
   last_backup_at: 0,
 })
@@ -148,6 +175,8 @@ const form = reactive({
 const editing = ref(false)
 const testing = ref(false)
 const testedOk = ref(false)
+const testLatency = ref(0)
+const { cooldown: testCooldown, startCooldown: startTestCooldown } = useCooldown(5)
 const saving = ref(false)
 const exporting = ref(false)
 const restoreVisible = ref(false)
@@ -186,6 +215,8 @@ const loadConfig = async () => {
       form.root_dir = data.root_dir || '/115AutoSave_Backup'
       form.keep_count = data.keep_count || 10
       form.last_test_ok = !!data.last_test_ok
+      form.last_test_at = data.last_test_at || 0
+      form.last_test_ms = data.last_test_ms || 0
       form.last_backup_status = data.last_backup_status || ''
       form.last_backup_at = data.last_backup_at || 0
       testedOk.value = !!data.last_test_ok
@@ -214,6 +245,7 @@ const cancelEdit = () => {
 }
 
 const testWebDAV = async () => {
+  if (testing.value || testCooldown.value > 0) return
   if (!form.url || !form.username) {
     ElMessage.warning('请先填写 WebDAV 服务地址与用户名')
     return
@@ -229,7 +261,12 @@ const testWebDAV = async () => {
     if (data?.ok) {
       testedOk.value = true
       form.last_test_ok = true
-      saveOk('WebDAV 测试成功', data.message || '读写删权限已全部验证通过')
+      const lat = data.latency_ms || data.elapsed_ms || 0
+      testLatency.value = lat
+      form.last_test_ms = lat
+      form.last_test_at = data.tested_at || (Date.now() / 1000)
+      startTestCooldown(5)
+      saveOk(`WebDAV 测试成功（耗时 ${lat}ms）`, data.message || '读写删权限已全部验证通过')
     } else {
       testedOk.value = false
       form.last_test_ok = false
@@ -237,6 +274,36 @@ const testWebDAV = async () => {
     }
   } catch (e) {
     testedOk.value = false
+    form.last_test_ok = false
+    ElMessage.error(errMsg(e, 'WebDAV 连接测试失败'))
+  } finally {
+    testing.value = false
+  }
+}
+
+const testSavedWebDAV = async () => {
+  if (testing.value || testCooldown.value > 0) return
+  testing.value = true
+  try {
+    const { data } = await api.post('/api/backup/webdav/test', {
+      url: form.url,
+      username: form.username,
+      password: '',
+      root_dir: form.root_dir,
+    })
+    if (data?.ok) {
+      form.last_test_ok = true
+      const lat = data.latency_ms || data.elapsed_ms || 0
+      testLatency.value = lat
+      form.last_test_ms = lat
+      form.last_test_at = data.tested_at || (Date.now() / 1000)
+      startTestCooldown(5)
+      saveOk(`WebDAV 连接正常（耗时 ${lat}ms）`, data.message || '读写删权限已全部验证通过')
+    } else {
+      form.last_test_ok = false
+      ElMessage.error(data?.message || 'WebDAV 连接测试未通过')
+    }
+  } catch (e) {
     form.last_test_ok = false
     ElMessage.error(errMsg(e, 'WebDAV 连接测试失败'))
   } finally {
@@ -297,19 +364,40 @@ const exportToWebDAV = async (bundleOpt) => {
     ElMessage.warning('请先在下方配置 WebDAV 并测试连接成功后再执行备份')
     return
   }
-  exporting.value = true
+  let password = ''
   try {
+    if (bundleOpt?.include_credentials) {
+      const res = await ElMessageBox.prompt(
+        '迁移包将包含 115 Cookie、TG Session、加密密钥与 Web 登录密码哈希。请输入当前登录密码确认上传：',
+        '安全验证',
+        {
+          inputType: 'password',
+          confirmButtonText: '验证并上传',
+          cancelButtonText: '取消',
+          inputPlaceholder: '请输入当前 Web 登录密码',
+        },
+      )
+      password = (res?.value || '').trim()
+      if (!password) {
+        ElMessage.warning('请输入当前登录密码后再导出含凭据迁移包')
+        return
+      }
+    }
+    exporting.value = true
     const { data } = await api.post('/api/backup/webdav/export_now', {
       meta_mode: bundleOpt?.meta_mode || 'nfo',
       slim_db: bundleOpt?.slim_db ?? true,
       include_credentials: !!bundleOpt?.include_credentials,
-    })
+      password,
+    }, { timeout: 600000 })
     const pruneMsg = data.pruned > 0 ? `，已自动清理 ${data.pruned} 份旧备份` : ''
     saveOk('WebDAV 上传完成', `${data.filename}（${fmtSize(data.bytes)}）上传成功${pruneMsg}`)
     emit('backup-done')
     await loadConfig()
   } catch (e) {
-    ElMessage.error(errMsg(e, '上传至 WebDAV 失败'))
+    if (e !== 'cancel' && e?.message !== 'cancel') {
+      ElMessage.error(errMsg(e, '上传至 WebDAV 失败'))
+    }
   } finally {
     exporting.value = false
   }

@@ -20,7 +20,7 @@ _RES_RULES = (
 )
 
 _SOURCE_RULES = (
-    (re.compile(r"(remux|blu-?ray|原盘)", re.I), "REMUX", 3),
+    (re.compile(r"(remux|blu-?ray|bdmv|原盘|\.iso\b)", re.I), "REMUX", 3),
     (re.compile(r"(web-?dl|webrip|web)", re.I), "WEB", 2),
     (re.compile(r"(hdtv)", re.I), "HDTV", 1),
 )

@@ -80,7 +80,13 @@
             placeholder="socks5://127.0.0.1:1080 或 http://127.0.0.1:7890（仅 TG 流量走代理，留空直连）"
             :title="f.proxy === SECRET_MASK ? '已配置代理（显示为掩码）：清空后输入新地址可更换' : ''"
           />
-          <el-button :loading="proxyTesting" @click="testProxy">测试代理</el-button>
+          <el-button
+            :loading="proxyTesting"
+            :disabled="proxyCooldown > 0"
+            @click="testProxy"
+          >
+            {{ proxyCooldown > 0 ? `已测试 (${proxyCooldown}s)` : '测试代理' }}
+          </el-button>
         </div>
         <div class="tip" style="width: 100%">
           国内部署必填：所有 TG 流量（频道抓取/补漏/按钮解析/通知/Bot 指令）都走此代理，
@@ -161,7 +167,7 @@
       <el-form-item label="空间不足自动暂停">
         <div class="switch-row">
           <el-switch v-model="f.space_guard_enabled" />
-          <span class="tip">115 使用率 ≥90%（或剩余 &lt;10GB）时自动暂停转存队列：本条标记「跳过」且不再自动重试，后续任务保留排队、不判失败；回落到 88% 以下且剩余 ≥10GB 时自动恢复；关闭后不做空间预检</span>
+          <span class="tip">剩余空间 &lt;10GB 或使用率 ≥90% 时暂停转存（当前任务标记跳过，其余保留排队）；空间恢复至 &lt;88% 且 ≥10GB 后自动继续</span>
         </div>
       </el-form-item>
     </div>
@@ -172,6 +178,7 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { api, errMsg, saveOk, SECRET_MASK } from '../../api'
+import { useCooldown } from '../../composables/useCooldown'
 
 const props = defineProps({
   f: {
@@ -244,11 +251,15 @@ const onToggleShareTransfer = (val) => {
 
 // 代理测试
 const proxyTesting = ref(false)
+const { cooldown: proxyCooldown, startCooldown: startProxyCooldown } = useCooldown(5)
 const testProxy = async () => {
+  if (proxyTesting.value || proxyCooldown.value > 0) return
   proxyTesting.value = true
   try {
     const { data } = await api.post('/api/settings/proxy/test', { proxy: props.f.proxy })
-    saveOk('代理可用', data.detail)
+    startProxyCooldown(5)
+    const lat = data.latency_ms !== undefined && data.latency_ms !== null ? `（耗时 ${data.latency_ms}ms）` : ''
+    saveOk(`代理可用${lat}`, data.detail)
   } catch (e) {
     ElMessage.error(errMsg(e))
   } finally {
