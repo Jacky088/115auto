@@ -49,7 +49,7 @@
         <el-table-column label="最低画质" width="124">
           <template #default="{ row }">
             <el-tooltip :disabled="qualityPolicyOn" content="需先在「系统设置 → 洗版升级」开启质量策略" placement="top" effect="dark">
-              <el-select :model-value="row.min_quality || ''" size="small" fit-input-width
+              <el-select :model-value="row.min_quality || ''" size="small"
                          :disabled="!qualityPolicyOn"
                          @change="(v) => setMinQuality(row, v)">
                 <el-option v-for="o in QUALITY_OPTS" :key="o.value" :label="o.label" :value="o.value" />

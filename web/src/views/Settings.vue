@@ -504,8 +504,8 @@ const validateForm = () => {
   // 6. 洗版升级必须填写旧版归档目录
   if (f.value.wash_enabled) {
     const dir = String(f.value.wash_archive_dir || '').trim()
-    if (!dir.startsWith('/') || dir.split('/').includes('..')) {
-      ElMessage.warning('开启「洗版升级」需填写以 / 开头的旧版归档目录，如 /媒体库/洗版归档')
+    if (!dir || dir === '/' || !dir.startsWith('/') || dir.split('/').includes('..')) {
+      ElMessage.warning('开启「洗版升级」必须先选择旧版归档目录（不能为根目录 /）')
       activeTab.value = 'wash'
       return false
     }

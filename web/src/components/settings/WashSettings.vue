@@ -54,10 +54,13 @@
       <el-form-item label="洗版升级">
         <div class="switch-row">
           <el-switch v-model="f.wash_enabled" :disabled="!f.quality_policy_enabled" />
-          <span class="tip">同一集出现更高画质时自动转存新版，并把旧版移入下方归档目录（只移动、不删除，可随时取回）</span>
+          <span class="tip">
+            同一集出现更高画质时自动转存新版，并把旧版移入下方归档目录（只移动、不删除，可随时取回）
+            <span v-if="!f.quality_policy_enabled" class="warn-text">（需先开启上方「质量策略」）</span>
+          </span>
         </div>
       </el-form-item>
-      <el-form-item label="旧版归档目录">
+      <el-form-item label="旧版归档目录" :required="!!f.wash_enabled">
         <div class="dir-pick-row">
           <el-button class="dir-btn" @click="washPickerOpen = true">
             <el-icon><FolderOpened /></el-icon>
@@ -65,7 +68,10 @@
           </el-button>
           <el-button v-if="f.wash_archive_dir" text @click="clearArchiveDir">清空</el-button>
         </div>
-        <div class="tip">开启洗版升级（或整理刮削「高画质替换」）必须选择该目录，两处共用同一目录；升级/替换时旧版只会被移入此处，不会删除</div>
+        <div v-if="f.wash_enabled && !f.wash_archive_dir" class="tip-box is-warn" style="width: 100%; margin-top: 6px">
+          ⚠️ 已开启「洗版升级」，请先选择上方「旧版归档目录」，否则无法保存。
+        </div>
+        <div class="tip">开启洗版升级（或整理刮削「高画质替换」）必须先在此选择该目录，两处共用同一目录；升级/替换时旧版只会被移入此处，不会删除</div>
       </el-form-item>
     </div>
 

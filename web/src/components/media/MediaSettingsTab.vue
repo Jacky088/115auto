@@ -55,18 +55,23 @@
           </span>
         </el-form-item>
 
-        <el-form-item v-if="cfg.media_conflict_policy === 'replace_if_better'" label="旧版归档目录" required>
-          <div style="display: flex; align-items: center; gap: 8px; width: 100%">
-            <el-button class="dir-btn" style="max-width: 420px" @click="archivePickerOpen = true">
-              <el-icon><FolderOpened /></el-icon>
-              <span>{{ cfg.wash_archive_dir || '点击选择 115 网盘目录' }}</span>
-            </el-button>
+        <el-form-item v-if="cfg.media_conflict_policy === 'replace_if_better'" label="旧版归档目录">
+          <div v-if="cfg.wash_archive_dir" style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap; width: 100%">
+            <el-tag type="info" effect="plain" size="default">
+              📁 {{ cfg.wash_archive_dir }}
+            </el-tag>
             <el-button link type="primary" size="small" @click="$router.push('/settings?tab=wash')">
-              前往「洗版升级」设置 →
+              前往「系统设置 → 洗版升级」修改 →
+            </el-button>
+          </div>
+          <div v-else class="tip-box is-warn" style="display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; width: 100%">
+            <span>⚠️ 尚未在「系统设置 → 洗版升级」配置旧版归档目录，当前无法启用高画质替换。</span>
+            <el-button type="primary" plain size="small" @click="$router.push('/settings?tab=wash')">
+              前往配置归档目录 →
             </el-button>
           </div>
           <div class="tip-block">
-            与「系统设置 → 洗版升级」共用同一归档目录，修改任意一处同步生效；替换时仅将旧版移入此处，不直接删除。
+            旧版归档目录统一在「系统设置 → 洗版升级」配置；替换时旧版将移入此目录，不直接删除。
           </div>
         </el-form-item>
 
@@ -348,16 +353,14 @@
       <el-button type="primary" size="small" :loading="savingCfg" @click="saveSettings">保存设置</el-button>
     </div>
   </Teleport>
-  <DirPicker v-model="archivePickerOpen" title="选择旧版归档目录" @pick="onArchivePicked" />
   </div>
 </template>
 
 <script setup>
 import { computed, inject, nextTick, ref, watch } from 'vue'
-import { Timer, Lock, Calendar, Plus, FolderOpened } from '@element-plus/icons-vue'
+import { Timer, Lock, Calendar, Plus } from '@element-plus/icons-vue'
 import { api, errMsg, toast } from '../../api'
 import { useUnsavedGuard } from '../../composables/unsavedGuard'
-import DirPicker from '../DirPicker.vue'
 
 const { isMobile } = inject('mediaCtx')
 
@@ -398,7 +401,6 @@ const cfg = ref({
 
 const newFixedTime = ref('')
 const nextRuns = ref([])
-const archivePickerOpen = ref(false)
 
 function isOutsideRiskWindow(hm) {
   if (!cfg.value.risk_schedule_enabled) return false
@@ -412,22 +414,13 @@ const hasOutsideRiskTimes = computed(() =>
   (cfg.value.media_organize_fixed_times || []).some(isOutsideRiskWindow),
 )
 
-function onArchivePicked(path) {
-  const p = String(path || '').trim()
-  if (!p) return
-  if (p === '/') {
-    toast.warning('归档目录不能是网盘根目录，请选择或新建一个子目录')
-    return
-  }
-  cfg.value.wash_archive_dir = p
-}
-
 const SCHEDULE_KEYS = [
   'media_organize_schedule_enabled',
   'media_scrape_schedule_enabled',
   'media_organize_schedule_type',
   'media_organize_schedule_hours',
   'media_organize_fixed_times',
+  'wash_archive_dir',
   'risk_schedule_enabled',
   'risk_schedule_start',
   'risk_schedule_end',
@@ -539,7 +532,7 @@ async function loadSettings() {
 
 async function saveSettings() {
   if (cfg.value.media_conflict_policy === 'replace_if_better' && !String(cfg.value.wash_archive_dir || '').trim()) {
-    toast.warning('选择「高画质替换（旧版移至归档目录）」必须先选择旧版归档目录')
+    toast.warning('请先前往「系统设置 → 洗版升级」配置旧版归档目录')
     return
   }
   if (Number(cfg.value.media_op_delay_min) > Number(cfg.value.media_op_delay_max)) {

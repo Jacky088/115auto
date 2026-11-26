@@ -82,7 +82,6 @@ class MediaSettingsIn(BaseModel):
     media_organize_schedule_type: str | None = None
     media_organize_schedule_hours: int | None = None
     media_organize_fixed_times: list[str] | str | None = None
-    wash_archive_dir: str | None = None
 
 
 class SelectTaskIn(BaseModel):
@@ -223,17 +222,10 @@ def save_settings(body: MediaSettingsIn):
     data = body.model_dump(exclude_none=True)
     if "media_conflict_policy" in data and data["media_conflict_policy"] not in ("skip", "replace_if_better", "keep_both"):
         raise HTTPException(400, "非法冲突处理策略")
-    if "wash_archive_dir" in data:
-        raw_arch = str(data["wash_archive_dir"] or "").strip()
-        if raw_arch:
-            if not raw_arch.startswith("/") or raw_arch == "/" or ".." in raw_arch.split("/"):
-                raise HTTPException(400, "旧版归档目录须为以 / 开头的 115 网盘子目录，不能为根目录 /")
-            raw_arch = "/" + raw_arch.strip("/")
-        data["wash_archive_dir"] = raw_arch
     eff_policy = data.get("media_conflict_policy", db.get_setting("media_conflict_policy", "skip"))
-    eff_arch = str(data.get("wash_archive_dir", db.get_setting("wash_archive_dir", "")) or "").strip()
-    if eff_policy == "replace_if_better" and not eff_arch:
-        raise HTTPException(400, "选择「高画质替换（旧版移至归档目录）」必须先选择旧版归档目录")
+    eff_arch = str(db.get_setting("wash_archive_dir", "") or "").strip()
+    if eff_policy == "replace_if_better" and not eff_arch.strip("/"):
+        raise HTTPException(400, "选择「高画质替换」前，请先在「系统设置 → 洗版升级」配置旧版归档目录")
     for tpl_key, tpl_kind in (("media_organize_template_movie", "movie"), ("media_organize_template_tv", "tv")):
         if tpl_key in data:
             try:

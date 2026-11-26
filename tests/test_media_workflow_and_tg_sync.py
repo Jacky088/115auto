@@ -344,16 +344,16 @@ def test_media_api_routes_and_bot_callbacks(tmp_path):
         assert r_stop_org.status_code == 400
         assert r_stop_scr.status_code == 400
 
-        # 2) 配置读写与范围校验（高画质替换未配归档目录时拒绝 400）
+        # 2) 配置读写与范围校验（高画质替换未在系统设置配归档目录时拒绝 400）
+        db.set_setting("wash_archive_dir", "")
         r_cfg_bad = tc.put("/api/media/settings", json={
             "media_conflict_policy": "replace_if_better",
-            "wash_archive_dir": "",
         }, headers=headers)
         assert r_cfg_bad.status_code == 400
+        db.set_setting("wash_archive_dir", "/旧版归档")
         r_cfg = tc.put("/api/media/settings", json={
             "media_append_tmdb_tag": True,
             "media_conflict_policy": "replace_if_better",
-            "wash_archive_dir": "/旧版归档",
             "media_scrape_confidence_threshold": 88,
         }, headers=headers)
         assert r_cfg.status_code == 200
